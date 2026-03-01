@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-xmpp-bridge"
+version = "0.1.0"
+description = "XMPP bridge for Claude Code — route messages between Jabber and Claude sessions"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "TeTeHacko" }]
+keywords = ["xmpp", "claude", "bridge", "jabber", "notifications"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+]
+dependencies = ["slixmpp>=1.8"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+claude-xmpp-bridge = "claude_xmpp_bridge.cli:bridge_main"
+claude-xmpp-client = "claude_xmpp_bridge.cli:client_main"
+claude-xmpp-notify = "claude_xmpp_bridge.cli:notify_main"
+claude-xmpp-ask = "claude_xmpp_bridge.cli:ask_main"
+
+[project.urls]
+Homepage = "https://github.com/TeTeHacko/claude-xmpp-bridge"
+Repository = "https://github.com/TeTeHacko/claude-xmpp-bridge"
+Issues = "https://github.com/TeTeHacko/claude-xmpp-bridge/issues"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "S", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

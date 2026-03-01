@@ -1,0 +1,22 @@
+# Polskie komunikaty dla claude-xmpp-bridge
+# Użycie: claude-xmpp-bridge --messages messages_pl.toml
+
+bridge_started = "XMPP Bridge uruchomiony."
+bridge_stopped = "XMPP Bridge zatrzymany."
+no_sessions = "Brak aktywnych sesji Claude."
+session_list_header = "Sesje Claude:"
+active_marker = "* = aktywna sesja"
+sent = "wysłano"
+delivery_failed = "Dostarczenie do [{project}] nie powiodło się"
+no_backend = "Sesja [{project}] nie ma multipleksera — nie można dostarczyć wiadomości"
+session_not_found = "Sesja #{index} nie znaleziona. Wpisz /list."
+no_active_session = "Brak aktywnej sesji. Wpisz /list."
+unknown_command = "Nieznane polecenie: {cmd}\nWpisz /help po pomoc."
+usage_send_to = "Użycie: {cmd} <wiadomość>"
+help_text = """Polecenia XMPP Bridge:
+  /list, /l    - lista sesji
+  /N wiadomość - wyślij do sesji #N
+  /help        - ta pomoc
+  tekst        - wyślij do ostatniej aktywnej sesji"""
+read_only_tag = "tylko odczyt"
+stale_sessions_cleaned = "Wyczyszczono {count} nieaktywnych sesji"

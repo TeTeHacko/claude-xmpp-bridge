@@ -1,0 +1,22 @@
+# English messages for claude-xmpp-bridge (reference — these are the built-in defaults)
+# Usage: claude-xmpp-bridge --messages messages_en.toml
+
+bridge_started = "XMPP Bridge started."
+bridge_stopped = "XMPP Bridge stopped."
+no_sessions = "No active Claude sessions."
+session_list_header = "Claude sessions:"
+active_marker = "* = active session"
+sent = "sent"
+delivery_failed = "Delivery to [{project}] failed"
+no_backend = "Session [{project}] has no multiplexer — cannot deliver message"
+session_not_found = "Session #{index} not found. Type /list."
+no_active_session = "No active session. Type /list."
+unknown_command = "Unknown command: {cmd}\nType /help for help."
+usage_send_to = "Usage: {cmd} <message>"
+help_text = """XMPP Bridge commands:
+  /list, /l  - list sessions
+  /N message - send to session #N
+  /help      - this help
+  text       - send to last active session"""
+read_only_tag = "read-only"
+stale_sessions_cleaned = "Cleaned {count} stale session(s)"

@@ -1,0 +1,12 @@
+[Unit]
+Description=XMPP Bridge for Claude Code
+After=network.target
+
+[Service]
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=%h/.local/bin/claude-xmpp-bridge
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

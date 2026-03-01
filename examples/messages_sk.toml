@@ -1,0 +1,22 @@
+# Slovenské správy pre claude-xmpp-bridge
+# Použitie: claude-xmpp-bridge --messages messages_sk.toml
+
+bridge_started = "XMPP Bridge spustený."
+bridge_stopped = "XMPP Bridge ukončený."
+no_sessions = "Žiadne aktívne Claude sessions."
+session_list_header = "Claude sessions:"
+active_marker = "* = aktívna session"
+sent = "odoslané"
+delivery_failed = "Doručenie do [{project}] zlyhalo"
+no_backend = "Session [{project}] nemá multiplexer — správu nie je možné doručiť"
+session_not_found = "Session #{index} neexistuje. Napíš /list."
+no_active_session = "Žiadna aktívna session. Napíš /list."
+unknown_command = "Neznámy príkaz: {cmd}\nNapíš /help pre pomoc."
+usage_send_to = "Použitie: {cmd} <správa>"
+help_text = """XMPP Bridge príkazy:
+  /list, /l  - zoznam sessions
+  /N správa  - pošli do session #N
+  /help      - táto pomoc
+  text       - pošli do poslednej aktívnej session"""
+read_only_tag = "⚠ iba čítanie"
+stale_sessions_cleaned = "Vyčistených {count} neaktívnych sessions"

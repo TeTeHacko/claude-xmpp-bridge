@@ -1,0 +1,228 @@
+"""Layered configuration: CLI args > env vars > TOML config > defaults."""
+
+from __future__ import annotations
+
+import logging
+import os
+import stat
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+CONFIG_DIR = Path.home() / ".config" / "claude-xmpp-bridge"
+CONFIG_FILE = CONFIG_DIR / "config.toml"
+LEGACY_CREDENTIALS_FILE = Path.home() / ".config" / "xmpp-notify" / "credentials"
+DEFAULT_SOCKET_PATH = Path.home() / ".claude" / "bridge.sock"
+DEFAULT_DB_PATH = Path.home() / ".claude" / "bridge.db"
+
+
+@dataclass(frozen=True)
+class Config:
+    """Full bridge configuration."""
+
+    jid: str
+    password: str
+    recipient: str
+    socket_path: Path
+    db_path: Path
+    messages_file: Path | None
+
+
+@dataclass(frozen=True)
+class NotifyConfig:
+    """Subset of config for notify/ask commands."""
+
+    jid: str
+    password: str
+    recipient: str
+
+
+def _read_toml(path: Path) -> dict[str, object]:
+    """Read a TOML file, returning empty dict if it doesn't exist."""
+    if not path.is_file():
+        return {}
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def _check_permissions(path: Path) -> None:
+    """Warn if credentials file has permissions more open than 600."""
+    try:
+        mode = path.stat().st_mode
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            log.warning(
+                "Credentials file %s has permissions %o, should be 600",
+                path,
+                stat.S_IMODE(mode),
+            )
+    except OSError:
+        pass
+
+
+def _resolve_credentials(
+    cli_credentials: str | None,
+    env_credentials: str | None,
+    toml_credentials: str | None,
+) -> Path:
+    """Find the credentials file path from config layers."""
+    for source in (cli_credentials, env_credentials, toml_credentials):
+        if source:
+            return Path(source).expanduser()
+
+    # Default locations
+    new_path = CONFIG_DIR / "credentials"
+    if new_path.is_file():
+        return new_path
+
+    # Legacy fallback
+    if LEGACY_CREDENTIALS_FILE.is_file():
+        return LEGACY_CREDENTIALS_FILE
+
+    raise FileNotFoundError(
+        "Credentials file not found. Create one at:\n"
+        f"  {new_path}\n"
+        "or (legacy):\n"
+        f"  {LEGACY_CREDENTIALS_FILE}\n"
+        "with your XMPP password, then: chmod 600 <file>"
+    )
+
+
+def _read_password(credentials_path: Path) -> str:
+    """Read password from credentials file."""
+    _check_permissions(credentials_path)
+    text = credentials_path.read_text().strip()
+    if not text:
+        raise ValueError(f"Credentials file is empty: {credentials_path}")
+    return text
+
+
+def load_config(
+    *,
+    cli_jid: str | None = None,
+    cli_recipient: str | None = None,
+    cli_credentials: str | None = None,
+    cli_socket_path: str | None = None,
+    cli_db_path: str | None = None,
+    cli_messages: str | None = None,
+) -> Config:
+    """Load full bridge config with layered precedence: CLI > env > TOML > defaults."""
+    toml = _read_toml(CONFIG_FILE)
+
+    # JID
+    jid = (
+        cli_jid
+        or os.environ.get("CLAUDE_XMPP_JID")
+        or _toml_str(toml, "jid")
+    )
+    if not jid:
+        raise SystemExit(
+            "Error: XMPP JID not configured.\n"
+            "Set it via:\n"
+            "  --jid flag\n"
+            "  CLAUDE_XMPP_JID environment variable\n"
+            f"  jid = \"...\" in {CONFIG_FILE}"
+        )
+
+    # Recipient
+    recipient = (
+        cli_recipient
+        or os.environ.get("CLAUDE_XMPP_RECIPIENT")
+        or _toml_str(toml, "recipient")
+    )
+    if not recipient:
+        raise SystemExit(
+            "Error: XMPP recipient not configured.\n"
+            "Set it via:\n"
+            "  --recipient flag\n"
+            "  CLAUDE_XMPP_RECIPIENT environment variable\n"
+            f"  recipient = \"...\" in {CONFIG_FILE}"
+        )
+
+    # Password
+    credentials_path = _resolve_credentials(
+        cli_credentials,
+        os.environ.get("CLAUDE_XMPP_CREDENTIALS"),
+        _toml_str(toml, "credentials"),
+    )
+    password = _read_password(credentials_path)
+
+    # Paths
+    socket_path = Path(
+        cli_socket_path
+        or os.environ.get("CLAUDE_XMPP_SOCKET")
+        or _toml_str(toml, "socket_path")
+        or str(DEFAULT_SOCKET_PATH)
+    ).expanduser()
+
+    db_path = Path(
+        cli_db_path
+        or os.environ.get("CLAUDE_XMPP_DB")
+        or _toml_str(toml, "db_path")
+        or str(DEFAULT_DB_PATH)
+    ).expanduser()
+
+    # Messages file
+    messages_raw = (
+        cli_messages
+        or os.environ.get("CLAUDE_XMPP_MESSAGES")
+        or _toml_str(toml, "messages_file")
+    )
+    messages_file = Path(messages_raw).expanduser() if messages_raw else None
+
+    return Config(
+        jid=jid,
+        password=password,
+        recipient=recipient,
+        socket_path=socket_path,
+        db_path=db_path,
+        messages_file=messages_file,
+    )
+
+
+def load_notify_config(
+    *,
+    cli_jid: str | None = None,
+    cli_recipient: str | None = None,
+    cli_credentials: str | None = None,
+) -> NotifyConfig:
+    """Load notify/ask config (subset without socket/db paths)."""
+    toml = _read_toml(CONFIG_FILE)
+
+    jid = (
+        cli_jid
+        or os.environ.get("CLAUDE_XMPP_JID")
+        or _toml_str(toml, "jid")
+    )
+    if not jid:
+        raise SystemExit(
+            "Error: XMPP JID not configured.\n"
+            "Set it via --jid, CLAUDE_XMPP_JID, or in config.toml"
+        )
+
+    recipient = (
+        cli_recipient
+        or os.environ.get("CLAUDE_XMPP_RECIPIENT")
+        or _toml_str(toml, "recipient")
+    )
+    if not recipient:
+        raise SystemExit(
+            "Error: XMPP recipient not configured.\n"
+            "Set it via --recipient, CLAUDE_XMPP_RECIPIENT, or in config.toml"
+        )
+
+    credentials_path = _resolve_credentials(
+        cli_credentials,
+        os.environ.get("CLAUDE_XMPP_CREDENTIALS"),
+        _toml_str(toml, "credentials"),
+    )
+    password = _read_password(credentials_path)
+
+    return NotifyConfig(jid=jid, password=password, recipient=recipient)
+
+
+def _toml_str(toml: dict[str, object], key: str) -> str | None:
+    """Get a string value from TOML dict, or None."""
+    val = toml.get(key)
+    return str(val) if val is not None else None
