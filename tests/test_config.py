@@ -9,6 +9,7 @@ import pytest
 
 from claude_xmpp_bridge import config
 from claude_xmpp_bridge.config import (
+    Config,
     NotifyConfig,
     _check_permissions,
     _read_password,
@@ -17,6 +18,7 @@ from claude_xmpp_bridge.config import (
     _toml_str,
     load_config,
     load_notify_config,
+    validate_config,
 )
 
 # ---------------------------------------------------------------------------
@@ -838,3 +840,84 @@ class TestPasswordStripping:
         cred.chmod(0o600)
 
         assert _read_password(cred) == "my-secret"
+
+
+# ---------------------------------------------------------------------------
+# 13. validate_config pre-flight checks
+# ---------------------------------------------------------------------------
+
+
+class TestValidateConfig:
+    def _make_config(self, tmp_path, **overrides):
+        defaults = {
+            "jid": "bot@example.com",
+            "password": "secret",
+            "recipient": "user@example.com",
+            "socket_path": tmp_path / "bridge.sock",
+            "db_path": tmp_path / "bridge.db",
+            "messages_file": None,
+        }
+        defaults.update(overrides)
+        return Config(**defaults)
+
+    def test_valid_config_passes(self, tmp_path):
+        cfg = self._make_config(tmp_path)
+        validate_config(cfg)  # should not raise
+
+    def test_jid_without_at_raises(self, tmp_path):
+        cfg = self._make_config(tmp_path, jid="invalid-jid")
+        with pytest.raises(SystemExit, match="missing @"):
+            validate_config(cfg)
+
+    def test_recipient_without_at_raises(self, tmp_path):
+        cfg = self._make_config(tmp_path, recipient="invalid-recipient")
+        with pytest.raises(SystemExit, match="missing @"):
+            validate_config(cfg)
+
+    def test_both_jid_and_recipient_invalid(self, tmp_path):
+        cfg = self._make_config(tmp_path, jid="bad", recipient="bad")
+        with pytest.raises(SystemExit, match="Configuration errors") as exc_info:
+            validate_config(cfg)
+        msg = str(exc_info.value)
+        assert "JID" in msg
+        assert "Recipient" in msg
+
+    def test_nonexistent_socket_parent_raises(self, tmp_path):
+        cfg = self._make_config(tmp_path, socket_path=tmp_path / "nonexistent" / "bridge.sock")
+        with pytest.raises(SystemExit, match="Socket path parent"):
+            validate_config(cfg)
+
+    def test_nonexistent_db_parent_raises(self, tmp_path):
+        cfg = self._make_config(tmp_path, db_path=tmp_path / "nonexistent" / "bridge.db")
+        with pytest.raises(SystemExit, match="Database path parent"):
+            validate_config(cfg)
+
+    def test_nonexistent_messages_file_raises(self, tmp_path):
+        cfg = self._make_config(tmp_path, messages_file=tmp_path / "nonexistent.toml")
+        with pytest.raises(SystemExit, match="Messages file does not exist"):
+            validate_config(cfg)
+
+    def test_existing_messages_file_passes(self, tmp_path):
+        msgs = tmp_path / "messages.toml"
+        msgs.write_text("")
+        cfg = self._make_config(tmp_path, messages_file=msgs)
+        validate_config(cfg)  # should not raise
+
+    def test_warns_without_screen_or_tmux(self, monkeypatch, tmp_path, caplog):
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+        cfg = self._make_config(tmp_path)
+
+        with caplog.at_level("WARNING", logger="claude_xmpp_bridge.config"):
+            validate_config(cfg)
+
+        assert "screen" in caplog.text
+        assert "tmux" in caplog.text
+
+    def test_no_warning_with_screen(self, monkeypatch, tmp_path, caplog):
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/screen" if cmd == "screen" else None)
+        cfg = self._make_config(tmp_path)
+
+        with caplog.at_level("WARNING", logger="claude_xmpp_bridge.config"):
+            validate_config(cfg)
+
+        assert "screen" not in caplog.text

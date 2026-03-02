@@ -47,7 +47,7 @@ def bridge_main() -> None:
 
     _setup_logging(args.verbose, args.quiet)
 
-    from .config import load_config
+    from .config import load_config, validate_config
 
     config = load_config(
         cli_jid=args.jid,
@@ -57,6 +57,7 @@ def bridge_main() -> None:
         cli_db_path=args.db_path,
         cli_messages=args.messages,
     )
+    validate_config(config)
 
     from .bridge import XMPPBridge
 
@@ -81,7 +82,11 @@ def client_main() -> None:
     p_send.add_argument("message", nargs="*", help="Message text (reads stdin if omitted)")
 
     # register
-    p_reg = sub.add_parser("register", help="Register a session")
+    p_reg = sub.add_parser(
+        "register",
+        help="Register a session",
+        epilog='JSON: {"session_id":"…","sty":"…","window":"…","project":"…","backend":"screen|tmux|none"}',
+    )
     p_reg.add_argument("json_data", help="Session JSON data")
 
     # unregister
@@ -110,7 +115,9 @@ def client_main() -> None:
         elif not sys.stdin.isatty():
             message = sys.stdin.read().strip()
         else:
-            print("Error: no message", file=sys.stderr)
+            print("Error: no message provided", file=sys.stderr)
+            print("Usage: claude-xmpp-client send MESSAGE", file=sys.stderr)
+            print("       echo MESSAGE | claude-xmpp-client send", file=sys.stderr)
             sys.exit(1)
 
         if not message:

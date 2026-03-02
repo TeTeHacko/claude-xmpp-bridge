@@ -36,11 +36,27 @@ claude-xmpp-bridge = "claude_xmpp_bridge.cli:bridge_main"
 claude-xmpp-client = "claude_xmpp_bridge.cli:client_main"
 claude-xmpp-notify = "claude_xmpp_bridge.cli:notify_main"
 claude-xmpp-ask = "claude_xmpp_bridge.cli:ask_main"
+claude-xmpp-bridge-setup = "claude_xmpp_bridge.setup:setup_main"
 
 [project.urls]
 Homepage = "https://github.com/TeTeHacko/claude-xmpp-bridge"
 Repository = "https://github.com/TeTeHacko/claude-xmpp-bridge"
 Issues = "https://github.com/TeTeHacko/claude-xmpp-bridge/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_xmpp_bridge"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"examples/hooks/session-start-title.sh" = "claude-xmpp-bridge/hooks/session-start-title.sh"
+"examples/hooks/session-start-register.sh" = "claude-xmpp-bridge/hooks/session-start-register.sh"
+"examples/hooks/session-end.sh" = "claude-xmpp-bridge/hooks/session-end.sh"
+"examples/hooks/notification.sh" = "claude-xmpp-bridge/hooks/notification.sh"
+"examples/hooks/task-completed.sh" = "claude-xmpp-bridge/hooks/task-completed.sh"
+"examples/hooks/stop.sh" = "claude-xmpp-bridge/hooks/stop.sh"
+"examples/hooks/permission-ask.sh" = "claude-xmpp-bridge/hooks/permission-ask.sh"
+"examples/hooks/format-location.sh" = "claude-xmpp-bridge/hooks/format-location.sh"
+"examples/hooks/settings.json" = "claude-xmpp-bridge/hooks/settings.json"
+"examples/systemd/claude-xmpp-bridge.service" = "claude-xmpp-bridge/systemd/claude-xmpp-bridge.service"
 
 [tool.ruff]
 line-length = 120

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import stat
 import tomllib
 from dataclasses import dataclass
@@ -220,6 +221,37 @@ def load_notify_config(
     password = _read_password(credentials_path)
 
     return NotifyConfig(jid=jid, password=password, recipient=recipient)
+
+
+def validate_config(cfg: Config) -> None:
+    """Pre-flight validation of config values. Exits on errors, logs warnings."""
+    errors: list[str] = []
+
+    if "@" not in cfg.jid:
+        errors.append(f"JID {cfg.jid!r} does not look like a valid XMPP address (missing @)")
+    if "@" not in cfg.recipient:
+        errors.append(f"Recipient {cfg.recipient!r} does not look like a valid XMPP address (missing @)")
+
+    socket_parent = cfg.socket_path.parent
+    if not socket_parent.is_dir():
+        errors.append(f"Socket path parent directory does not exist: {socket_parent}")
+    elif not os.access(socket_parent, os.W_OK):
+        errors.append(f"Socket path parent directory is not writable: {socket_parent}")
+
+    db_parent = cfg.db_path.parent
+    if not db_parent.is_dir():
+        errors.append(f"Database path parent directory does not exist: {db_parent}")
+    elif not os.access(db_parent, os.W_OK):
+        errors.append(f"Database path parent directory is not writable: {db_parent}")
+
+    if cfg.messages_file and not cfg.messages_file.is_file():
+        errors.append(f"Messages file does not exist: {cfg.messages_file}")
+
+    if errors:
+        raise SystemExit("Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors))
+
+    if not shutil.which("screen") and not shutil.which("tmux"):
+        log.warning("Neither 'screen' nor 'tmux' found in PATH — message delivery will fail")
 
 
 def _toml_str(toml: dict[str, object], key: str) -> str | None:

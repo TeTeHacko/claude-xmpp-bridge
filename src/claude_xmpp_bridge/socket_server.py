@@ -34,7 +34,12 @@ class SocketServer:
         """Start the socket server. Exits if another bridge is running."""
         if self.socket_path.exists():
             if self._is_socket_alive():
-                log.error("Another bridge is already running on %s", self.socket_path)
+                log.error(
+                    "Another bridge is already running on %s. "
+                    "If the previous process crashed, remove the stale socket: rm %s",
+                    self.socket_path,
+                    self.socket_path,
+                )
                 sys.exit(1)
             # Stale socket
             self.socket_path.unlink()

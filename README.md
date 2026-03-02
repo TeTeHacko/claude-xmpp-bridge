@@ -2,6 +2,25 @@
 
 XMPP bridge for [Claude Code](https://claude.ai/claude-code) — route messages between your Jabber/XMPP client and Claude Code sessions running in GNU Screen or tmux.
 
+## Quick Start
+
+```bash
+# 1. Install
+pip install git+https://github.com/TeTeHacko/claude-xmpp-bridge.git
+
+# 2. Run the setup wizard
+claude-xmpp-bridge-setup
+
+# 3. Start the bridge
+systemctl --user start claude-xmpp-bridge
+
+# 4. Enable on boot
+systemctl --user enable claude-xmpp-bridge
+
+# 5. Test
+claude-xmpp-notify "Hello from bridge!"
+```
+
 ## Features
 
 - **Persistent XMPP bot** — stays connected, routes messages to/from Claude sessions
@@ -12,6 +31,16 @@ XMPP bridge for [Claude Code](https://claude.ai/claude-code) — route messages 
 - **Configurable messages** — English default, easily translatable (Czech included)
 - **SQLite persistence** — sessions survive bridge restarts
 - **Secure** — credentials file permission checks, input validation, socket permissions
+- **Setup wizard** — interactive `claude-xmpp-bridge-setup` configures everything
+
+## System Dependencies
+
+| Dependency | Required | Purpose |
+|------------|----------|---------|
+| Python 3.11+ | yes | Runtime |
+| `jq` | yes | JSON processing in hook scripts |
+| GNU Screen or tmux | yes | Terminal multiplexer for message delivery |
+| systemd (user) | optional | Service management |
 
 ## Installation
 
@@ -36,7 +65,23 @@ pip install -e ".[dev]"
 
 ## Configuration
 
-### Credentials
+### Setup wizard (recommended)
+
+```bash
+claude-xmpp-bridge-setup
+```
+
+The wizard walks through all configuration steps: credentials, config file, XMPP test, hook installation, systemd service, and notification switches.
+
+Use `--test-only` to just verify XMPP connectivity:
+
+```bash
+claude-xmpp-bridge-setup --test-only
+```
+
+### Manual configuration
+
+#### Credentials
 
 Create a credentials file with your XMPP bot password:
 
@@ -46,7 +91,7 @@ echo 'YOUR_XMPP_PASSWORD' > ~/.config/claude-xmpp-bridge/credentials
 chmod 600 ~/.config/claude-xmpp-bridge/credentials
 ```
 
-### Config file (optional)
+#### Config file (optional)
 
 Create `~/.config/claude-xmpp-bridge/config.toml`:
 
@@ -59,7 +104,7 @@ recipient = "you@example.com"
 # messages_file = "/path/to/messages_cs.toml"  # optional
 ```
 
-### Environment variables
+#### Environment variables
 
 | Variable | Description |
 |----------|-------------|
@@ -130,6 +175,77 @@ See [`examples/hooks/`](examples/hooks/) for Claude Code hook configurations tha
 - Ask for permission approval via XMPP
 - Send task completion notices
 
+### Hook Input JSON Schemas
+
+Each hook receives JSON on stdin. Here are the fields available per event:
+
+#### SessionStart
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/home/user/project"
+}
+```
+
+#### SessionEnd
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/home/user/project"
+}
+```
+
+#### Notification
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/home/user/project",
+  "notification_type": "tool_error",
+  "title": "Error",
+  "message": "Command failed with exit code 1"
+}
+```
+
+#### PermissionRequest
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/home/user/project",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rm -rf /tmp/build",
+    "description": "Clean build directory"
+  },
+  "permission_suggestions": [
+    {"type": "allow_tool", "tool_name": "Bash", "prefix": "rm -rf /tmp/build"}
+  ]
+}
+```
+
+#### TaskCompleted
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/home/user/project",
+  "task_subject": "Fix authentication bug"
+}
+```
+
+#### Stop
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/home/user/project",
+  "last_assistant_message": "Done! All tests pass."
+}
+```
+
 ## Custom messages
 
 Copy `examples/messages_cs.toml` and customize:
@@ -138,37 +254,49 @@ Copy `examples/messages_cs.toml` and customize:
 claude-xmpp-bridge --messages /path/to/my_messages.toml
 ```
 
-## Troubleshooting
+## Debugging
 
-### Bridge won't start
+### Check bridge status
 
-- **Missing credentials**: Ensure `~/.config/claude-xmpp-bridge/credentials` exists with `chmod 600`
-- **Missing JID config**: Set `jid` and `recipient` via config file, environment variables, or CLI flags
-- **Socket already in use**: A stale `~/.claude/bridge.sock` may remain after a crash — delete it manually
+```bash
+systemctl --user status claude-xmpp-bridge
+```
 
-### Messages not delivered
+### View logs
 
-- **XMPP auth failure**: Check JID and password; run with `--verbose` to see XMPP connection details
-- **Firewall blocking XMPP**: Ensure ports 5222 (client) and 5269 (server) are open, or that DNS SRV records resolve
-- **Connection timeout**: The bridge logs `XMPP connection timeout (30s)` — verify the server is reachable
+```bash
+journalctl --user -u claude-xmpp-bridge -f
+```
 
-### Socket permission denied
+### Test XMPP connectivity
 
-- The bridge socket (`~/.claude/bridge.sock`) is created with the user's umask
-- Ensure the client runs as the same user as the bridge
+```bash
+claude-xmpp-bridge-setup --test-only
+```
 
-### Verbose / quiet modes
+### Verbose logging
 
 ```bash
 # Debug logging (all components)
 claude-xmpp-bridge --verbose
 
-# Only warnings and errors
-claude-xmpp-bridge --quiet
-
-# Same flags work for notify and ask
+# Same for notify and ask
 claude-xmpp-notify --verbose "test"
 ```
+
+### Inspect socket communication
+
+```bash
+echo '{"cmd":"send","message":"test"}' | socat - UNIX-CONNECT:~/.claude/bridge.sock
+```
+
+### Common issues
+
+- **Bridge won't start — "already running"**: A stale socket may remain after a crash. Remove it: `rm ~/.claude/bridge.sock`
+- **Missing credentials**: Run `claude-xmpp-bridge-setup` or create `~/.config/claude-xmpp-bridge/credentials` manually
+- **XMPP auth failure**: Check JID and password; run with `--verbose` to see connection details
+- **Messages not delivered**: Ensure ports 5222/5269 are open, or that DNS SRV records resolve
+- **Socket permission denied**: Ensure the client runs as the same user as the bridge
 
 ## Development
 

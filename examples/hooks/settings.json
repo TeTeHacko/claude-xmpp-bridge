@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "test -n \"$STY\" && screen -S \"$STY\" -p \"$WINDOW\" -X title \"⚡$(jq -r '.cwd | split(\"/\") | last')\""
+            "command": "$HOME/.claude/hooks/session-start-title.sh"
           }
         ]
       },
@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "INPUT=\"$(cat)\" && if [ -n \"${STY:-}\" ]; then BACKEND=screen MUX_ID=\"$STY\" MUX_WIN=\"${WINDOW:-0}\"; elif [ -n \"${TMUX:-}\" ]; then BACKEND=tmux MUX_ID=\"${TMUX_PANE:-}\" MUX_WIN=\"\"; else BACKEND=none MUX_ID=\"\" MUX_WIN=\"\"; fi && claude-xmpp-client register \"$(echo \"$INPUT\" | jq -c --arg sty \"$MUX_ID\" --arg win \"$MUX_WIN\" --arg backend \"$BACKEND\" '{session_id: .session_id, sty: $sty, window: $win, project: .cwd, backend: $backend}')\"",
+            "command": "$HOME/.claude/hooks/session-start-register.sh",
             "async": true
           }
         ]
@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SID=\"$(jq -r '.session_id')\" && claude-xmpp-client unregister \"$SID\"",
+            "command": "$HOME/.claude/hooks/session-end.sh",
             "async": true
           }
         ]
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -f \"$HOME/.config/xmpp-notify/notify-enabled\" ] || exit 0 && INPUT=\"$(cat)\" && LOC=\"$(echo \"$INPUT\" | ~/.claude/hooks/format-location.sh)\" && TYPE=\"$(echo \"$INPUT\" | jq -r '.notification_type')\" && MSG=\"$(echo \"$INPUT\" | jq -r '(.title // \"\") + \": \" + .message')\" && echo \"[${LOC}] [${TYPE}] ${MSG}\" | claude-xmpp-client send",
+            "command": "$HOME/.claude/hooks/notification.sh",
             "async": true
           }
         ]
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -f \"$HOME/.config/xmpp-notify/notify-enabled\" ] || exit 0 && INPUT=\"$(cat)\" && LOC=\"$(echo \"$INPUT\" | ~/.claude/hooks/format-location.sh)\" && SUBJ=\"$(echo \"$INPUT\" | jq -r '.task_subject')\" && echo \"[${LOC}] Task completed: ${SUBJ}\" | claude-xmpp-client send",
+            "command": "$HOME/.claude/hooks/task-completed.sh",
             "async": true
           }
         ]
@@ -68,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -f \"$HOME/.config/xmpp-notify/notify-enabled\" ] || exit 0 && INPUT=\"$(cat)\" && claude-xmpp-client response \"$(echo \"$INPUT\" | jq -c '{session_id: .session_id, project: .cwd, message: (.last_assistant_message | .[0:500] // \"dokončeno\")}')\"",
+            "command": "$HOME/.claude/hooks/stop.sh",
             "async": true
           }
         ]

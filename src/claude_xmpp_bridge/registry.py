@@ -31,7 +31,7 @@ def _validate_session_id(session_id: str) -> None:
     if not SESSION_ID_RE.match(session_id):
         raise ValueError(
             f"Invalid session_id: {session_id!r} "
-            "(must match ^[a-zA-Z0-9_\\-]{{1,128}}$)"
+            "(must be 1-128 characters: letters, digits, underscore, hyphen)"
         )
 
 
@@ -39,7 +39,7 @@ def _validate_sty(sty: str) -> None:
     if not STY_RE.match(sty):
         raise ValueError(
             f"Invalid sty: {sty!r} "
-            "(must match ^[a-zA-Z0-9_.:\\-]*$)"
+            "(must contain only letters, digits, dots, colons, underscores, hyphens)"
         )
 
 
@@ -47,7 +47,7 @@ def _validate_window(window: str) -> None:
     if not WINDOW_RE.match(window):
         raise ValueError(
             f"Invalid window: {window!r} "
-            "(must match ^[0-9]*$)"
+            "(must be a number or empty)"
         )
 
 
