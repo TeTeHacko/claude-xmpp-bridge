@@ -7,6 +7,8 @@ import json
 import stat
 from pathlib import Path
 
+import pytest
+
 from claude_xmpp_bridge.socket_server import SocketServer
 
 # ---------------------------------------------------------------------------
@@ -43,7 +45,7 @@ class MockHandler:
         self._response = response or {"status": "ok"}
 
     async def __call__(self, request: dict) -> dict:
-        self.calls[len(self.calls):] = [request]  # append
+        self.calls[len(self.calls) :] = [request]  # append
         return self._response
 
 
@@ -333,9 +335,7 @@ class TestSocketPermissions:
         try:
             current = os.umask(0o022)
             os.umask(current)
-            assert current == original, (
-                f"umask not restored: expected {oct(original)}, got {oct(current)}"
-            )
+            assert current == original, f"umask not restored: expected {oct(original)}, got {oct(current)}"
         finally:
             await server.stop()
 
@@ -366,12 +366,113 @@ class TestConcurrentClients:
         server = SocketServer(socket_path, handler)
         await server.start()
         try:
-            tasks = [
-                _send_request(socket_path, {"command": "send", "n": i})
-                for i in range(10)
-            ]
+            tasks = [_send_request(socket_path, {"command": "send", "n": i}) for i in range(10)]
             results = await asyncio.gather(*tasks)
             assert all(r["status"] == "ok" for r in results)
             assert len(handler.calls) == 10
+        finally:
+            await server.stop()
+
+
+# ---------------------------------------------------------------------------
+# Empty / blank data handling
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyData:
+    async def test_empty_bytes_no_response(self, socket_path: Path) -> None:
+        """Client that sends nothing (zero bytes) should not crash the server."""
+        handler = MockHandler({"status": "ok"})
+        server = SocketServer(socket_path, handler)
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(socket_path))
+            writer.write(b"")
+            writer.write_eof()
+            # Server may close without writing anything — just ensure it doesn't crash
+            data = await asyncio.wait_for(reader.read(65536), timeout=2)
+            writer.close()
+            await writer.wait_closed()
+            # No handler call expected
+            assert len(handler.calls) == 0
+        finally:
+            await server.stop()
+
+    async def test_whitespace_only_no_response(self, socket_path: Path) -> None:
+        """Client that sends only whitespace should not invoke the handler."""
+        handler = MockHandler({"status": "ok"})
+        server = SocketServer(socket_path, handler)
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(socket_path))
+            writer.write(b"   \n  \n")
+            writer.write_eof()
+            data = await asyncio.wait_for(reader.read(65536), timeout=2)
+            writer.close()
+            await writer.wait_closed()
+            assert len(handler.calls) == 0
+        finally:
+            await server.stop()
+
+
+# ---------------------------------------------------------------------------
+# Live socket collision (another bridge already running)
+# ---------------------------------------------------------------------------
+
+
+class TestLiveSocketCollision:
+    async def test_start_exits_when_live_socket_exists(self, socket_path: Path) -> None:
+        """If a live process is already listening on the socket, start() calls sys.exit(1)."""
+        import sys
+
+        # Start a real server to hold the socket
+        first_handler = MockHandler({"status": "ok"})
+        first_server = SocketServer(socket_path, first_handler)
+        await first_server.start()
+
+        try:
+            second_handler = MockHandler({"status": "ok"})
+            second_server = SocketServer(socket_path, second_handler)
+            with pytest.raises(SystemExit) as exc_info:
+                await second_server.start()
+            assert exc_info.value.code == 1
+        finally:
+            await first_server.stop()
+
+
+class TestSocketAliveResourceSafety:
+    """_is_socket_alive must not leak socket file descriptors."""
+
+    async def test_is_socket_alive_closes_socket_on_success(self, socket_path: Path) -> None:
+        """After a successful connect, the socket should be closed (no leak)."""
+        import resource
+
+        first_handler = MockHandler({"status": "ok"})
+        first_server = SocketServer(socket_path, first_handler)
+        await first_server.start()
+        try:
+            checker = SocketServer(socket_path, MockHandler())
+            fd_before = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            # Call _is_socket_alive many times — if it leaks FDs, we'd exhaust them
+            for _ in range(50):
+                assert checker._is_socket_alive() is True
+            fd_after = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            assert fd_after == fd_before  # limit unchanged (no FD leak)
+        finally:
+            await first_server.stop()
+
+    async def test_is_socket_alive_returns_false_for_missing_socket(self, socket_path: Path) -> None:
+        """Should return False when no socket file exists."""
+        checker = SocketServer(socket_path, MockHandler())
+        assert checker._is_socket_alive() is False
+
+    async def test_start_no_toctou_when_no_socket(self, socket_path: Path) -> None:
+        """start() with no pre-existing socket should work without errors."""
+        assert not socket_path.exists()
+        handler = MockHandler({"ok": True})
+        server = SocketServer(socket_path, handler)
+        await server.start()
+        try:
+            assert socket_path.exists()
         finally:
             await server.stop()

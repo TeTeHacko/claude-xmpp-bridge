@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from claude_xmpp_bridge.multiplexer import (
     ScreenMultiplexer,
@@ -70,14 +70,21 @@ def _make_process_mock(returncode: int = 0) -> AsyncMock:
 
 
 def _make_timeout_process() -> AsyncMock:
-    """Create a mock subprocess whose wait() raises TimeoutError."""
+    """Create a mock subprocess whose first wait() raises TimeoutError, second succeeds."""
     proc = AsyncMock()
     proc.returncode = None
+    proc.kill = MagicMock()
 
-    async def _wait_forever():
-        raise TimeoutError
+    _call_count = 0
 
-    proc.wait = AsyncMock(side_effect=_wait_forever)
+    async def _wait_side_effect():
+        nonlocal _call_count
+        _call_count += 1
+        if _call_count == 1:
+            raise TimeoutError
+        return None
+
+    proc.wait = _wait_side_effect
     return proc
 
 
@@ -90,7 +97,7 @@ class TestScreenMultiplexer:
     """Tests for ScreenMultiplexer.send_text."""
 
     async def test_success(self):
-        """Both stuff and CR calls succeed (exit 0) -> returns True."""
+        """Two calls: at N# stuff text, then at N# stuff \\r -> returns True."""
         mux = ScreenMultiplexer()
         proc_ok = _make_process_mock(0)
 
@@ -101,16 +108,37 @@ class TestScreenMultiplexer:
         assert result is True
         assert mock_exec.call_count == 2
 
-        # First call: stuff with text
-        first_call = mock_exec.call_args_list[0]
-        assert first_call.args[:6] == ("screen", "-S", "session", "-p", "3", "-X")
+        # First call: screen -S session -X at 3# stuff "hello world"
+        text_args = mock_exec.call_args_list[0].args
+        assert text_args[:5] == ("screen", "-S", "session", "-X", "at")
+        assert text_args[5] == "3#"
+        assert text_args[6] == "stuff"
+        assert text_args[7] == "hello world"
 
-        # Second call: stuff with CR
-        second_call = mock_exec.call_args_list[1]
-        assert 'stuff "\\015"' in second_call.args
+        # Second call: screen -S session -X at 3# stuff "\r"
+        cr_args = mock_exec.call_args_list[1].args
+        assert cr_args[:5] == ("screen", "-S", "session", "-X", "at")
+        assert cr_args[5] == "3#"
+        assert cr_args[6] == "stuff"
+        assert cr_args[7] == "\r"
 
-    async def test_failure_first_call(self):
-        """First screen command fails -> returns False immediately."""
+    async def test_uses_at_stuff_not_register_paste(self):
+        """Must use at+stuff (not register+paste) so Enter is a key event."""
+        mux = ScreenMultiplexer()
+        proc_ok = _make_process_mock(0)
+
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = proc_ok
+            await mux.send_text("session", "4", "test")
+
+        all_args = [a for call in mock_exec.call_args_list for a in call.args]
+        assert "register" not in all_args
+        assert "paste" not in all_args
+        assert "stuff" in all_args
+        assert "4#" in all_args
+
+    async def test_failure_first_stuff_call(self):
+        """First screen stuff command fails -> returns False, CR not sent."""
         mux = ScreenMultiplexer()
         proc_fail = _make_process_mock(1)
 
@@ -119,11 +147,10 @@ class TestScreenMultiplexer:
             result = await mux.send_text("session", "0", "text")
 
         assert result is False
-        # Should bail out after the first call
         assert mock_exec.call_count == 1
 
-    async def test_failure_second_call(self):
-        """First call succeeds, second (CR) fails -> returns False."""
+    async def test_failure_cr_stuff_call(self):
+        """Text stuff succeeds, CR stuff fails -> returns False."""
         mux = ScreenMultiplexer()
         proc_ok = _make_process_mock(0)
         proc_fail = _make_process_mock(1)
@@ -136,7 +163,7 @@ class TestScreenMultiplexer:
         assert mock_exec.call_count == 2
 
     async def test_timeout(self):
-        """Subprocess wait times out -> returns False."""
+        """Subprocess wait times out -> returns False, kill() is called."""
         mux = ScreenMultiplexer()
         proc_timeout = _make_timeout_process()
 
@@ -145,6 +172,24 @@ class TestScreenMultiplexer:
             result = await mux.send_text("session", "0", "text")
 
         assert result is False
+        proc_timeout.kill.assert_called_once()
+
+    async def test_cr_sent_as_second_call(self):
+        """CR must be sent as a separate stuff call, not appended to text."""
+        mux = ScreenMultiplexer()
+        proc_ok = _make_process_mock(0)
+
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = proc_ok
+            await mux.send_text("session", "0", "mytext")
+
+        text_args = mock_exec.call_args_list[0].args
+        cr_args = mock_exec.call_args_list[1].args
+        # Text call must NOT contain \r
+        assert "\r" not in text_args[-1]
+        assert text_args[-1] == "mytext"
+        # CR call must send exactly \r
+        assert cr_args[-1] == "\r"
 
     async def test_sanitizes_input(self):
         """Control characters are stripped before sending to screen."""
@@ -155,10 +200,9 @@ class TestScreenMultiplexer:
             mock_exec.return_value = proc_ok
             await mux.send_text("s", "0", "clean\x00text")
 
-        first_call = mock_exec.call_args_list[0]
-        stuff_arg = first_call.args[-1]
-        assert "\x00" not in stuff_arg
-        assert "cleantext" in stuff_arg
+        text_args = mock_exec.call_args_list[0].args
+        assert "\x00" not in text_args[-1]
+        assert "cleantext" in text_args[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +260,7 @@ class TestTmuxMultiplexer:
         assert mock_exec.call_count == 2
 
     async def test_timeout(self):
-        """Subprocess wait times out -> returns False."""
+        """Subprocess wait times out -> returns False, kill() is called."""
         mux = TmuxMultiplexer()
         proc_timeout = _make_timeout_process()
 
@@ -225,6 +269,7 @@ class TestTmuxMultiplexer:
             result = await mux.send_text("session:0.1", "0", "text")
 
         assert result is False
+        proc_timeout.kill.assert_called_once()
 
     async def test_sanitizes_input(self):
         """Control characters are stripped before sending to tmux."""

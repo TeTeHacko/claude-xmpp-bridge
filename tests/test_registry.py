@@ -252,15 +252,15 @@ def test_unregister_non_active_keeps_active(db_path):
 @pytest.mark.parametrize(
     "bad_id",
     [
-        "",                    # empty
-        "has space",           # space
-        "with/slash",          # slash
-        "semi;colon",          # semicolon
-        "a" * 129,            # too long (>128)
-        "new\nline",           # newline
-        "tab\there",           # tab
-        "dot.dot",             # dot not in allowed set
-        "at@sign",             # @
+        "",  # empty
+        "has space",  # space
+        "with/slash",  # slash
+        "semi;colon",  # semicolon
+        "a" * 129,  # too long (>128)
+        "new\nline",  # newline
+        "tab\there",  # tab
+        "dot.dot",  # dot not in allowed set
+        "at@sign",  # @
     ],
 )
 def test_invalid_session_id(db_path, bad_id):
@@ -386,7 +386,87 @@ def test_backend_explicit_value(db_path):
 
 
 # ---------------------------------------------------------------------------
-# 10. close() works without error
+# 10. source field
+# ---------------------------------------------------------------------------
+
+
+def test_source_stored_and_retrieved(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("oc-sess", "", "", "/proj", source="opencode")
+        info = reg.get("oc-sess")
+        assert info is not None
+        assert info["source"] == "opencode"
+    finally:
+        reg.close()
+
+
+def test_source_defaults_to_none(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("claude-sess", "", "", "/proj")
+        info = reg.get("claude-sess")
+        assert info is not None
+        assert info["source"] is None
+    finally:
+        reg.close()
+
+
+def test_source_persists_across_restart(db_path):
+    reg1 = SessionRegistry(db_path)
+    try:
+        reg1.register("oc-sess", "", "", "/proj", source="opencode")
+    finally:
+        reg1.close()
+
+    reg2 = SessionRegistry(db_path)
+    try:
+        info = reg2.get("oc-sess")
+        assert info is not None
+        assert info["source"] == "opencode"
+    finally:
+        reg2.close()
+
+
+def test_schema_migration_adds_source_column(db_path):
+    """Old DB without source column should be migrated transparently."""
+    import sqlite3
+
+    # Create a legacy DB without the source column
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE sessions ("
+        "  session_id TEXT PRIMARY KEY,"
+        "  sty TEXT, window TEXT, project TEXT, backend TEXT, registered_at REAL"
+        ")"
+    )
+    conn.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)",
+        ("legacy-sess", "12345.pts-0", "0", "/old/project", "screen", 1000.0),
+    )
+    conn.commit()
+    conn.close()
+
+    # Opening with new registry should migrate without error
+    reg = SessionRegistry(db_path)
+    try:
+        # Legacy session loaded, source should be None
+        info = reg.get("legacy-sess")
+        assert info is not None
+        assert info["project"] == "/old/project"
+        assert info["source"] is None
+
+        # Can register new session with source
+        reg.register("new-sess", "", "", "/new/project", source="opencode")
+        assert reg.get("new-sess")["source"] == "opencode"  # type: ignore[index]
+    finally:
+        reg.close()
+
+
+# ---------------------------------------------------------------------------
+# 11. close() works without error
 # ---------------------------------------------------------------------------
 
 
@@ -408,3 +488,56 @@ def test_double_close(db_path):
     reg = SessionRegistry(db_path)
     reg.close()
     reg.close()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# 12. Stable ordering — registered_at and last_active behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_reregister_same_sid_does_not_change_last_active(db_path):
+    """Re-registering the same session_id must not hijack last_active."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("s1", "", "", "/proj/1")
+        time.sleep(0.01)
+        reg.register("s2", "", "", "/proj/2")
+        reg.set_active("s1")
+        assert reg.get_active()[0] == "s1"
+
+        # s2 re-registers (e.g. hook fires again) — s1 must stay active
+        reg.register("s2", "", "", "/proj/2")
+        assert reg.get_active()[0] == "s1"
+    finally:
+        reg.close()
+
+
+def test_register_with_explicit_registered_at(db_path):
+    """Passing registered_at preserves the slot's original position."""
+    reg = SessionRegistry(db_path)
+    try:
+        old_time = time.time() - 100.0
+        reg.register("sess", "", "", "/proj", registered_at=old_time)
+        info = reg.get("sess")
+        assert info is not None
+        assert abs(info["registered_at"] - old_time) < 0.001
+    finally:
+        reg.close()
+
+
+def test_reregister_new_sid_inherits_position(db_path):
+    """When a new session_id replaces an old one (same project), ordering is preserved."""
+    reg = SessionRegistry(db_path)
+    try:
+        old_time = time.time() - 100.0
+        reg.register("old-sid", "", "", "/proj", registered_at=old_time)
+
+        # Replace with new sid but preserve time (simulating what bridge does)
+        reg.unregister("old-sid")
+        reg.register("new-sid", "", "", "/proj", registered_at=old_time)
+
+        info = reg.get("new-sid")
+        assert info is not None
+        assert abs(info["registered_at"] - old_time) < 0.001
+    finally:
+        reg.close()

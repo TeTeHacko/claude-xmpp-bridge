@@ -3,8 +3,8 @@
 
 bridge_started = "XMPP Bridge spuštěn."
 bridge_stopped = "XMPP Bridge ukončen."
-no_sessions = "Žádné aktivní Claude sessions."
-session_list_header = "Claude sessions:"
+no_sessions = "Žádné aktivní sessions."
+session_list_header = "Sessions:"
 active_marker = "* = aktivní session"
 sent = "odesláno"
 delivery_failed = "Doručení do [{project}] selhalo"

@@ -86,12 +86,17 @@ class XMPPBridge:
             info = sessions[sid]
             marker = " *" if sid == active_id else ""
             backend = info["backend"]
-            if backend == "screen":
-                tag = "[screen]"
-            elif backend == "tmux":
-                tag = "[tmux]"
+            source = info.get("source")
+            if source == "opencode":
+                prefix = "🧠"
             else:
-                tag = f"[{self.messages.read_only_tag}]"
+                prefix = "⚡"
+            if backend == "screen":
+                tag = f"[{prefix}screen]"
+            elif backend == "tmux":
+                tag = f"[{prefix}tmux]"
+            else:
+                tag = f"[{prefix}{self.messages.read_only_tag}]"
             project = info["project"]
             lines.append(f"  /{i} {self._short_path(project)} {tag}{marker}")
         lines.append(f"\n{self.messages.active_marker}")
@@ -161,7 +166,7 @@ class XMPPBridge:
         if path == home:
             return "~"
         if path.startswith(home + "/"):
-            return "~" + path[len(home):]
+            return "~" + path[len(home) :]
         return path
 
     # --- Stale session cleanup ---
@@ -178,7 +183,8 @@ class XMPPBridge:
         if not sty:
             return True  # no sty — can't check
         proc = await asyncio.create_subprocess_exec(
-            *cmd_parts, sty,
+            *cmd_parts,
+            sty,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -186,6 +192,7 @@ class XMPPBridge:
             await asyncio.wait_for(proc.wait(), timeout=5)
         except TimeoutError:
             proc.kill()
+            await proc.wait()
             return False
         return proc.returncode == 0
 
@@ -196,20 +203,20 @@ class XMPPBridge:
         # 1. Remove sessions whose multiplexer is dead (check in parallel)
         items = list(self.registry.sessions.items())
         if items:
-            alive_results = await asyncio.gather(
-                *(self._is_session_alive(info) for _, info in items)
-            )
+            alive_results = await asyncio.gather(*(self._is_session_alive(info) for _, info in items))
             for (sid, _), alive in zip(items, alive_results, strict=True):
                 if not alive:
                     to_remove.add(sid)
 
-        # 2. Deduplicate — keep only the newest per project and per sty+window
+        # 2. Deduplicate — keep only the newest per (project, source) and per sty+window.
+        # Grouping by (project, source) allows Claude Code and OpenCode to coexist in the
+        # same project directory; only sessions from the same tool type are deduplicated.
         for key_fn in (
-            lambda info: info["project"],
+            lambda info: (info["project"], info.get("source")),
             lambda info: (info["sty"], info["window"]) if info["sty"] and info["window"] else None,
         ):
             groups: dict[object, list[tuple[str, float]]] = {}
-            for sid, info in self.registry.sessions.items():
+            for sid, info in list(self.registry.sessions.items()):
                 if sid in to_remove:
                     continue
                 key = key_fn(info)
@@ -274,14 +281,26 @@ class XMPPBridge:
             if not project:
                 return {"error": "missing project"}
 
-            # Deduplicate: remove old sessions with same project or same sty+window
+            source_raw = req.get("source")
+            source = str(source_raw) if source_raw is not None else None
+
+            # Deduplicate: remove old sessions with same (project + source) or same sty+window.
+            # Project dedup is source-aware: Claude Code and OpenCode may coexist in the same
+            # project directory — only sessions from the same tool type replace each other.
+            # Preserve the original registered_at of the replaced slot so that /list numbering
+            # stays stable even after session restarts.
+            inherited_registered_at: float | None = None
             for old_sid, old_info in list(self.registry.sessions.items()):
                 if old_sid == sid:
                     continue
-                if old_info["project"] == project:
-                    log.info("Replacing stale session %s (same project=%s)", old_sid, project)
+                if old_info["project"] == project and old_info.get("source") == source:
+                    if inherited_registered_at is None:
+                        inherited_registered_at = old_info["registered_at"]
+                    log.info("Replacing stale session %s (same project=%s, source=%s)", old_sid, project, source)
                     self.registry.unregister(old_sid)
                 elif sty and window and old_info["sty"] == sty and old_info["window"] == window:
+                    if inherited_registered_at is None:
+                        inherited_registered_at = old_info["registered_at"]
                     log.info("Replacing stale session %s (same sty=%s, window=%s)", old_sid, sty, window)
                     self.registry.unregister(old_sid)
 
@@ -291,6 +310,8 @@ class XMPPBridge:
                 window=window,
                 project=project,
                 backend=backend,
+                source=source,
+                registered_at=inherited_registered_at,
             )
         except KeyError as e:
             return {"error": f"missing field: {e}"}

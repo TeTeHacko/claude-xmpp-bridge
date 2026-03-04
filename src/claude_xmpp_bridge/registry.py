@@ -24,31 +24,27 @@ class SessionInfo(TypedDict):
     window: str
     project: str
     backend: str | None
+    source: str | None  # "opencode", None = Claude Code
     registered_at: float
 
 
 def _validate_session_id(session_id: str) -> None:
     if not SESSION_ID_RE.match(session_id):
         raise ValueError(
-            f"Invalid session_id: {session_id!r} "
-            "(must be 1-128 characters: letters, digits, underscore, hyphen)"
+            f"Invalid session_id: {session_id!r} (must be 1-128 characters: letters, digits, underscore, hyphen)"
         )
 
 
 def _validate_sty(sty: str) -> None:
     if not STY_RE.match(sty):
         raise ValueError(
-            f"Invalid sty: {sty!r} "
-            "(must contain only letters, digits, dots, colons, underscores, hyphens)"
+            f"Invalid sty: {sty!r} (must contain only letters, digits, dots, colons, underscores, hyphens)"
         )
 
 
 def _validate_window(window: str) -> None:
     if not WINDOW_RE.match(window):
-        raise ValueError(
-            f"Invalid window: {window!r} "
-            "(must be a number or empty)"
-        )
+        raise ValueError(f"Invalid window: {window!r} (must be a number or empty)")
 
 
 class SessionRegistry:
@@ -59,6 +55,7 @@ class SessionRegistry:
         self.last_active: str | None = None
         self._db = sqlite3.connect(str(db_path))
         self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS sessions ("
             "  session_id TEXT PRIMARY KEY,"
@@ -69,26 +66,26 @@ class SessionRegistry:
             "  registered_at REAL"
             ")"
         )
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS state ("
-            "  key TEXT PRIMARY KEY,"
-            "  value TEXT"
-            ")"
-        )
         self._db.commit()
+        # Migration: add source column for existing databases that predate this field
+        cols = {row[1] for row in self._db.execute("PRAGMA table_info(sessions)")}
+        if "source" not in cols:
+            self._db.execute("ALTER TABLE sessions ADD COLUMN source TEXT")
+            self._db.commit()
         self._load_from_db()
 
     def _load_from_db(self) -> None:
         """Load sessions and state from SQLite on startup."""
         for row in self._db.execute(
-            "SELECT session_id, sty, window, project, backend, registered_at FROM sessions"
+            "SELECT session_id, sty, window, project, backend, source, registered_at FROM sessions"
         ):
-            self.sessions[row[0]] = {
+            self.sessions[row[0]] = {  # type: ignore[assignment]
                 "sty": row[1],
                 "window": row[2],
                 "project": row[3],
                 "backend": row[4],
-                "registered_at": row[5],
+                "source": row[5],
+                "registered_at": row[6],
             }
         row = self._db.execute("SELECT value FROM state WHERE key = 'last_active'").fetchone()
         if row and row[0] in self.sessions:
@@ -98,9 +95,17 @@ class SessionRegistry:
     def _save_session(self, session_id: str) -> None:
         info = self.sessions[session_id]
         self._db.execute(
-            "INSERT OR REPLACE INTO sessions (session_id, sty, window, project, backend, registered_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, info["sty"], info["window"], info["project"], info["backend"], info["registered_at"]),
+            "INSERT OR REPLACE INTO sessions (session_id, sty, window, project, backend, source, registered_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                info["sty"],
+                info["window"],
+                info["project"],
+                info["backend"],
+                info["source"],
+                info["registered_at"],
+            ),
         )
         self._save_last_active()
         self._db.commit()
@@ -123,22 +128,33 @@ class SessionRegistry:
         window: str,
         project: str,
         backend: str | None = None,
+        source: str | None = None,
+        registered_at: float | None = None,
     ) -> None:
-        """Register a new session. Validates all inputs."""
+        """Register a new session. Validates all inputs.
+
+        registered_at: if provided, preserves the original slot timestamp so that
+        the session keeps its position in /list after a re-registration.
+        """
         _validate_session_id(session_id)
         _validate_sty(sty)
         _validate_window(window)
 
-        self.sessions[session_id] = {
+        is_reregister = session_id in self.sessions
+        self.sessions[session_id] = {  # type: ignore[assignment]
             "sty": sty,
             "window": window,
             "project": project,
             "backend": backend,
-            "registered_at": time.time(),
+            "source": source,
+            "registered_at": registered_at if registered_at is not None else time.time(),
         }
-        self.last_active = session_id
+        # Don't flip last_active when the same session re-registers — it would
+        # hijack plain-text routing away from whatever the user targeted last.
+        if not is_reregister:
+            self.last_active = session_id
         self._save_session(session_id)
-        log.info("Registered session %s (project=%s, backend=%s)", session_id, project, backend)
+        log.info("Registered session %s (project=%s, backend=%s, source=%s)", session_id, project, backend, source)
 
     def unregister(self, session_id: str) -> None:
         """Unregister a session."""
@@ -160,8 +176,8 @@ class SessionRegistry:
         return self.sessions.get(session_id)
 
     def list_sessions(self) -> dict[str, SessionInfo]:
-        """Get all sessions."""
-        return self.sessions
+        """Get all sessions (returns a shallow copy to prevent external mutation)."""
+        return dict(self.sessions)
 
     def get_by_index(self, index: int) -> tuple[str | None, SessionInfo | None]:
         """Get session by 1-based index (sorted by registration time)."""

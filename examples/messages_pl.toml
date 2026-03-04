@@ -3,8 +3,8 @@
 
 bridge_started = "XMPP Bridge uruchomiony."
 bridge_stopped = "XMPP Bridge zatrzymany."
-no_sessions = "Brak aktywnych sesji Claude."
-session_list_header = "Sesje Claude:"
+no_sessions = "Brak aktywnych sesji."
+session_list_header = "Sesje:"
 active_marker = "* = aktywna sesja"
 sent = "wysłano"
 delivery_failed = "Dostarczenie do [{project}] nie powiodło się"

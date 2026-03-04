@@ -8,9 +8,11 @@ from claude_xmpp_bridge import setup
 from claude_xmpp_bridge.setup import (
     _confirm,
     _find_hooks_dir,
+    _find_opencode_dir,
     _step_config,
     _step_credentials,
     _step_hooks,
+    _step_opencode,
     _step_switches,
     _step_systemd,
 )
@@ -263,3 +265,98 @@ class TestStepSystemd:
 
         assert ok is True
         assert (systemd_dir / "claude-xmpp-bridge.service").is_file()
+
+
+# ---------------------------------------------------------------------------
+# _find_opencode_dir
+# ---------------------------------------------------------------------------
+
+
+class TestFindOpencodeDir:
+    def test_finds_source_tree(self):
+        """Should find examples/opencode/ in the source tree."""
+        result = _find_opencode_dir()
+        assert result is not None
+        assert (result / "plugins" / "xmpp-bridge.js").is_file()
+
+    def test_plugin_contains_source_field(self):
+        """Plugin file must contain source: \"opencode\" in register payloads."""
+        result = _find_opencode_dir()
+        assert result is not None
+        plugin_text = (result / "plugins" / "xmpp-bridge.js").read_text()
+        assert 'source:     "opencode"' in plugin_text
+
+
+# ---------------------------------------------------------------------------
+# _step_opencode
+# ---------------------------------------------------------------------------
+
+
+class TestStepOpencode:
+    def test_installs_plugin(self, monkeypatch, tmp_path):
+        plugins_dir = tmp_path / "plugins"
+        settings_path = tmp_path / "opencode.json"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+
+        ok = _step_opencode(yes_mode=True)
+
+        assert ok is True
+        assert (plugins_dir / "xmpp-bridge.js").is_file()
+
+    def test_installed_plugin_has_source_field(self, monkeypatch, tmp_path):
+        plugins_dir = tmp_path / "plugins"
+        settings_path = tmp_path / "opencode.json"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+
+        _step_opencode(yes_mode=True)
+
+        plugin_text = (plugins_dir / "xmpp-bridge.js").read_text()
+        assert 'source:     "opencode"' in plugin_text
+
+    def test_merges_opencode_json(self, monkeypatch, tmp_path):
+        plugins_dir = tmp_path / "plugins"
+        settings_path = tmp_path / "opencode.json"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+
+        ok = _step_opencode(yes_mode=True)
+
+        assert ok is True
+        assert settings_path.is_file()
+        data = json.loads(settings_path.read_text())
+        assert "permission" in data
+
+    def test_preserves_existing_keys(self, monkeypatch, tmp_path):
+        plugins_dir = tmp_path / "plugins"
+        settings_path = tmp_path / "opencode.json"
+        settings_path.write_text('{"existing_key": "value"}')
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+
+        _step_opencode(yes_mode=True)
+
+        data = json.loads(settings_path.read_text())
+        assert "existing_key" in data
+        assert "permission" in data
+
+    def test_skips_if_declined(self, monkeypatch, tmp_path):
+        plugins_dir = tmp_path / "plugins"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        ok = _step_opencode(yes_mode=False)
+
+        assert ok is True
+        assert not plugins_dir.exists()
+
+    def test_skips_when_source_not_found(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(setup, "_find_opencode_dir", lambda: None)
+        plugins_dir = tmp_path / "plugins"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+
+        ok = _step_opencode(yes_mode=True)
+
+        assert ok is True
+        assert not plugins_dir.exists()

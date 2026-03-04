@@ -78,9 +78,7 @@ class TestPriorityCLIOverEnv:
         )
         assert cfg.recipient == "cli-rcpt@example.com"
 
-    def test_cli_socket_path_overrides_env(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_cli_socket_path_overrides_env(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
         monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
         monkeypatch.setenv("CLAUDE_XMPP_SOCKET", "/env/socket.sock")
@@ -104,9 +102,7 @@ class TestPriorityCLIOverEnv:
         )
         assert cfg.db_path == Path("/cli/bridge.db")
 
-    def test_cli_credentials_overrides_env(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_cli_credentials_overrides_env(self, monkeypatch, credentials_file, tmp_path):
         env_cred = tmp_path / "env-cred"
         env_cred.write_text("env-password")
         env_cred.chmod(0o600)
@@ -146,9 +142,7 @@ class TestPriorityEnvOverTOML:
         cfg = load_config(cli_credentials=str(credentials_file))
         assert cfg.jid == "env@example.com"
 
-    def test_env_recipient_overrides_toml(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_env_recipient_overrides_toml(self, monkeypatch, credentials_file, tmp_path):
         toml_file = _write_toml(
             tmp_path / "config.toml",
             'jid = "bot@example.com"\nrecipient = "toml-rcpt@example.com"\n',
@@ -162,11 +156,7 @@ class TestPriorityEnvOverTOML:
     def test_env_socket_overrides_toml(self, monkeypatch, credentials_file, tmp_path):
         toml_file = _write_toml(
             tmp_path / "config.toml",
-            (
-                'jid = "bot@example.com"\n'
-                'recipient = "rcpt@example.com"\n'
-                'socket_path = "/toml/socket.sock"\n'
-            ),
+            ('jid = "bot@example.com"\nrecipient = "rcpt@example.com"\nsocket_path = "/toml/socket.sock"\n'),
         )
         monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
         monkeypatch.setenv("CLAUDE_XMPP_SOCKET", "/env/socket.sock")
@@ -177,11 +167,7 @@ class TestPriorityEnvOverTOML:
     def test_env_db_overrides_toml(self, monkeypatch, credentials_file, tmp_path):
         toml_file = _write_toml(
             tmp_path / "config.toml",
-            (
-                'jid = "bot@example.com"\n'
-                'recipient = "rcpt@example.com"\n'
-                'db_path = "/toml/bridge.db"\n'
-            ),
+            ('jid = "bot@example.com"\nrecipient = "rcpt@example.com"\ndb_path = "/toml/bridge.db"\n'),
         )
         monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
         monkeypatch.setenv("CLAUDE_XMPP_DB", "/env/bridge.db")
@@ -200,11 +186,7 @@ class TestPriorityEnvOverTOML:
 
         toml_file = _write_toml(
             tmp_path / "config.toml",
-            (
-                'jid = "bot@example.com"\n'
-                'recipient = "rcpt@example.com"\n'
-                f'credentials = "{toml_cred}"\n'
-            ),
+            (f'jid = "bot@example.com"\nrecipient = "rcpt@example.com"\ncredentials = "{toml_cred}"\n'),
         )
         monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
         monkeypatch.setenv("CLAUDE_XMPP_CREDENTIALS", str(env_cred))
@@ -216,16 +198,10 @@ class TestPriorityEnvOverTOML:
 class TestPriorityTOMLOverDefaults:
     """TOML values must override built-in defaults."""
 
-    def test_toml_socket_overrides_default(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_toml_socket_overrides_default(self, monkeypatch, credentials_file, tmp_path):
         toml_file = _write_toml(
             tmp_path / "config.toml",
-            (
-                'jid = "bot@example.com"\n'
-                'recipient = "rcpt@example.com"\n'
-                'socket_path = "/toml/my.sock"\n'
-            ),
+            ('jid = "bot@example.com"\nrecipient = "rcpt@example.com"\nsocket_path = "/toml/my.sock"\n'),
         )
         monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
 
@@ -235,20 +211,14 @@ class TestPriorityTOMLOverDefaults:
     def test_toml_db_overrides_default(self, monkeypatch, credentials_file, tmp_path):
         toml_file = _write_toml(
             tmp_path / "config.toml",
-            (
-                'jid = "bot@example.com"\n'
-                'recipient = "rcpt@example.com"\n'
-                'db_path = "/toml/my.db"\n'
-            ),
+            ('jid = "bot@example.com"\nrecipient = "rcpt@example.com"\ndb_path = "/toml/my.db"\n'),
         )
         monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
 
         cfg = load_config(cli_credentials=str(credentials_file))
         assert cfg.db_path == Path("/toml/my.db")
 
-    def test_toml_jid_used_when_no_cli_or_env(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_toml_jid_used_when_no_cli_or_env(self, monkeypatch, credentials_file, tmp_path):
         toml_file = _write_toml(
             tmp_path / "config.toml",
             'jid = "toml@example.com"\nrecipient = "rcpt@example.com"\n',
@@ -266,11 +236,7 @@ class TestFullPriorityChain:
     def test_cli_beats_env_beats_toml(self, monkeypatch, credentials_file, tmp_path):
         toml_file = _write_toml(
             tmp_path / "config.toml",
-            (
-                'jid = "toml@example.com"\n'
-                'recipient = "toml-rcpt@example.com"\n'
-                'socket_path = "/toml/sock"\n'
-            ),
+            ('jid = "toml@example.com"\nrecipient = "toml-rcpt@example.com"\nsocket_path = "/toml/sock"\n'),
         )
         monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
         monkeypatch.setenv("CLAUDE_XMPP_JID", "env@example.com")
@@ -297,18 +263,14 @@ class TestMissingCredentials:
     def test_raises_when_no_credentials_exist(self, monkeypatch, tmp_path):
         # Point default locations to non-existent paths
         monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "no-config")
-        monkeypatch.setattr(
-            config, "LEGACY_CREDENTIALS_FILE", tmp_path / "no-legacy" / "credentials"
-        )
+        monkeypatch.setattr(config, "LEGACY_CREDENTIALS_FILE", tmp_path / "no-legacy" / "credentials")
 
         with pytest.raises(FileNotFoundError, match="Credentials file not found"):
             _resolve_credentials(None, None, None)
 
     def test_raises_with_helpful_message(self, monkeypatch, tmp_path):
         monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "no-config")
-        monkeypatch.setattr(
-            config, "LEGACY_CREDENTIALS_FILE", tmp_path / "no-legacy" / "credentials"
-        )
+        monkeypatch.setattr(config, "LEGACY_CREDENTIALS_FILE", tmp_path / "no-legacy" / "credentials")
 
         with pytest.raises(FileNotFoundError, match="chmod 600"):
             _resolve_credentials(None, None, None)
@@ -325,9 +287,7 @@ class TestTildeExpansion:
         assert "~" not in str(resolved)
         assert resolved == Path.home() / "my-creds"
 
-    def test_socket_path_tilde_expanded(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_socket_path_tilde_expanded(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
         monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
         monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
@@ -351,9 +311,7 @@ class TestTildeExpansion:
         assert "~" not in str(cfg.db_path)
         assert cfg.db_path == Path.home() / "my.db"
 
-    def test_messages_file_tilde_expanded(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_messages_file_tilde_expanded(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
         monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
         monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
@@ -366,17 +324,11 @@ class TestTildeExpansion:
         assert "~" not in str(cfg.messages_file)
         assert cfg.messages_file == Path.home() / "msgs.txt"
 
-    def test_toml_credentials_tilde_expanded(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_toml_credentials_tilde_expanded(self, monkeypatch, credentials_file, tmp_path):
         """Credentials path from TOML should also be tilde-expanded."""
         toml_file = _write_toml(
             tmp_path / "config.toml",
-            (
-                'jid = "bot@example.com"\n'
-                'recipient = "rcpt@example.com"\n'
-                'credentials = "~/fake-cred"\n'
-            ),
+            ('jid = "bot@example.com"\nrecipient = "rcpt@example.com"\ncredentials = "~/fake-cred"\n'),
         )
         monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
 
@@ -450,27 +402,21 @@ class TestLegacyFallback:
 
 
 class TestMissingJID:
-    def test_load_config_exits_without_jid(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_load_config_exits_without_jid(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
         monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
 
         with pytest.raises(SystemExit, match="XMPP JID not configured"):
             load_config(cli_credentials=str(credentials_file))
 
-    def test_load_notify_config_exits_without_jid(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_load_notify_config_exits_without_jid(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
         monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
 
         with pytest.raises(SystemExit, match="XMPP JID not configured"):
             load_notify_config(cli_credentials=str(credentials_file))
 
-    def test_error_message_lists_all_sources(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_error_message_lists_all_sources(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
         monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
 
@@ -487,27 +433,21 @@ class TestMissingJID:
 
 
 class TestMissingRecipient:
-    def test_load_config_exits_without_recipient(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_load_config_exits_without_recipient(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
         monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
 
         with pytest.raises(SystemExit, match="XMPP recipient not configured"):
             load_config(cli_credentials=str(credentials_file))
 
-    def test_load_notify_config_exits_without_recipient(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_load_notify_config_exits_without_recipient(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
         monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
 
         with pytest.raises(SystemExit, match="XMPP recipient not configured"):
             load_notify_config(cli_credentials=str(credentials_file))
 
-    def test_error_message_lists_all_sources(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_error_message_lists_all_sources(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
         monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
 
@@ -571,9 +511,7 @@ class TestPermissionsWarning:
         with caplog.at_level(logging.WARNING, logger="claude_xmpp_bridge.config"):
             _check_permissions(fake)  # should not raise
 
-    def test_warning_emitted_during_full_load(
-        self, monkeypatch, tmp_path, caplog
-    ):
+    def test_warning_emitted_during_full_load(self, monkeypatch, tmp_path, caplog):
         """Permissions warning fires when load_config reads the credentials."""
         cred = tmp_path / "credentials"
         cred.write_text("insecure-pw")
@@ -639,9 +577,7 @@ class TestNotifyConfig:
         ncfg = load_notify_config(cli_credentials=str(credentials_file))
         assert isinstance(ncfg, NotifyConfig)
 
-    def test_has_jid_password_recipient(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_has_jid_password_recipient(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
         monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
         monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
@@ -661,9 +597,7 @@ class TestNotifyConfig:
         assert not hasattr(ncfg, "db_path")
         assert not hasattr(ncfg, "messages_file")
 
-    def test_cli_overrides_in_notify_config(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_cli_overrides_in_notify_config(self, monkeypatch, credentials_file, tmp_path):
         monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
         monkeypatch.setenv("CLAUDE_XMPP_JID", "env@example.com")
         monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "env-rcpt@example.com")
@@ -692,9 +626,7 @@ class TestNotifyConfig:
 
 
 class TestTOMLConfig:
-    def test_reads_jid_and_recipient_from_toml(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_reads_jid_and_recipient_from_toml(self, monkeypatch, credentials_file, tmp_path):
         toml_file = _write_toml(
             tmp_path / "config.toml",
             'jid = "toml-bot@example.com"\nrecipient = "toml-user@example.com"\n',
@@ -712,11 +644,7 @@ class TestTOMLConfig:
 
         toml_file = _write_toml(
             tmp_path / "config.toml",
-            (
-                'jid = "bot@example.com"\n'
-                'recipient = "rcpt@example.com"\n'
-                f'credentials = "{toml_cred}"\n'
-            ),
+            (f'jid = "bot@example.com"\nrecipient = "rcpt@example.com"\ncredentials = "{toml_cred}"\n'),
         )
         monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
 
@@ -754,9 +682,7 @@ class TestTOMLConfig:
     def test_toml_str_coerces_non_string(self):
         assert _toml_str({"port": 5222}, "port") == "5222"
 
-    def test_partial_toml_with_env_supplement(
-        self, monkeypatch, credentials_file, tmp_path
-    ):
+    def test_partial_toml_with_env_supplement(self, monkeypatch, credentials_file, tmp_path):
         """TOML has JID, env has recipient — both should be used."""
         toml_file = _write_toml(
             tmp_path / "config.toml",
@@ -921,3 +847,35 @@ class TestValidateConfig:
             validate_config(cfg)
 
         assert "screen" not in caplog.text
+
+    def test_non_writable_socket_parent_raises(self, tmp_path):
+        """Socket parent directory exists but is not writable → error."""
+        import os
+
+        locked_dir = tmp_path / "locked"
+        locked_dir.mkdir()
+        locked_dir.chmod(0o555)  # read+execute, no write
+        try:
+            if os.access(locked_dir, os.W_OK):
+                pytest.skip("running as root — permission check skipped")
+            cfg = self._make_config(tmp_path, socket_path=locked_dir / "bridge.sock")
+            with pytest.raises(SystemExit, match="not writable"):
+                validate_config(cfg)
+        finally:
+            locked_dir.chmod(0o755)
+
+    def test_non_writable_db_parent_raises(self, tmp_path):
+        """DB parent directory exists but is not writable → error."""
+        import os
+
+        locked_dir = tmp_path / "locked"
+        locked_dir.mkdir()
+        locked_dir.chmod(0o555)
+        try:
+            if os.access(locked_dir, os.W_OK):
+                pytest.skip("running as root — permission check skipped")
+            cfg = self._make_config(tmp_path, db_path=locked_dir / "bridge.db")
+            with pytest.raises(SystemExit, match="not writable"):
+                validate_config(cfg)
+        finally:
+            locked_dir.chmod(0o755)

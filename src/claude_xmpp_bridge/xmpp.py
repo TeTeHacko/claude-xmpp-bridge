@@ -21,7 +21,7 @@ class XMPPConnection:
 
     def __init__(self, jid: str, password: str) -> None:
         self.jid = jid
-        self.password = password
+        self._password = password
         self.connected = asyncio.Event()
         self._bot: slixmpp.ClientXMPP | None = None
         self._message_callback: Callable[[slixmpp.Message], Awaitable[None]] | None = None
@@ -32,9 +32,12 @@ class XMPPConnection:
         """Set the incoming message callback."""
         self._message_callback = callback
 
+    def __repr__(self) -> str:
+        return f"XMPPConnection(jid={self.jid!r})"
+
     def start(self) -> None:
         """Create and connect the XMPP client."""
-        self._bot = slixmpp.ClientXMPP(self.jid, self.password)
+        self._bot = slixmpp.ClientXMPP(self.jid, self._password)
         self._bot.add_event_handler("session_start", self._on_session_start)
         self._bot.add_event_handler("message", self._on_message)
         self._bot.add_event_handler("disconnected", self._on_disconnected)

@@ -1,6 +1,6 @@
 # claude-xmpp-bridge
 
-XMPP bridge for [Claude Code](https://claude.ai/claude-code) — route messages between your Jabber/XMPP client and Claude Code sessions running in GNU Screen or tmux.
+XMPP bridge for [Claude Code](https://claude.ai/claude-code) and [OpenCode](https://opencode.ai) — route messages between your Jabber/XMPP client and AI coding sessions running in GNU Screen or tmux.
 
 ## Quick Start
 
@@ -23,22 +23,23 @@ claude-xmpp-notify "Hello from bridge!"
 
 ## Features
 
-- **Persistent XMPP bot** — stays connected, routes messages to/from Claude sessions
-- **Session management** — register multiple Claude sessions, switch between them
-- **Multiplexer support** — GNU Screen and tmux backends
-- **Permission requests** — approve/deny Claude actions via XMPP
+- **Persistent XMPP bot** — stays connected, routes messages to/from coding sessions
+- **Multi-tool support** — Claude Code and OpenCode can run simultaneously in the same project directory
+- **Session management** — register multiple sessions, switch between them with `/1`, `/2`, …
+- **Multiplexer support** — GNU Screen and tmux backends; reliable background-window delivery
+- **Permission requests** — approve/deny AI actions via XMPP
 - **Notifications** — receive task completions, errors, and other events
-- **Configurable messages** — English default, easily translatable (Czech included)
-- **SQLite persistence** — sessions survive bridge restarts
+- **Configurable messages** — English default, easily translatable (Czech, German, Polish, Slovak included)
+- **SQLite persistence** — sessions survive bridge restarts; stable `/list` numbering across session restarts
 - **Secure** — credentials file permission checks, input validation, socket permissions
-- **Setup wizard** — interactive `claude-xmpp-bridge-setup` configures everything
+- **Setup wizard** — interactive `claude-xmpp-bridge-setup` configures everything including OpenCode
 
 ## System Dependencies
 
 | Dependency | Required | Purpose |
 |------------|----------|---------|
 | Python 3.11+ | yes | Runtime |
-| `jq` | yes | JSON processing in hook scripts |
+| `jq` | yes | JSON processing in Claude Code hook scripts |
 | GNU Screen or tmux | yes | Terminal multiplexer for message delivery |
 | systemd (user) | optional | Service management |
 
@@ -71,7 +72,7 @@ pip install -e ".[dev]"
 claude-xmpp-bridge-setup
 ```
 
-The wizard walks through all configuration steps: credentials, config file, XMPP test, hook installation, systemd service, and notification switches.
+The wizard walks through all configuration steps: credentials, config file, XMPP test, Claude Code hook installation, OpenCode plugin installation, systemd service, and notification switches.
 
 Use `--test-only` to just verify XMPP connectivity:
 
@@ -137,10 +138,13 @@ Send these from your Jabber client to the bot:
 
 | Command | Description |
 |---------|-------------|
-| `/list` or `/l` | List active Claude sessions |
+| `/list` or `/l` | List active sessions |
 | `/N message` | Send message to session #N |
 | `/help` | Show help |
 | _plain text_ | Send to last active session |
+
+Sessions are shown with a tool tag: `[screen]`, `[tmux]`, `[🧠screen]` (OpenCode), `[read-only]`.
+The active session is marked with `*`.
 
 ### Standalone tools
 
@@ -246,13 +250,69 @@ Each hook receives JSON on stdin. Here are the fields available per event:
 }
 ```
 
-## Custom messages
+## OpenCode Integration
 
-Copy `examples/messages_cs.toml` and customize:
+See [`examples/opencode/`](examples/opencode/) for an OpenCode plugin that provides the same functionality as the Claude Code hooks:
+
+- Renames the GNU Screen window to `🧠<project>` on startup
+- Registers/unregisters sessions automatically
+- Sends last assistant message via XMPP on `session.idle`
+- Blocking permission approval via XMPP (`permission.ask`)
+
+### Install
+
+The setup wizard handles installation automatically (Step 5):
 
 ```bash
-claude-xmpp-bridge --messages /path/to/my_messages.toml
+claude-xmpp-bridge-setup
 ```
+
+Or manually:
+
+```bash
+mkdir -p ~/.config/opencode/plugins
+cp examples/opencode/plugins/xmpp-bridge.js ~/.config/opencode/plugins/
+```
+
+Merge the permission config into `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "permission": {
+    "bash": "ask",
+    "edit": "ask"
+  }
+}
+```
+
+### Coexistence with Claude Code
+
+Claude Code and OpenCode sessions in the **same project directory coexist** — the bridge tracks them separately and neither evicts the other. In `/list` output, OpenCode sessions are distinguished by the `🧠` prefix (e.g., `[🧠screen]`).
+
+### Session registration payload
+
+The OpenCode plugin registers sessions with `source: "opencode"`:
+
+```json
+{
+  "session_id": "abc123",
+  "sty": "12345.pts-0",
+  "window": "0",
+  "project": "/home/user/project",
+  "backend": "screen",
+  "source": "opencode"
+}
+```
+
+## Custom messages
+
+Copy one of the example locale files and customize:
+
+```bash
+claude-xmpp-bridge --messages /path/to/messages_cs.toml
+```
+
+Available locales: `en` (default), `cs`, `de`, `pl`, `sk`.
 
 ## Debugging
 
@@ -297,6 +357,7 @@ echo '{"cmd":"send","message":"test"}' | socat - UNIX-CONNECT:~/.claude/bridge.s
 - **XMPP auth failure**: Check JID and password; run with `--verbose` to see connection details
 - **Messages not delivered**: Ensure ports 5222/5269 are open, or that DNS SRV records resolve
 - **Socket permission denied**: Ensure the client runs as the same user as the bridge
+- **Text appears in Claude Code prompt but Enter is not submitted**: Upgrade to the latest version — a regression in GNU Screen message delivery (using `paste` instead of `stuff`) was fixed
 
 ## Development
 
@@ -307,6 +368,9 @@ pip install -e ".[dev]"
 
 # Run tests
 pytest
+
+# Run tests with coverage
+pytest --cov=src/claude_xmpp_bridge --cov-report=term-missing
 
 # Lint
 ruff check src/ tests/

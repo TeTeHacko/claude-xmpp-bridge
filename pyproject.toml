@@ -57,6 +57,8 @@ packages = ["src/claude_xmpp_bridge"]
 "examples/hooks/format-location.sh" = "claude-xmpp-bridge/hooks/format-location.sh"
 "examples/hooks/settings.json" = "claude-xmpp-bridge/hooks/settings.json"
 "examples/systemd/claude-xmpp-bridge.service" = "claude-xmpp-bridge/systemd/claude-xmpp-bridge.service"
+"examples/opencode/plugins/xmpp-bridge.js" = "claude-xmpp-bridge/opencode/plugins/xmpp-bridge.js"
+"examples/opencode/opencode.json" = "claude-xmpp-bridge/opencode/opencode.json"
 
 [tool.ruff]
 line-length = 120

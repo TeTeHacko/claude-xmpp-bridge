@@ -20,6 +20,9 @@ HOOKS_DIR = Path.home() / ".claude" / "hooks"
 SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
 SWITCHES_DIR = Path.home() / ".config" / "xmpp-notify"
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
+OPENCODE_CONFIG_DIR = Path.home() / ".config" / "opencode"
+OPENCODE_PLUGINS_DIR = OPENCODE_CONFIG_DIR / "plugins"
+OPENCODE_SETTINGS = OPENCODE_CONFIG_DIR / "opencode.json"
 
 # Hook files to install (filename -> target name in ~/.claude/hooks/)
 HOOK_FILES: dict[str, str] = {
@@ -32,6 +35,21 @@ HOOK_FILES: dict[str, str] = {
     "permission-ask.sh": "permission-ask-xmpp.sh",
     "format-location.sh": "format-location.sh",
 }
+
+
+def _find_opencode_dir() -> Path | None:
+    """Find the directory containing OpenCode plugin sources."""
+    source_dir = Path(__file__).resolve().parent.parent.parent / "examples" / "opencode"
+    if source_dir.is_dir() and (source_dir / "plugins" / "xmpp-bridge.js").is_file():
+        return source_dir
+
+    data_path = sysconfig.get_path("data")
+    if data_path:
+        shared_dir = Path(data_path) / "share" / "claude-xmpp-bridge" / "opencode"
+        if shared_dir.is_dir():
+            return shared_dir
+
+    return None
 
 
 def _find_hooks_dir() -> Path | None:
@@ -138,10 +156,7 @@ def _step_config(yes_mode: bool) -> bool:
         return False
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(
-        f'jid = "{jid}"\n'
-        f'recipient = "{recipient}"\n'
-    )
+    CONFIG_FILE.write_text(f'jid = "{jid}"\nrecipient = "{recipient}"\n')
     print(f"  Saved: {CONFIG_FILE}")
     return True
 
@@ -237,9 +252,61 @@ def _step_hooks(yes_mode: bool) -> bool:
     return True
 
 
+def _step_opencode(yes_mode: bool) -> bool:
+    """Step 5: Install OpenCode plugin and config."""
+    print("\n--- Step 5: OpenCode plugin ---")
+
+    opencode_source = _find_opencode_dir()
+    if not opencode_source:
+        print("  Warning: OpenCode plugin source files not found, skipping")
+        return True
+
+    if not _confirm("  Install OpenCode XMPP plugin to ~/.config/opencode/plugins/?", yes_mode=yes_mode):
+        return True
+
+    OPENCODE_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
+
+    src = opencode_source / "plugins" / "xmpp-bridge.js"
+    dst = OPENCODE_PLUGINS_DIR / "xmpp-bridge.js"
+    if dst.is_file() and not yes_mode and not _confirm("    Overwrite xmpp-bridge.js?", default=False):
+        pass
+    else:
+        shutil.copy2(src, dst)
+        dst.chmod(dst.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR)
+        print(f"  Installed: {dst}")
+
+    # Merge permission config into opencode.json
+    config_src = opencode_source / "opencode.json"
+    if not config_src.is_file():
+        return True
+
+    if not _confirm("  Merge permission config into ~/.config/opencode/opencode.json?", yes_mode=yes_mode):
+        return True
+
+    try:
+        new_permission = json.loads(config_src.read_text())["permission"]
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"  Error reading opencode.json: {e}", file=sys.stderr)
+        return True
+
+    existing: dict[str, object] = {}
+    if OPENCODE_SETTINGS.is_file():
+        try:
+            existing = json.loads(OPENCODE_SETTINGS.read_text())
+        except json.JSONDecodeError:
+            print(f"  Warning: could not parse {OPENCODE_SETTINGS}, creating new")
+
+    existing["permission"] = new_permission
+
+    OPENCODE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    OPENCODE_SETTINGS.write_text(json.dumps(existing, indent=2) + "\n")
+    print(f"  Updated: {OPENCODE_SETTINGS}")
+    return True
+
+
 def _step_systemd(yes_mode: bool) -> bool:
-    """Step 5: Install systemd user unit."""
-    print("\n--- Step 5: systemd service ---")
+    """Step 6: Install systemd user unit."""
+    print("\n--- Step 6: systemd service ---")
 
     if not shutil.which("systemctl"):
         print("  systemctl not found, skipping")
@@ -267,8 +334,8 @@ def _step_systemd(yes_mode: bool) -> bool:
 
 
 def _step_switches(yes_mode: bool) -> bool:
-    """Step 6: Enable on/off switches."""
-    print("\n--- Step 6: Notification switches ---")
+    """Step 7: Enable on/off switches."""
+    print("\n--- Step 7: Notification switches ---")
 
     SWITCHES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -312,6 +379,7 @@ def setup_main() -> None:
         ("config", lambda: _step_config(args.yes)),
         ("test", _step_test),
         ("hooks", lambda: _step_hooks(args.yes)),
+        ("opencode", lambda: _step_opencode(args.yes)),
         ("systemd", lambda: _step_systemd(args.yes)),
         ("switches", lambda: _step_switches(args.yes)),
     ]

@@ -7,14 +7,14 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 
-@dataclass
+@dataclass(frozen=True)
 class Messages:
     """All user-facing text strings. Override via TOML file."""
 
     bridge_started: str = "XMPP Bridge started."
     bridge_stopped: str = "XMPP Bridge stopped."
-    no_sessions: str = "No active Claude sessions."
-    session_list_header: str = "Claude sessions:"
+    no_sessions: str = "No active sessions."
+    session_list_header: str = "Sessions:"
     active_marker: str = "* = active session"
     sent: str = "sent"
     delivery_failed: str = "Delivery to [{project}] failed"
@@ -23,13 +23,15 @@ class Messages:
     no_active_session: str = "No active session. Type /list."
     unknown_command: str = "Unknown command: {cmd}\nType /help for help."
     usage_send_to: str = "Usage: {cmd} <message>"
-    help_text: str = field(default=(
-        "XMPP Bridge commands:\n"
-        "  /list, /l  - list sessions\n"
-        "  /N message - send to session #N\n"
-        "  /help      - this help\n"
-        "  text       - send to last active session"
-    ))
+    help_text: str = field(
+        default=(
+            "XMPP Bridge commands:\n"
+            "  /list, /l  - list sessions\n"
+            "  /N message - send to session #N\n"
+            "  /help      - this help\n"
+            "  text       - send to last active session"
+        )
+    )
     read_only_tag: str = "read-only"
     stale_sessions_cleaned: str = "Cleaned {count} stale session(s)"
 

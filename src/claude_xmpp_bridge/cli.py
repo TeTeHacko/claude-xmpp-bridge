@@ -34,9 +34,7 @@ def _setup_logging(verbose: bool = False, quiet: bool = False) -> None:
 
 def bridge_main() -> None:
     """Entry point for claude-xmpp-bridge daemon."""
-    parser = argparse.ArgumentParser(
-        description="XMPP bridge daemon for Claude Code"
-    )
+    parser = argparse.ArgumentParser(description="XMPP bridge daemon for Claude Code")
     _add_common_args(parser)
     parser.add_argument("--socket-path", help="Unix socket path")
     parser.add_argument("--db-path", help="SQLite database path")
@@ -70,9 +68,7 @@ def bridge_main() -> None:
 
 def client_main() -> None:
     """Entry point for claude-xmpp-client."""
-    parser = argparse.ArgumentParser(
-        description="Client for claude-xmpp-bridge daemon"
-    )
+    parser = argparse.ArgumentParser(description="Client for claude-xmpp-bridge daemon")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--socket-path", help="Unix socket path")
     sub = parser.add_subparsers(dest="command")
@@ -126,6 +122,9 @@ def client_main() -> None:
         result = send_to_bridge({"cmd": "send", "message": message}, socket_path)
         if result is None:
             fallback_notify(message)
+        elif "error" in result:
+            print(f"Error: {result['error']}", file=sys.stderr)
+            sys.exit(1)
 
     elif args.command == "register":
         try:
@@ -137,9 +136,7 @@ def client_main() -> None:
         send_to_bridge(data, socket_path)
 
     elif args.command == "unregister":
-        send_to_bridge(
-            {"cmd": "unregister", "session_id": args.session_id}, socket_path
-        )
+        send_to_bridge({"cmd": "unregister", "session_id": args.session_id}, socket_path)
 
     elif args.command == "response":
         try:
@@ -153,11 +150,12 @@ def client_main() -> None:
             message = data.get("message", "")
             if message:
                 fallback_notify(str(message))
+        elif "error" in result:
+            print(f"Error: {result['error']}", file=sys.stderr)
+            sys.exit(1)
 
     elif args.command == "query":
-        result = send_to_bridge(
-            {"cmd": "query", "session_id": args.session_id}, socket_path
-        )
+        result = send_to_bridge({"cmd": "query", "session_id": args.session_id}, socket_path)
         if result and result.get("ok"):
             print(result["project"])
         else:

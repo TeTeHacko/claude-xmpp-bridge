@@ -1,6 +1,8 @@
-# Claude Code Hooks Examples
+# Claude Code Hooks
 
-These are example hook configurations for integrating `claude-xmpp-bridge` with [Claude Code](https://claude.ai/claude-code).
+These hook scripts integrate `claude-xmpp-bridge` with [Claude Code](https://claude.ai/claude-code).
+
+> **OpenCode users:** see [`examples/opencode/`](../opencode/) for the equivalent OpenCode plugin.
 
 ## Setup
 

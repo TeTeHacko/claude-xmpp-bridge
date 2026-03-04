@@ -30,6 +30,13 @@ class Config:
     db_path: Path
     messages_file: Path | None
 
+    def __repr__(self) -> str:
+        return (
+            f"Config(jid={self.jid!r}, password='***', recipient={self.recipient!r}, "
+            f"socket_path={self.socket_path!r}, db_path={self.db_path!r}, "
+            f"messages_file={self.messages_file!r})"
+        )
+
 
 @dataclass(frozen=True)
 class NotifyConfig:
@@ -38,6 +45,9 @@ class NotifyConfig:
     jid: str
     password: str
     recipient: str
+
+    def __repr__(self) -> str:
+        return f"NotifyConfig(jid={self.jid!r}, password='***', recipient={self.recipient!r})"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -112,33 +122,25 @@ def load_config(
     toml = _read_toml(CONFIG_FILE)
 
     # JID
-    jid = (
-        cli_jid
-        or os.environ.get("CLAUDE_XMPP_JID")
-        or _toml_str(toml, "jid")
-    )
+    jid = cli_jid or os.environ.get("CLAUDE_XMPP_JID") or _toml_str(toml, "jid")
     if not jid:
         raise SystemExit(
             "Error: XMPP JID not configured.\n"
             "Set it via:\n"
             "  --jid flag\n"
             "  CLAUDE_XMPP_JID environment variable\n"
-            f"  jid = \"...\" in {CONFIG_FILE}"
+            f'  jid = "..." in {CONFIG_FILE}'
         )
 
     # Recipient
-    recipient = (
-        cli_recipient
-        or os.environ.get("CLAUDE_XMPP_RECIPIENT")
-        or _toml_str(toml, "recipient")
-    )
+    recipient = cli_recipient or os.environ.get("CLAUDE_XMPP_RECIPIENT") or _toml_str(toml, "recipient")
     if not recipient:
         raise SystemExit(
             "Error: XMPP recipient not configured.\n"
             "Set it via:\n"
             "  --recipient flag\n"
             "  CLAUDE_XMPP_RECIPIENT environment variable\n"
-            f"  recipient = \"...\" in {CONFIG_FILE}"
+            f'  recipient = "..." in {CONFIG_FILE}'
         )
 
     # Password
@@ -158,18 +160,11 @@ def load_config(
     ).expanduser()
 
     db_path = Path(
-        cli_db_path
-        or os.environ.get("CLAUDE_XMPP_DB")
-        or _toml_str(toml, "db_path")
-        or str(DEFAULT_DB_PATH)
+        cli_db_path or os.environ.get("CLAUDE_XMPP_DB") or _toml_str(toml, "db_path") or str(DEFAULT_DB_PATH)
     ).expanduser()
 
     # Messages file
-    messages_raw = (
-        cli_messages
-        or os.environ.get("CLAUDE_XMPP_MESSAGES")
-        or _toml_str(toml, "messages_file")
-    )
+    messages_raw = cli_messages or os.environ.get("CLAUDE_XMPP_MESSAGES") or _toml_str(toml, "messages_file")
     messages_file = Path(messages_raw).expanduser() if messages_raw else None
 
     return Config(
@@ -191,26 +186,14 @@ def load_notify_config(
     """Load notify/ask config (subset without socket/db paths)."""
     toml = _read_toml(CONFIG_FILE)
 
-    jid = (
-        cli_jid
-        or os.environ.get("CLAUDE_XMPP_JID")
-        or _toml_str(toml, "jid")
-    )
+    jid = cli_jid or os.environ.get("CLAUDE_XMPP_JID") or _toml_str(toml, "jid")
     if not jid:
-        raise SystemExit(
-            "Error: XMPP JID not configured.\n"
-            "Set it via --jid, CLAUDE_XMPP_JID, or in config.toml"
-        )
+        raise SystemExit("Error: XMPP JID not configured.\nSet it via --jid, CLAUDE_XMPP_JID, or in config.toml")
 
-    recipient = (
-        cli_recipient
-        or os.environ.get("CLAUDE_XMPP_RECIPIENT")
-        or _toml_str(toml, "recipient")
-    )
+    recipient = cli_recipient or os.environ.get("CLAUDE_XMPP_RECIPIENT") or _toml_str(toml, "recipient")
     if not recipient:
         raise SystemExit(
-            "Error: XMPP recipient not configured.\n"
-            "Set it via --recipient, CLAUDE_XMPP_RECIPIENT, or in config.toml"
+            "Error: XMPP recipient not configured.\nSet it via --recipient, CLAUDE_XMPP_RECIPIENT, or in config.toml"
         )
 
     credentials_path = _resolve_credentials(

@@ -14,8 +14,8 @@ class TestMessagesDefaults:
         msgs = Messages()
         assert msgs.bridge_started == "XMPP Bridge started."
         assert msgs.bridge_stopped == "XMPP Bridge stopped."
-        assert msgs.no_sessions == "No active Claude sessions."
-        assert msgs.session_list_header == "Claude sessions:"
+        assert msgs.no_sessions == "No active sessions."
+        assert msgs.session_list_header == "Sessions:"
         assert msgs.active_marker == "* = active session"
         assert msgs.sent == "sent"
         assert msgs.read_only_tag == "read-only"
@@ -63,10 +63,7 @@ class TestLoadMessagesFromToml:
 
     def test_override_multiple_keys(self, tmp_path):
         toml_file = tmp_path / "messages.toml"
-        toml_file.write_text(
-            'bridge_started = "Most XMPP spuštěn."\n'
-            'bridge_stopped = "Most XMPP zastaven."\n'
-        )
+        toml_file.write_text('bridge_started = "Most XMPP spuštěn."\nbridge_stopped = "Most XMPP zastaven."\n')
         msgs = load_messages(toml_file)
         assert msgs.bridge_started == "Most XMPP spuštěn."
         assert msgs.bridge_stopped == "Most XMPP zastaven."
@@ -91,10 +88,7 @@ class TestUnknownKeysIgnored:
 
     def test_known_and_unknown_together(self, tmp_path):
         toml_file = tmp_path / "messages.toml"
-        toml_file.write_text(
-            'sent = "odesláno"\n'
-            'totally_unknown = "nope"\n'
-        )
+        toml_file.write_text('sent = "odesláno"\ntotally_unknown = "nope"\n')
         msgs = load_messages(toml_file)
         assert msgs.sent == "odesláno"
         assert not hasattr(msgs, "totally_unknown")
@@ -120,9 +114,7 @@ class TestMissingKeysFallback:
         for f in fields(Messages):
             if f.name == "no_sessions":
                 continue
-            assert getattr(msgs, f.name) == getattr(default, f.name), (
-                f"{f.name} should be default"
-            )
+            assert getattr(msgs, f.name) == getattr(default, f.name), f"{f.name} should be default"
 
     def test_empty_toml_returns_all_defaults(self, tmp_path):
         toml_file = tmp_path / "messages.toml"
@@ -163,9 +155,7 @@ class TestFormatStrings:
 
     def test_overridden_format_string(self, tmp_path):
         toml_file = tmp_path / "messages.toml"
-        toml_file.write_text(
-            'delivery_failed = "Doručení do [{project}] selhalo"\n'
-        )
+        toml_file.write_text('delivery_failed = "Doručení do [{project}] selhalo"\n')
         msgs = load_messages(toml_file)
         result = msgs.delivery_failed.format(project="test")
         assert result == "Doručení do [test] selhalo"

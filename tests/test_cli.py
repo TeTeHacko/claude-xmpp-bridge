@@ -150,3 +150,71 @@ class TestNotifyMissingMessage:
         with pytest.raises(SystemExit) as exc_info:
             notify_main()
         assert exc_info.value.code == 1
+
+
+class TestClientSubcommands:
+    """client_main subcommand routing — invalid JSON, socket unavailable."""
+
+    def test_register_invalid_json_exits(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "register", "not-json{{{"])
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 1
+        assert "invalid JSON" in capsys.readouterr().err
+
+    def test_response_invalid_json_exits(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "response", "not-json{{{"])
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 1
+        assert "invalid JSON" in capsys.readouterr().err
+
+    def test_send_empty_message_exits_zero(self, monkeypatch, tmp_path):
+        """send with empty stdin and no args should exit 0 silently."""
+        import io
+
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "send"])
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr(sys.stdin, "read", lambda: "   ")  # whitespace only
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 0
+
+    def test_send_no_message_tty_exits_nonzero(self, monkeypatch, capsys):
+        """send with no args and a tty stdin should exit non-zero."""
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "send"])
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 1
+
+    def test_query_exits_nonzero_when_bridge_not_running(self, monkeypatch, tmp_path):
+        """query with no running bridge should exit 1."""
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "--socket-path", str(tmp_path / "no.sock"), "query", "sess-1"],
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 1
+
+
+class TestAskMissingMessage:
+    """ask without message and with a tty should exit non-zero."""
+
+    def test_ask_no_message_tty(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-ask"])
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        with pytest.raises(SystemExit) as exc_info:
+            ask_main()
+        assert exc_info.value.code == 1
+
+    def test_ask_empty_stdin_exits_zero(self, monkeypatch):
+        """ask with empty piped stdin should exit 0 silently."""
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-ask"])
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr(sys.stdin, "read", lambda: "   ")
+        with pytest.raises(SystemExit) as exc_info:
+            ask_main()
+        assert exc_info.value.code == 0

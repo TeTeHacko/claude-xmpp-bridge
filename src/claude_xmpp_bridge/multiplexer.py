@@ -27,31 +27,72 @@ class Multiplexer(Protocol):
 
 
 class ScreenMultiplexer:
-    """GNU Screen backend — sends text via the 'stuff' command."""
+    """GNU Screen backend — sends text via at N# stuff."""
 
     async def send_text(self, target: str, window: str, text: str) -> bool:
-        """Send text to a GNU Screen window via stuff command."""
+        """Send text to a GNU Screen window.
+
+        Uses 'at N# stuff <text>' + 'at N# stuff \\r' instead of plain 'stuff'
+        or 'register + paste'.
+
+        Plain 'stuff' always targets the currently-focused window, ignoring any
+        -p selector.  'register + paste' routes to the correct window but 'paste'
+        writes raw bytes to the PTY buffer, which readline-based apps (like
+        Claude Code running in Node.js raw mode) do not interpret as a key
+        event — so \\r never triggers Enter.
+
+        'at N#' changes the command's window context, causing 'stuff' to route
+        to the target window regardless of focus.  Because 'stuff' goes through
+        screen's key-event pipeline (not the raw PTY write path), readline
+        correctly recognises the \\r as an Enter keypress.
+
+        A 50 ms sleep between text and CR gives readline time to process the
+        pasted text before the Enter arrives.
+        """
         text = sanitize_text(text)
-        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        proc1 = await asyncio.create_subprocess_exec(
+            "screen",
+            "-S",
+            target,
+            "-X",
+            "at",
+            f"{window}#",
+            "stuff",
+            text,
+        )
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "screen", "-S", target, "-p", window, "-X", "eval", f'stuff "{escaped}"',
-            )
-            if await asyncio.wait_for(proc.wait(), timeout=5) != 0:
-                log.error("Screen stuff failed (exit %d)", proc.returncode)
+            if await asyncio.wait_for(proc1.wait(), timeout=5) != 0:
+                log.error("Screen stuff failed (exit %d)", proc1.returncode)
                 return False
-            await asyncio.sleep(0.05)
-            proc = await asyncio.create_subprocess_exec(
-                "screen", "-S", target, "-p", window, "-X", "eval", 'stuff "\\015"',
-            )
-            if await asyncio.wait_for(proc.wait(), timeout=5) != 0:
-                log.error("Screen CR failed (exit %d)", proc.returncode)
-                return False
-            log.info("Stuffed to screen %s window %s", target, window)
-            return True
         except TimeoutError:
             log.error("Screen stuff timed out")
+            proc1.kill()
+            await proc1.wait()
             return False
+
+        await asyncio.sleep(0.05)
+        proc2 = await asyncio.create_subprocess_exec(
+            "screen",
+            "-S",
+            target,
+            "-X",
+            "at",
+            f"{window}#",
+            "stuff",
+            "\r",
+        )
+        try:
+            if await asyncio.wait_for(proc2.wait(), timeout=5) != 0:
+                log.error("Screen CR failed (exit %d)", proc2.returncode)
+                return False
+        except TimeoutError:
+            log.error("Screen CR timed out")
+            proc2.kill()
+            await proc2.wait()
+            return False
+
+        log.info("Stuffed to screen %s window %s", target, window)
+        return True
 
 
 class TmuxMultiplexer:
@@ -60,25 +101,45 @@ class TmuxMultiplexer:
     async def send_text(self, target: str, window: str, text: str) -> bool:
         """Send text to a tmux pane via send-keys."""
         text = sanitize_text(text)
+        proc1 = await asyncio.create_subprocess_exec(
+            "tmux",
+            "send-keys",
+            "-t",
+            target,
+            "-l",
+            "--",
+            text,
+        )
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "tmux", "send-keys", "-t", target, "-l", "--", text,
-            )
-            if await asyncio.wait_for(proc.wait(), timeout=5) != 0:
-                log.error("tmux send-keys failed (exit %d)", proc.returncode)
+            if await asyncio.wait_for(proc1.wait(), timeout=5) != 0:
+                log.error("tmux send-keys failed (exit %d)", proc1.returncode)
                 return False
-            await asyncio.sleep(0.05)
-            proc = await asyncio.create_subprocess_exec(
-                "tmux", "send-keys", "-t", target, "Enter",
-            )
-            if await asyncio.wait_for(proc.wait(), timeout=5) != 0:
-                log.error("tmux Enter failed (exit %d)", proc.returncode)
-                return False
-            log.info("Sent to tmux pane %s", target)
-            return True
         except TimeoutError:
             log.error("tmux send-keys timed out")
+            proc1.kill()
+            await proc1.wait()
             return False
+
+        await asyncio.sleep(0.05)
+        proc2 = await asyncio.create_subprocess_exec(
+            "tmux",
+            "send-keys",
+            "-t",
+            target,
+            "Enter",
+        )
+        try:
+            if await asyncio.wait_for(proc2.wait(), timeout=5) != 0:
+                log.error("tmux Enter failed (exit %d)", proc2.returncode)
+                return False
+        except TimeoutError:
+            log.error("tmux Enter timed out")
+            proc2.kill()
+            await proc2.wait()
+            return False
+
+        log.info("Sent to tmux pane %s", target)
+        return True
 
 
 def get_multiplexer(backend: str | None) -> Multiplexer | None:
