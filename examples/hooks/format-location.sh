@@ -10,7 +10,13 @@ CWD="$(echo "$INPUT" | jq -r '.cwd | if . == env.HOME then "~" elif startswith(e
 
 REG_PROJECT="$(claude-xmpp-client query "$SID" 2>/dev/null)" || REG_PROJECT=""
 if [ -n "$REG_PROJECT" ]; then
-    SHORT_PROJECT="$(echo "$REG_PROJECT" | sed "s|^$HOME/|~/|; s|^$HOME$|~|")"
+    # Use pure bash parameter substitution instead of sed to avoid injection
+    # via special characters in $HOME or $REG_PROJECT (e.g. |, \, &).
+    case "$REG_PROJECT" in
+        "$HOME"/*)  SHORT_PROJECT="~/${REG_PROJECT#"$HOME"/}" ;;
+        "$HOME")    SHORT_PROJECT="~" ;;
+        *)          SHORT_PROJECT="$REG_PROJECT" ;;
+    esac
     if [ "$SHORT_PROJECT" = "$CWD" ]; then
         echo "$CWD"
     else

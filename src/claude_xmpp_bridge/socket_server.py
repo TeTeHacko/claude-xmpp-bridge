@@ -24,9 +24,11 @@ class SocketServer:
         self,
         socket_path: Path,
         request_handler: Callable[[dict[str, object]], Awaitable[dict[str, object]]],
+        socket_token: str | None = None,
     ) -> None:
         self.socket_path = socket_path
         self._request_handler = request_handler
+        self._socket_token = socket_token
         self._server: asyncio.AbstractServer | None = None
         self._owns_socket = False
 
@@ -80,6 +82,23 @@ class SocketServer:
                 writer.write(json.dumps({"error": "invalid JSON"}).encode() + b"\n")
                 await writer.drain()
                 return
+
+            if not isinstance(request, dict):
+                writer.write(json.dumps({"error": "request must be a JSON object"}).encode() + b"\n")
+                await writer.drain()
+                return
+
+            # Token authentication: if a socket_token is configured, every request
+            # must include a matching "token" field. This prevents unauthorized
+            # local processes (compromised subprocesses, third-party hooks) from
+            # interacting with the bridge socket.
+            if self._socket_token is not None:
+                provided = request.get("token")
+                if provided != self._socket_token:
+                    log.warning("Socket request rejected: invalid or missing token")
+                    writer.write(json.dumps({"error": "unauthorized"}).encode() + b"\n")
+                    await writer.drain()
+                    return
 
             response = await self._request_handler(request)
             writer.write(json.dumps(response).encode() + b"\n")

@@ -204,6 +204,27 @@ class TestScreenMultiplexer:
         assert "\x00" not in text_args[-1]
         assert "cleantext" in text_args[-1]
 
+    async def test_rejects_invalid_target(self):
+        """Target with shell metacharacters must be rejected immediately."""
+        mux = ScreenMultiplexer()
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            result = await mux.send_text("bad;target", "0", "text")
+        assert result is False
+        mock_exec.assert_not_called()
+
+    async def test_rejects_del_char_in_text(self):
+        """DEL (0x7F) must be stripped from text."""
+        mux = ScreenMultiplexer()
+        proc_ok = _make_process_mock(0)
+
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = proc_ok
+            await mux.send_text("session", "0", "clean\x7ftext")
+
+        text_args = mock_exec.call_args_list[0].args
+        assert "\x7f" not in text_args[-1]
+        assert "cleantext" in text_args[-1]
+
 
 # ---------------------------------------------------------------------------
 # TmuxMultiplexer
@@ -220,7 +241,7 @@ class TestTmuxMultiplexer:
 
         with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = proc_ok
-            result = await mux.send_text("session:0.1", "0", "hello world")
+            result = await mux.send_text("mysession", "0", "hello world")
 
         assert result is True
         assert mock_exec.call_count == 2
@@ -241,7 +262,7 @@ class TestTmuxMultiplexer:
 
         with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = proc_fail
-            result = await mux.send_text("session:0.1", "0", "text")
+            result = await mux.send_text("mysession", "0", "text")
 
         assert result is False
         assert mock_exec.call_count == 1
@@ -254,7 +275,7 @@ class TestTmuxMultiplexer:
 
         with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
             mock_exec.side_effect = [proc_ok, proc_fail]
-            result = await mux.send_text("session:0.1", "0", "text")
+            result = await mux.send_text("mySession-1", "0", "text")
 
         assert result is False
         assert mock_exec.call_count == 2
@@ -266,10 +287,18 @@ class TestTmuxMultiplexer:
 
         with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = proc_timeout
-            result = await mux.send_text("session:0.1", "0", "text")
+            result = await mux.send_text("mySession-1", "0", "text")
 
         assert result is False
         proc_timeout.kill.assert_called_once()
+
+    async def test_rejects_colon_in_target(self):
+        """Target with colon (tmux session:window syntax) must be rejected."""
+        mux = TmuxMultiplexer()
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            result = await mux.send_text("session:0.1", "0", "text")
+        assert result is False
+        mock_exec.assert_not_called()
 
     async def test_sanitizes_input(self):
         """Control characters are stripped before sending to tmux."""

@@ -13,8 +13,8 @@ log = logging.getLogger(__name__)
 
 # Validation patterns
 SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
-STY_RE = re.compile(r"^[a-zA-Z0-9_.:\-]*$")
-WINDOW_RE = re.compile(r"^[0-9]*$")
+STY_RE = re.compile(r"^[a-zA-Z0-9_.\-]{0,128}$")  # no colon: prevents tmux session:window injection
+WINDOW_RE = re.compile(r"^[0-9]{0,6}$")  # max 6 digits, empty string allowed (screen default)
 
 
 class SessionInfo(TypedDict):
@@ -154,13 +154,15 @@ class SessionRegistry:
         if not is_reregister:
             self.last_active = session_id
         self._save_session(session_id)
-        log.info("Registered session %s (project=%s, backend=%s, source=%s)", session_id, project, backend, source)
+        log.info("Registered session %s (backend=%s, source=%s)", session_id, backend, source)
+        log.debug("Registered session %s (project=%s, backend=%s, source=%s)", session_id, project, backend, source)
 
     def unregister(self, session_id: str) -> None:
         """Unregister a session."""
         if session_id in self.sessions:
             info = self.sessions.pop(session_id)
-            log.info("Unregistered session %s (project=%s)", session_id, info["project"])
+            log.info("Unregistered session %s", session_id)
+            log.debug("Unregistered session %s (project=%s)", session_id, info["project"])
             if self.last_active == session_id:
                 if self.sessions:
                     self.last_active = max(

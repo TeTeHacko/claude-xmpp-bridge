@@ -9,8 +9,12 @@ from typing import Protocol
 
 log = logging.getLogger(__name__)
 
-# Remove ASCII control characters 0-31 except newline (0x0A)
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x09\x0b-\x1f]")
+# Remove ASCII control characters 0-31 except newline (0x0A), and DEL (0x7F)
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+
+# Allowed characters in multiplexer target (session name).
+# Colon is intentionally excluded to prevent tmux session:window injection.
+_TARGET_RE = re.compile(r"^[a-zA-Z0-9_.\-]{0,128}$")
 
 
 def sanitize_text(text: str) -> str:
@@ -34,6 +38,7 @@ class ScreenMultiplexer:
 
         Uses 'at N# stuff <text>' + 'at N# stuff \\r' instead of plain 'stuff'
         or 'register + paste'.
+        Rejects targets that don't match the allowed pattern (no shell metacharacters).
 
         Plain 'stuff' always targets the currently-focused window, ignoring any
         -p selector.  'register + paste' routes to the correct window but 'paste'
@@ -49,6 +54,9 @@ class ScreenMultiplexer:
         A 50 ms sleep between text and CR gives readline time to process the
         pasted text before the Enter arrives.
         """
+        if not _TARGET_RE.match(target):
+            log.error("Rejected invalid screen target: %r", target)
+            return False
         text = sanitize_text(text)
         proc1 = await asyncio.create_subprocess_exec(
             "screen",
@@ -100,6 +108,9 @@ class TmuxMultiplexer:
 
     async def send_text(self, target: str, window: str, text: str) -> bool:
         """Send text to a tmux pane via send-keys."""
+        if not _TARGET_RE.match(target):
+            log.error("Rejected invalid tmux target: %r", target)
+            return False
         text = sanitize_text(text)
         proc1 = await asyncio.create_subprocess_exec(
             "tmux",

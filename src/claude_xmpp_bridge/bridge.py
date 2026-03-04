@@ -18,6 +18,14 @@ from .xmpp import XMPPConnection
 
 log = logging.getLogger(__name__)
 
+# Security limits
+MAX_SESSIONS = 50  # max registered sessions per bridge instance
+MAX_PROJECT_LEN = 4096  # max length of project path
+MAX_XMPP_BODY = 10_000  # max length of incoming XMPP message body (chars)
+
+# Allowed values for the 'source' field
+_VALID_SOURCES: frozenset[str | None] = frozenset({"opencode", None})
+
 _ALIVE_CHECK_CMDS: dict[str, list[str]] = {
     "screen": ["screen", "-ls"],
     "tmux": ["tmux", "has-session", "-t"],
@@ -31,9 +39,9 @@ class XMPPBridge:
         self.config = config
         self.messages: Messages = load_messages(config.messages_file)
         self.registry = SessionRegistry(config.db_path)
-        self.xmpp = XMPPConnection(config.jid, config.password)
+        self.xmpp = XMPPConnection(config.jid, config.password, force_starttls=config.force_starttls)
         self.xmpp.on_message(self._on_xmpp_message)
-        self.socket_server = SocketServer(config.socket_path, self._handle_request)
+        self.socket_server = SocketServer(config.socket_path, self._handle_request, config.socket_token)
 
     # --- XMPP message handling ---
 
@@ -43,7 +51,7 @@ class XMPPBridge:
         if msg["from"].bare != self.config.recipient:
             return
 
-        body: str = msg["body"].strip()
+        body: str = msg["body"].strip()[:MAX_XMPP_BODY]
         if not body:
             return
 
@@ -280,9 +288,13 @@ class XMPPBridge:
             project = str(req.get("project", ""))
             if not project:
                 return {"error": "missing project"}
+            if len(project) > MAX_PROJECT_LEN:
+                return {"error": f"project path too long (max {MAX_PROJECT_LEN} chars)"}
 
             source_raw = req.get("source")
             source = str(source_raw) if source_raw is not None else None
+            if source not in _VALID_SOURCES:
+                return {"error": f"unsupported source: {source!r}"}
 
             # Deduplicate: remove old sessions with same (project + source) or same sty+window.
             # Project dedup is source-aware: Claude Code and OpenCode may coexist in the same
@@ -303,6 +315,10 @@ class XMPPBridge:
                         inherited_registered_at = old_info["registered_at"]
                     log.info("Replacing stale session %s (same sty=%s, window=%s)", old_sid, sty, window)
                     self.registry.unregister(old_sid)
+
+            # Check session limit (after deduplication so replacements don't count)
+            if sid not in self.registry.sessions and len(self.registry.sessions) >= MAX_SESSIONS:
+                return {"error": f"session limit reached (max {MAX_SESSIONS})"}
 
             self.registry.register(
                 session_id=sid,

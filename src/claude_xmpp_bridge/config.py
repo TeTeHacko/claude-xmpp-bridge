@@ -29,12 +29,16 @@ class Config:
     socket_path: Path
     db_path: Path
     messages_file: Path | None
+    socket_token: str | None = None  # shared secret for socket auth (None = disabled)
+    force_starttls: bool = True  # require TLS on XMPP connection
 
     def __repr__(self) -> str:
+        token_repr = "'***'" if self.socket_token else "None"
         return (
             f"Config(jid={self.jid!r}, password='***', recipient={self.recipient!r}, "
             f"socket_path={self.socket_path!r}, db_path={self.db_path!r}, "
-            f"messages_file={self.messages_file!r})"
+            f"messages_file={self.messages_file!r}, socket_token={token_repr}, "
+            f"force_starttls={self.force_starttls!r})"
         )
 
 
@@ -59,14 +63,14 @@ def _read_toml(path: Path) -> dict[str, object]:
 
 
 def _check_permissions(path: Path) -> None:
-    """Warn if credentials file has permissions more open than 600."""
+    """Error if credentials file is readable by group or others (should be 600)."""
     try:
         mode = path.stat().st_mode
         if mode & (stat.S_IRWXG | stat.S_IRWXO):
-            log.warning(
-                "Credentials file %s has permissions %o, should be 600",
-                path,
-                stat.S_IMODE(mode),
+            raise SystemExit(
+                f"Error: credentials file {path} has permissions {stat.S_IMODE(mode):o}, "
+                "which allows group/other access.\n"
+                f"Fix with: chmod 600 {path}"
             )
     except OSError:
         pass
@@ -167,6 +171,13 @@ def load_config(
     messages_raw = cli_messages or os.environ.get("CLAUDE_XMPP_MESSAGES") or _toml_str(toml, "messages_file")
     messages_file = Path(messages_raw).expanduser() if messages_raw else None
 
+    # Socket token (shared secret for socket authentication)
+    socket_token = os.environ.get("CLAUDE_XMPP_SOCKET_TOKEN") or _toml_str(toml, "socket_token") or None
+
+    # Force STARTTLS (default True)
+    force_starttls_raw = toml.get("force_starttls")
+    force_starttls = bool(force_starttls_raw) if force_starttls_raw is not None else True
+
     return Config(
         jid=jid,
         password=password,
@@ -174,6 +185,8 @@ def load_config(
         socket_path=socket_path,
         db_path=db_path,
         messages_file=messages_file,
+        socket_token=socket_token,
+        force_starttls=force_starttls,
     )
 
 

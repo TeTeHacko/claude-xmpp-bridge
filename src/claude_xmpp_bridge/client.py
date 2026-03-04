@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 import subprocess
 import sys
@@ -13,6 +14,21 @@ from .config import DEFAULT_SOCKET_PATH
 
 log = logging.getLogger(__name__)
 
+# Read socket token from environment variable or default token file.
+# The token is injected into every request so the bridge can authenticate callers.
+_TOKEN_FILE = Path.home() / ".config" / "claude-xmpp-bridge" / "socket_token"
+
+
+def _get_socket_token() -> str | None:
+    """Return the socket token from env var or token file, or None if not configured."""
+    env_token = os.environ.get("CLAUDE_XMPP_SOCKET_TOKEN")
+    if env_token:
+        return env_token
+    if _TOKEN_FILE.is_file():
+        token = _TOKEN_FILE.read_text().strip()
+        return token if token else None
+    return None
+
 
 def send_to_bridge(
     request: dict[str, object],
@@ -21,6 +37,11 @@ def send_to_bridge(
     """Send JSON request to bridge socket. Returns response dict or None on failure."""
     if not socket_path.exists():
         return None
+
+    # Attach token if available
+    token = _get_socket_token()
+    if token and "token" not in request:
+        request = {**request, "token": token}
 
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -39,10 +60,15 @@ def send_to_bridge(
 
 
 def fallback_notify(message: str) -> None:
-    """Send via claude-xmpp-notify as fallback when bridge is not running."""
+    """Send via claude-xmpp-notify as fallback when bridge is not running.
+
+    Message is passed via stdin (not CLI args) to avoid exposure in 'ps aux'.
+    """
+    encoded = message.encode()
     try:
         subprocess.run(  # noqa: S603
-            ["claude-xmpp-notify", message],  # noqa: S607
+            ["claude-xmpp-notify"],  # noqa: S607
+            input=encoded,
             check=True,
             timeout=30,
         )
@@ -50,7 +76,8 @@ def fallback_notify(message: str) -> None:
         # Also try the legacy command name
         try:
             subprocess.run(  # noqa: S603
-                ["xmpp-notify", message],  # noqa: S607
+                ["xmpp-notify"],  # noqa: S607
+                input=encoded,
                 check=True,
                 timeout=30,
             )

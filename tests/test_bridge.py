@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from claude_xmpp_bridge.bridge import XMPPBridge
 from claude_xmpp_bridge.config import Config
 
@@ -2045,3 +2047,358 @@ class TestMessagesFrozen:
             assert False, "Should have raised FrozenInstanceError"
         except dataclasses.FrozenInstanceError:
             pass
+
+
+class TestSocketTokenAuth:
+    """Socket token authentication — unauthorized requests must be rejected."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_request_without_token_rejected(self, MockXMPP, tmp_path):
+        """When socket_token is configured, request without token is rejected."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config = _make_config(tmp_path)
+        # Rebuild with socket_token
+        from claude_xmpp_bridge.config import Config
+
+        secure_config = Config(
+            jid=config.jid,
+            password=config.password,
+            recipient=config.recipient,
+            socket_path=config.socket_path,
+            db_path=config.db_path,
+            messages_file=config.messages_file,
+            socket_token="mysecret",
+        )
+        bridge = XMPPBridge(secure_config)
+        await bridge.socket_server.start()
+        try:
+            # Request without token
+            resp = await _socket_request(
+                config.socket_path,
+                {"cmd": "send", "message": "hello"},
+            )
+            assert resp is not None
+            assert resp.get("error") == "unauthorized"
+            conn.send.assert_not_called()
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_request_with_wrong_token_rejected(self, MockXMPP, tmp_path):
+        """Wrong token must be rejected."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        from claude_xmpp_bridge.config import Config
+
+        config = _make_config(tmp_path)
+        secure_config = Config(
+            jid=config.jid,
+            password=config.password,
+            recipient=config.recipient,
+            socket_path=config.socket_path,
+            db_path=config.db_path,
+            messages_file=config.messages_file,
+            socket_token="correct",
+        )
+        bridge = XMPPBridge(secure_config)
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                config.socket_path,
+                {"cmd": "send", "message": "hello", "token": "wrong"},
+            )
+            assert resp is not None
+            assert resp.get("error") == "unauthorized"
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_request_with_correct_token_accepted(self, MockXMPP, tmp_path):
+        """Correct token must allow the request through."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        from claude_xmpp_bridge.config import Config
+
+        config = _make_config(tmp_path)
+        secure_config = Config(
+            jid=config.jid,
+            password=config.password,
+            recipient=config.recipient,
+            socket_path=config.socket_path,
+            db_path=config.db_path,
+            messages_file=config.messages_file,
+            socket_token="correct",
+        )
+        bridge = XMPPBridge(secure_config)
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                config.socket_path,
+                {"cmd": "send", "message": "hello", "token": "correct"},
+            )
+            assert resp == {"ok": True}
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_no_token_configured_allows_all(self, MockXMPP, tmp_path):
+        """When no socket_token is set, all requests are allowed (backward compat)."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config = _make_config(tmp_path)  # no socket_token
+        bridge = XMPPBridge(config)
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                config.socket_path,
+                {"cmd": "send", "message": "hello"},
+            )
+            assert resp == {"ok": True}
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+
+class TestSecurityLimits:
+    """Security limits: MAX_SESSIONS, source whitelist, project length, XMPP body."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_max_sessions_limit(self, MockXMPP, tmp_path):
+        """Registering more than MAX_SESSIONS sessions must fail."""
+        from claude_xmpp_bridge.bridge import MAX_SESSIONS
+
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config = _make_config(tmp_path)
+        bridge = XMPPBridge(config)
+
+        # Fill up to limit
+        for i in range(MAX_SESSIONS):
+            resp = bridge._handle_register(
+                {
+                    "session_id": f"s{i}",
+                    "sty": f"sty{i}",
+                    "window": "0",
+                    "project": f"/proj/{i}",
+                    "backend": "none",
+                }
+            )
+            assert resp == {"ok": True}, f"Session {i} should succeed"
+
+        # One more must fail
+        resp = bridge._handle_register(
+            {
+                "session_id": "overflow",
+                "sty": "",
+                "window": "",
+                "project": "/proj/overflow",
+                "backend": "none",
+            }
+        )
+        assert "error" in resp
+        assert "limit" in resp["error"]
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_invalid_source_rejected(self, MockXMPP, tmp_path):
+        """Unknown source value must be rejected."""
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config = _make_config(tmp_path)
+        bridge = XMPPBridge(config)
+        resp = bridge._handle_register(
+            {
+                "session_id": "s1",
+                "sty": "",
+                "window": "",
+                "project": "/proj",
+                "backend": "none",
+                "source": "malicious_tool",
+            }
+        )
+        assert "error" in resp
+        assert "unsupported source" in resp["error"]
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_project_too_long_rejected(self, MockXMPP, tmp_path):
+        """Project path longer than MAX_PROJECT_LEN must be rejected."""
+        from claude_xmpp_bridge.bridge import MAX_PROJECT_LEN
+
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config = _make_config(tmp_path)
+        bridge = XMPPBridge(config)
+        resp = bridge._handle_register(
+            {
+                "session_id": "s1",
+                "sty": "",
+                "window": "",
+                "project": "/" + "a" * MAX_PROJECT_LEN,
+                "backend": "none",
+            }
+        )
+        assert "error" in resp
+        assert "too long" in resp["error"]
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_xmpp_body_truncated(self, MockXMPP, tmp_path):
+        """XMPP message body longer than MAX_XMPP_BODY must be truncated."""
+        from claude_xmpp_bridge.bridge import MAX_XMPP_BODY
+
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        captured_callback = None
+
+        def capture_on_message(cb):
+            nonlocal captured_callback
+            captured_callback = cb
+
+        conn.on_message.side_effect = capture_on_message
+        MockXMPP.return_value = conn
+
+        config = _make_config(tmp_path)
+        bridge = XMPPBridge(config)
+
+        # Register a session to receive the message
+        bridge.registry.register(
+            session_id="s1",
+            sty="sty1",
+            window="0",
+            project="/proj",
+            backend="screen",
+        )
+
+        long_text = "A" * (MAX_XMPP_BODY + 5000)
+        sent_texts: list[str] = []
+
+        async def mock_stuff(info, text):
+            sent_texts.append(text)
+            return True
+
+        bridge._stuff_to_session = mock_stuff  # type: ignore[method-assign]
+
+        fake_msg = _make_slixmpp_message("user@example.com", long_text)
+        assert captured_callback is not None
+        await captured_callback(fake_msg)
+
+        assert sent_texts, "Expected _stuff_to_session to be called"
+        assert len(sent_texts[0]) <= MAX_XMPP_BODY
+        bridge.registry.close()
+
+
+class TestRegistryValidationLimits:
+    """Validation limits for STY_RE, WINDOW_RE in registry."""
+
+    def test_sty_rejects_colon(self, tmp_path):
+        """Colon in sty must be rejected (prevents tmux session:window injection)."""
+        from claude_xmpp_bridge.registry import SessionRegistry
+
+        reg = SessionRegistry(tmp_path / "test.db")
+        with pytest.raises(ValueError, match="Invalid sty"):
+            reg.register("s1", "session:window", "0", "/proj", backend="tmux")
+        reg.close()
+
+    def test_sty_rejects_too_long(self, tmp_path):
+        """STY longer than 128 chars must be rejected."""
+        from claude_xmpp_bridge.registry import SessionRegistry
+
+        reg = SessionRegistry(tmp_path / "test.db")
+        with pytest.raises(ValueError, match="Invalid sty"):
+            reg.register("s1", "a" * 129, "0", "/proj")
+        reg.close()
+
+    def test_window_rejects_too_long(self, tmp_path):
+        """Window longer than 6 digits must be rejected."""
+        from claude_xmpp_bridge.registry import SessionRegistry
+
+        reg = SessionRegistry(tmp_path / "test.db")
+        with pytest.raises(ValueError, match="Invalid window"):
+            reg.register("s1", "sty1", "1234567", "/proj")
+        reg.close()
+
+    def test_window_accepts_empty(self, tmp_path):
+        """Empty window string must be accepted (screen default)."""
+        from claude_xmpp_bridge.registry import SessionRegistry
+
+        reg = SessionRegistry(tmp_path / "test.db")
+        reg.register("s1", "sty1", "", "/proj")  # should not raise
+        reg.close()
+
+
+class TestClientTokenInjection:
+    """send_to_bridge automatically injects token from env."""
+
+    def test_token_injected_from_env(self, monkeypatch, tmp_path):
+        """Token from CLAUDE_XMPP_SOCKET_TOKEN env var is added to request."""
+        from claude_xmpp_bridge.client import send_to_bridge
+
+        monkeypatch.setenv("CLAUDE_XMPP_SOCKET_TOKEN", "mytoken")
+
+        sock_path = tmp_path / "bridge.sock"
+        captured: list[dict] = []
+
+        # Create a minimal fake socket server
+        import socket as _socket
+        import json
+        import threading
+
+        server_sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        server_sock.bind(str(sock_path))
+        server_sock.listen(1)
+        server_sock.settimeout(2)
+
+        def _serve():
+            try:
+                client, _ = server_sock.accept()
+                data = client.recv(65536)
+                req = json.loads(data.decode().strip())
+                captured.append(req)
+                client.sendall(json.dumps({"ok": True}).encode() + b"\n")
+                client.close()
+            except Exception:
+                pass
+            finally:
+                server_sock.close()
+
+        t = threading.Thread(target=_serve, daemon=True)
+        t.start()
+
+        result = send_to_bridge({"cmd": "send", "message": "hello"}, sock_path)
+        t.join(timeout=3)
+
+        assert result == {"ok": True}
+        assert len(captured) == 1
+        assert captured[0].get("token") == "mytoken"

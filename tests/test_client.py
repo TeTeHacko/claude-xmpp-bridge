@@ -103,12 +103,13 @@ def test_send_to_bridge_stale_after_close(socket_path):
 
 
 def test_fallback_notify_primary_succeeds():
-    """claude-xmpp-notify succeeds — xmpp-notify is never called."""
+    """claude-xmpp-notify succeeds — message passed via stdin, not CLI arg."""
     with patch("claude_xmpp_bridge.client.subprocess.run") as mock_run:
         fallback_notify("test message")
 
         mock_run.assert_called_once_with(
-            ["claude-xmpp-notify", "test message"],
+            ["claude-xmpp-notify"],
+            input=b"test message",
             check=True,
             timeout=30,
         )
@@ -119,15 +120,17 @@ def test_fallback_notify_falls_back_to_xmpp_notify():
     with patch("claude_xmpp_bridge.client.subprocess.run") as mock_run:
         mock_run.side_effect = [
             FileNotFoundError(),  # claude-xmpp-notify missing
-            None,                 # xmpp-notify succeeds
+            None,  # xmpp-notify succeeds
         ]
         fallback_notify("test message")
 
         assert mock_run.call_count == 2
-        mock_run.assert_has_calls([
-            call(["claude-xmpp-notify", "test message"], check=True, timeout=30),
-            call(["xmpp-notify", "test message"], check=True, timeout=30),
-        ])
+        mock_run.assert_has_calls(
+            [
+                call(["claude-xmpp-notify"], input=b"test message", check=True, timeout=30),
+                call(["xmpp-notify"], input=b"test message", check=True, timeout=30),
+            ]
+        )
 
 
 def test_fallback_notify_falls_back_on_calledprocesserror():

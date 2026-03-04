@@ -463,56 +463,45 @@ class TestMissingRecipient:
 
 
 class TestPermissionsWarning:
-    def test_warns_on_group_readable(self, tmp_path, caplog):
+    def test_errors_on_group_readable(self, tmp_path):
+        """Group-readable credentials file must raise SystemExit (not just warn)."""
         cred = tmp_path / "credentials"
         cred.write_text("secret")
         cred.chmod(0o640)
 
-        with caplog.at_level(logging.WARNING, logger="claude_xmpp_bridge.config"):
+        with pytest.raises(SystemExit) as exc_info:
             _check_permissions(cred)
+        assert "600" in str(exc_info.value)
 
-        assert "permissions" in caplog.text
-        assert "should be 600" in caplog.text
-
-    def test_warns_on_world_readable(self, tmp_path, caplog):
+    def test_errors_on_world_readable(self, tmp_path):
+        """World-readable credentials file must raise SystemExit."""
         cred = tmp_path / "credentials"
         cred.write_text("secret")
         cred.chmod(0o644)
 
-        with caplog.at_level(logging.WARNING, logger="claude_xmpp_bridge.config"):
+        with pytest.raises(SystemExit) as exc_info:
             _check_permissions(cred)
+        assert "600" in str(exc_info.value)
 
-        assert "should be 600" in caplog.text
-
-    def test_no_warning_on_600(self, tmp_path, caplog):
+    def test_no_error_on_600(self, tmp_path):
         cred = tmp_path / "credentials"
         cred.write_text("secret")
         cred.chmod(0o600)
+        _check_permissions(cred)  # must not raise
 
-        with caplog.at_level(logging.WARNING, logger="claude_xmpp_bridge.config"):
-            _check_permissions(cred)
-
-        assert caplog.text == ""
-
-    def test_no_warning_on_owner_only_400(self, tmp_path, caplog):
+    def test_no_error_on_owner_only_400(self, tmp_path):
         cred = tmp_path / "credentials"
         cred.write_text("secret")
         cred.chmod(0o400)
+        _check_permissions(cred)  # must not raise
 
-        with caplog.at_level(logging.WARNING, logger="claude_xmpp_bridge.config"):
-            _check_permissions(cred)
-
-        assert caplog.text == ""
-
-    def test_no_crash_on_nonexistent_file(self, tmp_path, caplog):
+    def test_no_crash_on_nonexistent_file(self, tmp_path):
         """_check_permissions swallows OSError for non-existent files."""
         fake = tmp_path / "does-not-exist"
+        _check_permissions(fake)  # should not raise
 
-        with caplog.at_level(logging.WARNING, logger="claude_xmpp_bridge.config"):
-            _check_permissions(fake)  # should not raise
-
-    def test_warning_emitted_during_full_load(self, monkeypatch, tmp_path, caplog):
-        """Permissions warning fires when load_config reads the credentials."""
+    def test_error_raised_during_full_load(self, monkeypatch, tmp_path):
+        """SystemExit is raised when load_config reads insecure credentials."""
         cred = tmp_path / "credentials"
         cred.write_text("insecure-pw")
         cred.chmod(0o644)
@@ -521,11 +510,9 @@ class TestPermissionsWarning:
         monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
         monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
 
-        with caplog.at_level(logging.WARNING, logger="claude_xmpp_bridge.config"):
-            cfg = load_config(cli_credentials=str(cred))
-
-        assert cfg.password == "insecure-pw"
-        assert "should be 600" in caplog.text
+        with pytest.raises(SystemExit) as exc_info:
+            load_config(cli_credentials=str(cred))
+        assert "600" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

@@ -19,9 +19,10 @@ BACKOFF_MAX = 60.0
 class XMPPConnection:
     """Wrapper around slixmpp.ClientXMPP with reconnect support."""
 
-    def __init__(self, jid: str, password: str) -> None:
+    def __init__(self, jid: str, password: str, *, force_starttls: bool = True) -> None:
         self.jid = jid
         self._password = password
+        self._force_starttls = force_starttls
         self.connected = asyncio.Event()
         self._bot: slixmpp.ClientXMPP | None = None
         self._message_callback: Callable[[slixmpp.Message], Awaitable[None]] | None = None
@@ -33,7 +34,7 @@ class XMPPConnection:
         self._message_callback = callback
 
     def __repr__(self) -> str:
-        return f"XMPPConnection(jid={self.jid!r})"
+        return f"XMPPConnection(jid={self.jid!r}, force_starttls={self._force_starttls!r})"
 
     def start(self) -> None:
         """Create and connect the XMPP client."""
@@ -41,8 +42,12 @@ class XMPPConnection:
         self._bot.add_event_handler("session_start", self._on_session_start)
         self._bot.add_event_handler("message", self._on_message)
         self._bot.add_event_handler("disconnected", self._on_disconnected)
+        if self._force_starttls:
+            # Require TLS: disable PLAIN mechanism on unencrypted streams so
+            # slixmpp refuses to authenticate without STARTTLS.
+            self._bot["feature_mechanisms"].unencrypted_plain = False
         self._bot.connect()
-        log.info("XMPP connecting as %s", self.jid)
+        log.info("XMPP connecting as %s (force_starttls=%s)", self.jid, self._force_starttls)
 
     async def _on_session_start(self, _event: object) -> None:
         if self._bot:
