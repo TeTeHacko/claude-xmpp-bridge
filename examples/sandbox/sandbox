@@ -226,6 +226,8 @@ done
 BWRAP_ARGS+=(--unshare-pid)
 BWRAP_ARGS+=(--unshare-uts)
 BWRAP_ARGS+=(--unshare-ipc)
+BWRAP_ARGS+=(--new-session)
+BWRAP_ARGS+=(--hostname sandbox)
 BWRAP_ARGS+=(--die-with-parent)
 
 # Working directory
