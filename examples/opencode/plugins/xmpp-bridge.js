@@ -7,7 +7,7 @@
  *  - session.created      → registrace nové top-level session (při /new)
  *  - session.deleted      → odhlásí session z bridge
  *  - session.idle         → pošle poslední assistant zprávu přes XMPP
- *  - permission.ask       → blokující XMPP dotaz (y/n/a), stejné chování jako Claude Code
+ *  - permission.asked     → blokující XMPP dotaz (y/n/a); odpověď přes permission.reply() API
  *
  * Zapínání/vypínání:
  *   touch ~/.config/xmpp-notify/notify-enabled   # notifikace (idle)
@@ -147,50 +147,62 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         await $`claude-xmpp-client response ${payload}`.nothrow()
         return
       }
-    },
 
-    // -------------------------------------------------------------------------
-    // Blokující XMPP permission dotaz (náhrada za PermissionRequest hook)
-    // -------------------------------------------------------------------------
-    "permission.ask": async (input, output) => {
-      const askEnabled =
-        await $`test -f ${process.env.HOME}/.config/xmpp-notify/ask-enabled`.nothrow()
-      if (askEnabled.exitCode !== 0) return
+      // --- PERMISSION ASKED: blokující XMPP dotaz ---
+      // OpenCode nepodporuje permission.ask intercept hook — místo toho
+      // odchytíme permission.asked event a odpovíme přes permission.reply() API.
+      // Tím zavřeme TUI dialog stejně jako kdyby uživatel odpověděl přímo.
+      if (event.type === "permission.asked") {
+        const askEnabled =
+          await $`test -f ${process.env.HOME}/.config/xmpp-notify/ask-enabled`.nothrow()
+        if (askEnabled.exitCode !== 0) return
 
-      const meta = input.metadata ?? {}
-      let detail = ""
+        const perm = event.properties
+        const meta = perm.metadata ?? {}
+        let detail = ""
 
-      switch (input.type) {
-        case "bash": {
-          const desc = meta.description ?? ""
-          const cmd  = String(meta.command ?? "").slice(0, 300)
-          detail = desc ? `${desc}\n$ ${cmd}` : `$ ${cmd}`
-          break
+        switch (perm.permission) {
+          case "bash": {
+            const desc = meta.description ?? ""
+            const cmd  = String(meta.command ?? "").slice(0, 300)
+            detail = desc ? `${desc}\n$ ${cmd}` : `$ ${cmd}`
+            break
+          }
+          case "edit":
+          case "write":
+          case "multiedit": {
+            const file = meta.filePath ?? meta.file_path ?? ""
+            const old  = String(meta.old_string ?? meta.oldString ?? "").slice(0, 100)
+            detail = old ? `${file}\n- ${old}...` : file
+            break
+          }
+          default: {
+            detail = JSON.stringify(meta).slice(0, 200)
+          }
         }
-        case "edit":
-        case "write":
-        case "multiedit": {
-          const file = meta.filePath ?? meta.file_path ?? ""
-          const old  = String(meta.old_string ?? meta.oldString ?? "").slice(0, 100)
-          detail = old ? `${file}\n- ${old}...` : file
-          break
+
+        const msg = `[opencode] ${perm.permission}\n${detail}\n\nPovolit? (y/n/a=always)`
+
+        const result = await $`claude-xmpp-ask --timeout 300 ${msg}`.nothrow()
+        const r = result.stdout.trim().toLowerCase()
+
+        // Mapování odpovědi na OpenCode reply hodnoty
+        let reply
+        if (["a", "always", "vzdy"].includes(r)) {
+          reply = "always"
+        } else if (["y", "yes", "ano", "j", "ja", "jo"].includes(r)) {
+          reply = "once"
+        } else {
+          reply = "reject"
         }
-        default: {
-          detail = JSON.stringify(meta).slice(0, 200)
-        }
-      }
 
-      const msg = `[opencode] ${input.title}\n${detail}\n\nPovolit? (y/n/a=always)`
-
-      const reply = await $`claude-xmpp-ask --timeout 300 ${msg}`.nothrow()
-      const r     = reply.stdout.trim().toLowerCase()
-
-      if (["a", "always", "vzdy"].includes(r)) {
-        output.status = "allow"
-      } else if (["y", "yes", "ano", "j", "ja", "jo"].includes(r)) {
-        output.status = "allow"
-      } else {
-        output.status = "deny"
+        // Odpovědět přes API — TUI dialog se zavře.
+        // Pokud uživatel mezitím odpověděl v TUI, request už neexistuje → ignorovat chybu.
+        await client.permission.reply({
+          requestID: perm.id,
+          reply,
+        }).catch(() => {})
+        return
       }
     },
   }
