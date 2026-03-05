@@ -50,13 +50,36 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
   // ---------------------------------------------------------------------------
   // 1. Uložit původní screen titul a přejmenovat na 🧠projekt
+  //    originalTitle se ukládá i do tmp souboru — záloha pro případ, že
+  //    server.instance.disposed event nepřijde (OpenCode ukončí event loop
+  //    dříve než handler doběhne).
   // ---------------------------------------------------------------------------
   let originalTitle = null
   if (STY) {
     const res = await $`screen -S ${STY} -p ${WINDOW} -Q title`.nothrow()
     originalTitle = res.stdout?.toString().trim() || null
     await setTitle("🧠" + projectName)
+
+    // Uložit do tmp souboru (záloha pro restore po ukončení)
+    const titleFile = `/tmp/opencode-title-${STY.replace(/\./g, "-")}-${WINDOW}`
+    try { Bun.write(titleFile, originalTitle ?? "") } catch (_) {}
   }
+
+  // Synchronní restore při ukončení procesu (SIGTERM/SIGINT/exit)
+  // Bun.spawnSync je synchronní → funguje i v exit handleru.
+  // originalTitle je zachycen v closure — nepotřebujeme fs.readFile.
+  const _restoreTitle = () => {
+    if (!STY) return
+    const titleFile = `/tmp/opencode-title-${STY.replace(/\./g, "-")}-${WINDOW}`
+    const title = originalTitle ?? ""
+    try {
+      Bun.spawnSync(["screen", "-S", STY, "-p", WINDOW, "-X", "title", title])
+    } catch (_) {}
+    try { Bun.spawnSync(["rm", "-f", titleFile]) } catch (_) {}
+  }
+  process.once("exit",    _restoreTitle)
+  process.once("SIGTERM", () => { _restoreTitle(); process.exit(0) })
+  process.once("SIGINT",  () => { _restoreTitle(); process.exit(0) })
 
   // ---------------------------------------------------------------------------
   // 2. Registrace aktivní session do bridge — ODLOŽENA přes setImmediate()
