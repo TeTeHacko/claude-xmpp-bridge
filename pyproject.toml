@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-xmpp-bridge"
-version = "0.2.1"
+version = "0.2.2"
 description = "XMPP bridge for Claude Code — route messages between Jabber and Claude sessions"
 readme = "README.md"
 license = "MIT"
@@ -48,19 +48,19 @@ Issues = "https://github.com/TeTeHacko/claude-xmpp-bridge/issues"
 packages = ["src/claude_xmpp_bridge"]
 
 [tool.hatch.build.targets.wheel.shared-data]
-"examples/hooks/session-start-title.sh" = "claude-xmpp-bridge/hooks/session-start-title.sh"
-"examples/hooks/session-start-register.sh" = "claude-xmpp-bridge/hooks/session-start-register.sh"
-"examples/hooks/session-end.sh" = "claude-xmpp-bridge/hooks/session-end.sh"
-"examples/hooks/notification.sh" = "claude-xmpp-bridge/hooks/notification.sh"
-"examples/hooks/task-completed.sh" = "claude-xmpp-bridge/hooks/task-completed.sh"
-"examples/hooks/stop.sh" = "claude-xmpp-bridge/hooks/stop.sh"
-"examples/hooks/permission-ask.sh" = "claude-xmpp-bridge/hooks/permission-ask.sh"
-"examples/hooks/format-location.sh" = "claude-xmpp-bridge/hooks/format-location.sh"
-"examples/hooks/settings.json" = "claude-xmpp-bridge/hooks/settings.json"
-"examples/systemd/claude-xmpp-bridge.service" = "claude-xmpp-bridge/systemd/claude-xmpp-bridge.service"
-"examples/opencode/plugins/xmpp-bridge.js" = "claude-xmpp-bridge/opencode/plugins/xmpp-bridge.js"
-"examples/opencode/opencode.json" = "claude-xmpp-bridge/opencode/opencode.json"
-"examples/sandbox/sandbox" = "claude-xmpp-bridge/sandbox/sandbox"
+"examples/hooks/session-start-title.sh" = "share/claude-xmpp-bridge/hooks/session-start-title.sh"
+"examples/hooks/session-start-register.sh" = "share/claude-xmpp-bridge/hooks/session-start-register.sh"
+"examples/hooks/session-end.sh" = "share/claude-xmpp-bridge/hooks/session-end.sh"
+"examples/hooks/notification.sh" = "share/claude-xmpp-bridge/hooks/notification.sh"
+"examples/hooks/task-completed.sh" = "share/claude-xmpp-bridge/hooks/task-completed.sh"
+"examples/hooks/stop.sh" = "share/claude-xmpp-bridge/hooks/stop.sh"
+"examples/hooks/permission-ask.sh" = "share/claude-xmpp-bridge/hooks/permission-ask.sh"
+"examples/hooks/format-location.sh" = "share/claude-xmpp-bridge/hooks/format-location.sh"
+"examples/hooks/settings.json" = "share/claude-xmpp-bridge/hooks/settings.json"
+"examples/systemd/claude-xmpp-bridge.service" = "share/claude-xmpp-bridge/systemd/claude-xmpp-bridge.service"
+"examples/opencode/plugins/xmpp-bridge.js" = "share/claude-xmpp-bridge/opencode/plugins/xmpp-bridge.js"
+"examples/opencode/opencode.json" = "share/claude-xmpp-bridge/opencode/opencode.json"
+"examples/sandbox/sandbox" = "share/claude-xmpp-bridge/sandbox/sandbox"
 
 [tool.ruff]
 line-length = 120
