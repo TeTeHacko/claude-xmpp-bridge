@@ -7,7 +7,7 @@
  *  - session.created      → registrace nové top-level session (při /new)
  *  - session.deleted      → odhlásí session z bridge
  *  - session.idle         → pošle poslední assistant zprávu přes XMPP
- *  - permission.asked     → blokující XMPP dotaz (y/n/a); odpověď přes permission.reply() API
+ *  - permission.asked     → informativní XMPP notifikace (co se chystá spustit); potvrzení přes TUI
  *
  * Zapínání/vypínání:
  *   touch ~/.config/xmpp-notify/notify-enabled   # notifikace (idle)
@@ -148,14 +148,14 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- PERMISSION ASKED: blokující XMPP dotaz ---
-      // OpenCode nepodporuje permission.ask intercept hook — místo toho
-      // odchytíme permission.asked event a odpovíme přes permission.reply() API.
-      // Tím zavřeme TUI dialog stejně jako kdyby uživatel odpověděl přímo.
+      // --- PERMISSION ASKED: informativní XMPP notifikace ---
+      // OpenCode nečeká na výsledek event handlerů — TUI dialog nelze zavřít
+      // z pluginu přes permission.asked event. Posíláme tedy jen notifikaci
+      // co se chystá spustit; potvrzení musí jít přes TUI.
       if (event.type === "permission.asked") {
-        const askEnabled =
-          await $`test -f ${process.env.HOME}/.config/xmpp-notify/ask-enabled`.nothrow()
-        if (askEnabled.exitCode !== 0) return
+        const notifyEnabled =
+          await $`test -f ${process.env.HOME}/.config/xmpp-notify/notify-enabled`.nothrow()
+        if (notifyEnabled.exitCode !== 0) return
 
         const perm = event.properties
         const meta    = perm.metadata ?? {}
@@ -182,33 +182,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           }
         }
 
-        const msg = `[opencode] ${perm.permission}\n${detail}\n\nPovolit? (y/n/a=always)`
-
-        // --session-id zajistí že odpověď z Jabberu (prostý y/n/a) bude správně
-        // přiřazena k tomuto ask requestu, ne routována jako zpráva do session
-        const result = await $`claude-xmpp-ask --timeout 300 --session-id ${perm.sessionID} ${msg}`.nothrow()
-        const r = result.stdout.trim().toLowerCase()
-
-        // Mapování odpovědi na OpenCode reply hodnoty
-        let reply
-        if (["a", "always", "vzdy"].includes(r)) {
-          reply = "always"
-        } else if (["y", "yes", "ano", "j", "ja", "jo"].includes(r)) {
-          reply = "once"
-        } else {
-          reply = "reject"
-        }
-
-        // Odpovědět přes REST API: POST /permission/:id/reply
-        // client.permission.reply() v plugin kontextu neexistuje —
-        // voláme přímo HTTP na OpenCode server (výchozí port 4096).
-        // Pokud uživatel mezitím odpověděl v TUI → 404 → tiše ignorovat.
-        await fetch(`http://127.0.0.1:4096/permission/${perm.id}/reply`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reply }),
-        }).catch(() => {})
-
+        const msg = `[opencode] ❓ ${perm.permission}\n${detail}`
+        await $`claude-xmpp-client send ${msg}`.nothrow()
         return
       }
     },
