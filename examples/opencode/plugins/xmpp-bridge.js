@@ -82,27 +82,19 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     }
   })
 
-  // ---------------------------------------------------------------------------
-  // 3. Odhlášení při ukončení OpenCode — process.on("exit") je synchronní,
-  //    použijeme spawnSync aby unregister proběhl před koncem procesu.
-  // ---------------------------------------------------------------------------
-  const { spawnSync } = await import("child_process")
-  const doUnregister = () => {
-    if (!registeredSessionID) return
-    spawnSync("claude-xmpp-client", ["unregister", registeredSessionID], {
-      stdio: "ignore",
-      timeout: 2000,
-    })
-  }
-  process.once("exit", doUnregister)
-  process.once("SIGTERM", () => { doUnregister(); process.exit(0) })
-  process.once("SIGINT",  () => { doUnregister(); process.exit(0) })
-
   return {
     // -------------------------------------------------------------------------
-    // Události session
+    // Události session + lifecycle
     // -------------------------------------------------------------------------
     event: async ({ event }) => {
+
+      // --- SERVER INSTANCE DISPOSED: OpenCode se ukončuje → odhlásit session ---
+      if (event.type === "server.instance.disposed") {
+        if (registeredSessionID) {
+          await $`claude-xmpp-client unregister ${registeredSessionID}`.nothrow()
+        }
+        return
+      }
 
       // --- SESSION CREATED: nová top-level session (při /new) ---
       if (event.type === "session.created") {
