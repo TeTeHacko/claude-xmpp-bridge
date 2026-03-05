@@ -1,0 +1,276 @@
+#!/bin/bash
+set -euo pipefail
+
+# Bubblewrap sandbox for AI coding tools
+# Restricts filesystem to CWD + tool configs, blocks $HOME access
+
+HOME_DIR="$HOME"
+USER_NAME="$USER"
+SANDBOX_CWD="$(pwd)"
+
+# Arrays for collected options
+declare -a SSH_KEYS=()
+declare -a KUBE_CONTEXTS=()
+declare -a EXTRA_RW=()
+declare -a EXTRA_RO=()
+BASH_C_MODE=""
+BASH_C_CMD=""
+
+usage() {
+    cat <<'EOF'
+Usage: sandbox [OPTIONS] COMMAND [ARGS...]
+
+Options:
+  -c "cmd"       Run command via bash -c
+  -k KEY         SSH key name (repeatable), or "list"
+  -K CONTEXT     Kubernetes context (repeatable), or "list"
+  -w PATH        Extra RW bind mount (repeatable)
+  -r PATH        Extra RO bind mount (repeatable)
+  -h             Show this help
+
+Examples:
+  sandbox claude --version
+  sandbox -c "ls ~/"
+  sandbox -k id_ed25519 -- claude
+  sandbox -K my-context -c "kubectl get pods"
+EOF
+    exit 0
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c)
+            BASH_C_MODE=1
+            BASH_C_CMD="$2"
+            shift 2
+            ;;
+        -k)
+            SSH_KEYS+=("$2")
+            shift 2
+            ;;
+        -K)
+            KUBE_CONTEXTS+=("$2")
+            shift 2
+            ;;
+        -w)
+            EXTRA_RW+=("$(realpath "$2")")
+            shift 2
+            ;;
+        -r)
+            EXTRA_RO+=("$(realpath "$2")")
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# Handle -k list
+if [[ ${#SSH_KEYS[@]} -eq 1 && "${SSH_KEYS[0]}" == "list" ]]; then
+    echo "Available SSH keys:"
+    for f in "$HOME_DIR"/.ssh/id_*; do
+        [[ "$f" == *.pub ]] && continue
+        [[ -f "$f" ]] && echo "  $(basename "$f")"
+    done
+    exit 0
+fi
+
+# Handle -K list
+if [[ ${#KUBE_CONTEXTS[@]} -eq 1 && "${KUBE_CONTEXTS[0]}" == "list" ]]; then
+    echo "Available Kubernetes contexts:"
+    kubectl config get-contexts -o name 2>/dev/null | sed 's/^/  /'
+    exit 0
+fi
+
+# Need a command
+if [[ -z "$BASH_C_MODE" && $# -eq 0 ]]; then
+    echo "Error: no command specified" >&2
+    usage
+fi
+
+# --- Kubeconfig tmpfiles ---
+declare -a KUBE_TMPFILES=()
+MERGED_KUBECONFIG=""
+
+cleanup_kube() {
+    for f in "${KUBE_TMPFILES[@]}"; do
+        rm -f "$f"
+    done
+    [[ -n "$MERGED_KUBECONFIG" ]] && rm -f "$MERGED_KUBECONFIG"
+}
+trap cleanup_kube EXIT
+
+if [[ ${#KUBE_CONTEXTS[@]} -gt 0 ]]; then
+    for ctx in "${KUBE_CONTEXTS[@]}"; do
+        tmp=$(mktemp /tmp/sandbox-kube-XXXXXX)
+        kubectl config view --minify --context="$ctx" --flatten > "$tmp" 2>/dev/null || {
+            echo "Error: failed to extract kubeconfig for context '$ctx'" >&2
+            exit 1
+        }
+        KUBE_TMPFILES+=("$tmp")
+    done
+
+    if [[ ${#KUBE_TMPFILES[@]} -eq 1 ]]; then
+        MERGED_KUBECONFIG="${KUBE_TMPFILES[0]}"
+        KUBE_TMPFILES=()  # don't double-delete
+    else
+        MERGED_KUBECONFIG=$(mktemp /tmp/sandbox-kube-merged-XXXXXX)
+        kc_path=""
+        for f in "${KUBE_TMPFILES[@]}"; do
+            kc_path="${kc_path:+$kc_path:}$f"
+        done
+        KUBECONFIG="$kc_path" kubectl config view --flatten > "$MERGED_KUBECONFIG"
+    fi
+fi
+
+# --- Build bwrap command ---
+declare -a BWRAP_ARGS=()
+
+# Arch Linux symlinks
+BWRAP_ARGS+=(--symlink /usr/bin /bin)
+BWRAP_ARGS+=(--symlink /usr/bin /sbin)
+BWRAP_ARGS+=(--symlink /usr/lib /lib)
+BWRAP_ARGS+=(--symlink /usr/lib /lib64)
+
+# System directories RO
+BWRAP_ARGS+=(--ro-bind /usr /usr)
+if [[ -d /opt/claude-code ]]; then
+    BWRAP_ARGS+=(--ro-bind /opt/claude-code /opt/claude-code)
+fi
+
+# /etc selection
+for f in resolv.conf hosts nsswitch.conf passwd group localtime hostname machine-id; do
+    [[ -e "/etc/$f" ]] && BWRAP_ARGS+=(--ro-bind "/etc/$f" "/etc/$f")
+done
+[[ -d /etc/ssl ]] && BWRAP_ARGS+=(--ro-bind /etc/ssl /etc/ssl)
+[[ -d /etc/ca-certificates ]] && BWRAP_ARGS+=(--ro-bind /etc/ca-certificates /etc/ca-certificates)
+[[ -d /etc/alternatives ]] && BWRAP_ARGS+=(--ro-bind /etc/alternatives /etc/alternatives)
+
+# Virtual filesystems
+BWRAP_ARGS+=(--dev /dev)
+BWRAP_ARGS+=(--proc /proc)
+
+# Isolated /tmp
+BWRAP_ARGS+=(--tmpfs /tmp)
+
+# Empty $HOME as base (blocks everything)
+BWRAP_ARGS+=(--tmpfs "$HOME_DIR")
+
+# CWD as RW
+BWRAP_ARGS+=(--bind "$SANDBOX_CWD" "$SANDBOX_CWD")
+
+# Tool config dirs RW
+BWRAP_ARGS+=(--bind "$HOME_DIR/.claude" "$HOME_DIR/.claude")
+if [[ -d "$HOME_DIR/.config/opencode" ]]; then
+    # Ensure .config exists as parent
+    BWRAP_ARGS+=(--tmpfs "$HOME_DIR/.config")
+    BWRAP_ARGS+=(--bind "$HOME_DIR/.config/opencode" "$HOME_DIR/.config/opencode")
+else
+    BWRAP_ARGS+=(--tmpfs "$HOME_DIR/.config")
+fi
+
+# Git config RO
+for f in .gitconfig .gitconfig-work; do
+    [[ -f "$HOME_DIR/$f" ]] && BWRAP_ARGS+=(--ro-bind "$HOME_DIR/$f" "$HOME_DIR/$f")
+done
+
+# SSH keys (only with -k)
+if [[ ${#SSH_KEYS[@]} -gt 0 ]]; then
+    # Create .ssh dir inside sandbox
+    BWRAP_ARGS+=(--tmpfs "$HOME_DIR/.ssh")
+
+    # Bind each key + .pub RO
+    for key in "${SSH_KEYS[@]}"; do
+        key_path="$HOME_DIR/.ssh/$key"
+        if [[ ! -f "$key_path" ]]; then
+            echo "Error: SSH key not found: $key_path" >&2
+            exit 1
+        fi
+        BWRAP_ARGS+=(--ro-bind "$key_path" "$key_path")
+        [[ -f "${key_path}.pub" ]] && BWRAP_ARGS+=(--ro-bind "${key_path}.pub" "${key_path}.pub")
+    done
+
+    # SSH config
+    [[ -f "$HOME_DIR/.ssh/config" ]] && BWRAP_ARGS+=(--ro-bind "$HOME_DIR/.ssh/config" "$HOME_DIR/.ssh/config")
+    [[ -f "$HOME_DIR/.ssh/known_hosts" ]] && BWRAP_ARGS+=(--ro-bind "$HOME_DIR/.ssh/known_hosts" "$HOME_DIR/.ssh/known_hosts")
+fi
+
+# Kubeconfig (only with -K)
+if [[ -n "$MERGED_KUBECONFIG" ]]; then
+    BWRAP_ARGS+=(--tmpfs "$HOME_DIR/.kube")
+    BWRAP_ARGS+=(--ro-bind "$MERGED_KUBECONFIG" "$HOME_DIR/.kube/config")
+fi
+
+# Extra mounts
+for p in "${EXTRA_RW[@]}"; do
+    BWRAP_ARGS+=(--bind "$p" "$p")
+done
+for p in "${EXTRA_RO[@]}"; do
+    BWRAP_ARGS+=(--ro-bind "$p" "$p")
+done
+
+# Namespace isolation
+BWRAP_ARGS+=(--unshare-pid)
+BWRAP_ARGS+=(--unshare-uts)
+BWRAP_ARGS+=(--unshare-ipc)
+BWRAP_ARGS+=(--die-with-parent)
+
+# Working directory
+BWRAP_ARGS+=(--chdir "$SANDBOX_CWD")
+
+# Environment
+BWRAP_ARGS+=(--clearenv)
+BWRAP_ARGS+=(--setenv HOME "$HOME_DIR")
+BWRAP_ARGS+=(--setenv USER "$USER_NAME")
+BWRAP_ARGS+=(--setenv SHELL /bin/bash)
+BWRAP_ARGS+=(--setenv TERM "${TERM:-xterm-256color}")
+BWRAP_ARGS+=(--setenv LANG "${LANG:-en_US.UTF-8}")
+BWRAP_ARGS+=(--setenv PATH "/usr/local/bin:/usr/bin:/bin")
+BWRAP_ARGS+=(--setenv NPM_CONFIG_PREFIX /nonexistent)
+BWRAP_ARGS+=(--setenv DISABLE_AUTOUPDATER 1)
+
+# Passthrough optional env vars
+[[ -n "${DISPLAY:-}" ]] && BWRAP_ARGS+=(--setenv DISPLAY "$DISPLAY")
+[[ -n "${EDITOR:-}" ]] && BWRAP_ARGS+=(--setenv EDITOR "$EDITOR")
+
+# Build the inner command
+if [[ ${#SSH_KEYS[@]} -gt 0 ]]; then
+    # ssh-agent wrapper: start agent, add keys, exec command
+    ssh_add_args=""
+    for key in "${SSH_KEYS[@]}"; do
+        ssh_add_args+=" $HOME_DIR/.ssh/$key"
+    done
+
+    if [[ -n "$BASH_C_MODE" ]]; then
+        inner_cmd="$BASH_C_CMD"
+    else
+        # Quote all remaining args for safe passing
+        inner_cmd=""
+        for arg in "$@"; do
+            inner_cmd+="$(printf ' %q' "$arg")"
+        done
+        inner_cmd="${inner_cmd# }"
+    fi
+
+    exec bwrap "${BWRAP_ARGS[@]}" \
+        /bin/bash -c "eval \"\$(ssh-agent -s)\" >/dev/null && ssh-add${ssh_add_args} && exec ${inner_cmd}"
+else
+    if [[ -n "$BASH_C_MODE" ]]; then
+        exec bwrap "${BWRAP_ARGS[@]}" /bin/bash -c "$BASH_C_CMD"
+    else
+        exec bwrap "${BWRAP_ARGS[@]}" "$@"
+    fi
+fi
