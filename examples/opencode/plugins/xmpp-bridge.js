@@ -50,9 +50,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
   // ---------------------------------------------------------------------------
   // 1. Uložit původní screen titul a přejmenovat na 🧠projekt
-  //    originalTitle se ukládá i do tmp souboru — záloha pro případ, že
-  //    server.instance.disposed event nepřijde (OpenCode ukončí event loop
-  //    dříve než handler doběhne).
+  //    originalTitle se ukládá do tmp souboru — wrapper skript (~/.local/bin/oc)
+  //    ho po ukončení opencode načte a obnoví (plugin nemůže spolehlivě zachytit
+  //    ukončení procesu, protože server.instance.disposed event nepřichází
+  //    včas a process.once("exit") nefunguje v embedded JS kontextu).
   // ---------------------------------------------------------------------------
   let originalTitle = null
   if (STY) {
@@ -60,26 +61,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     originalTitle = res.stdout?.toString().trim() || null
     await setTitle("🧠" + projectName)
 
-    // Uložit do tmp souboru (záloha pro restore po ukončení)
+    // Uložit do tmp souboru — wrapper skript obnoví titul po ukončení
     const titleFile = `/tmp/opencode-title-${STY.replace(/\./g, "-")}-${WINDOW}`
-    try { Bun.write(titleFile, originalTitle ?? "") } catch (_) {}
+    await $`printf '%s' ${originalTitle ?? ""} > ${titleFile}`.nothrow()
   }
-
-  // Synchronní restore při ukončení procesu (SIGTERM/SIGINT/exit)
-  // Bun.spawnSync je synchronní → funguje i v exit handleru.
-  // originalTitle je zachycen v closure — nepotřebujeme fs.readFile.
-  const _restoreTitle = () => {
-    if (!STY) return
-    const titleFile = `/tmp/opencode-title-${STY.replace(/\./g, "-")}-${WINDOW}`
-    const title = originalTitle ?? ""
-    try {
-      Bun.spawnSync(["screen", "-S", STY, "-p", WINDOW, "-X", "title", title])
-    } catch (_) {}
-    try { Bun.spawnSync(["rm", "-f", titleFile]) } catch (_) {}
-  }
-  process.once("exit",    _restoreTitle)
-  process.once("SIGTERM", () => { _restoreTitle(); process.exit(0) })
-  process.once("SIGINT",  () => { _restoreTitle(); process.exit(0) })
 
   // ---------------------------------------------------------------------------
   // 2. Registrace aktivní session do bridge — ODLOŽENA přes setImmediate()

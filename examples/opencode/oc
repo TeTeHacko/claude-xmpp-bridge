@@ -1,0 +1,25 @@
+#!/bin/bash
+# Wrapper kolem opencode — obnoví screen titul po ukončení.
+#
+# Plugin xmpp-bridge.js uloží původní titul do:
+#   /tmp/opencode-title-<STY_escaped>-<WINDOW>
+# Tento skript ho po skončení opencode načte a nastaví zpět.
+#
+# Instalace: cp oc ~/.local/bin/oc && chmod +x ~/.local/bin/oc
+set -euo pipefail
+
+# Spustit opencode se všemi argumenty
+opencode "$@"
+EXIT_CODE=$?
+
+# Obnovit screen titul (jen pokud jsme ve screen)
+if [ -n "${STY:-}" ] && [ -n "${WINDOW:-}" ]; then
+    TITLE_FILE="/tmp/opencode-title-${STY//./-}-${WINDOW}"
+    if [ -f "$TITLE_FILE" ]; then
+        ORIG_TITLE="$(cat "$TITLE_FILE")"
+        screen -S "$STY" -p "$WINDOW" -X title "${ORIG_TITLE}" 2>/dev/null || true
+        rm -f "$TITLE_FILE"
+    fi
+fi
+
+exit "$EXIT_CODE"
