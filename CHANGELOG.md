@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] - 2025-03-05
+
+### Fixed
+- `session-start-title.sh`: use ANSI escape sequences (`\033k...\033\\` for
+  Screen, `\033]2;...\007` for xterm/tmux) instead of `screen -X title` —
+  works inside bubblewrap sandbox without screen socket access; adds `⚡` icon;
+  fixes `WINDOW: unbound variable` crash with `set -uo pipefail`
+- OpenCode plugin: replace `screen -X title` with ANSI escape sequences in
+  `setTitle()` — works inside sandbox; removes dependency on screen socket;
+  `setTitle` is now synchronous
+- Sandbox: mount `~/.local/bin` read-only and add it to `PATH` so
+  `claude-xmpp-client` and other pipx tools are accessible from hooks, and
+  Claude Code's `installMethod=native` self-check passes
+
 ## [0.2.8] - 2025-03-05
 
 ### Fixed

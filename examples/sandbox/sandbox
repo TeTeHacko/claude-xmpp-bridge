@@ -186,8 +186,13 @@ BWRAP_ARGS+=(--tmpfs "$HOME_DIR/.config")
 [[ -d "$HOME_DIR/.config/xmpp-notify" ]] && \
     BWRAP_ARGS+=(--ro-bind "$HOME_DIR/.config/xmpp-notify" "$HOME_DIR/.config/xmpp-notify")
 
-# ~/.local — OpenCode XDG data/state dirs (sessions, auth, history)
+# ~/.local — selective bind-mounts
 BWRAP_ARGS+=(--tmpfs "$HOME_DIR/.local")
+# ~/.local/bin RO — claude-xmpp-client, pipx tools; also satisfies Claude's
+# installMethod=native self-check for ~/.local/bin/claude
+[[ -d "$HOME_DIR/.local/bin" ]] && \
+    BWRAP_ARGS+=(--ro-bind "$HOME_DIR/.local/bin" "$HOME_DIR/.local/bin")
+# OpenCode XDG data/state dirs (sessions, auth, history)
 BWRAP_ARGS+=(--tmpfs "$HOME_DIR/.local/share")
 BWRAP_ARGS+=(--tmpfs "$HOME_DIR/.local/state")
 [[ -d "$HOME_DIR/.local/share/opencode" ]] && \
@@ -253,7 +258,7 @@ BWRAP_ARGS+=(--setenv USER "$USER_NAME")
 BWRAP_ARGS+=(--setenv SHELL /bin/bash)
 BWRAP_ARGS+=(--setenv TERM "${TERM:-xterm-256color}")
 BWRAP_ARGS+=(--setenv LANG "${LANG:-en_US.UTF-8}")
-BWRAP_ARGS+=(--setenv PATH "/usr/local/bin:/usr/bin:/bin")
+BWRAP_ARGS+=(--setenv PATH "$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin")
 BWRAP_ARGS+=(--setenv NPM_CONFIG_PREFIX /nonexistent)
 BWRAP_ARGS+=(--setenv DISABLE_AUTOUPDATER 1)
 
