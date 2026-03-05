@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 import signal
 import time
 from pathlib import Path
@@ -12,7 +13,7 @@ from pathlib import Path
 import slixmpp
 
 from .audit import AuditLogger
-from .config import Config, DEFAULT_SOURCE_ICONS, MAX_SOURCE_LEN
+from .config import DEFAULT_SOURCE_ICONS, MAX_SOURCE_LEN, Config
 from .messages import Messages, load_messages
 from .multiplexer import get_multiplexer
 from .registry import SessionInfo, SessionRegistry
@@ -270,11 +271,18 @@ class XMPPBridge:
         sty = info["sty"]
         if not sty:
             return True  # no sty — can't check
+
+        env = {}
+        for var in ("PATH", "USER", "HOME"):
+            if var in os.environ:
+                env[var] = os.environ[var]
+
         proc = await asyncio.create_subprocess_exec(
             *cmd_parts,
             sty,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            env=env,
         )
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)

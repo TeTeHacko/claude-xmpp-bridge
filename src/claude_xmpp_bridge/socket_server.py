@@ -57,6 +57,8 @@ class SocketServer:
         old_umask = os.umask(0o177)
         try:
             self._server = await asyncio.start_unix_server(self._handle_client, path=str(self.socket_path))
+            # Explicitly enforce 0600 as a defense-in-depth measure
+            self.socket_path.chmod(0o600)
         finally:
             os.umask(old_umask)
 

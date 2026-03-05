@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import getpass
 import json
+import secrets
 import shutil
 import stat
 import sys
@@ -76,6 +77,21 @@ def _find_settings_json() -> Path | None:
         settings = hooks_dir / "settings.json"
         if settings.is_file():
             return settings
+    return None
+
+
+def _find_sandbox_script() -> Path | None:
+    """Find the sandbox script source."""
+    source = Path(__file__).resolve().parent.parent.parent / "examples" / "sandbox" / "sandbox"
+    if source.is_file():
+        return source
+
+    data_path = sysconfig.get_path("data")
+    if data_path:
+        shared = Path(data_path) / "share" / "claude-xmpp-bridge" / "sandbox" / "sandbox"
+        if shared.is_file():
+            return shared
+
     return None
 
 
@@ -156,8 +172,14 @@ def _step_config(yes_mode: bool) -> bool:
         return False
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(f'jid = "{jid}"\nrecipient = "{recipient}"\n')
-    print(f"  Saved: {CONFIG_FILE}")
+    token = secrets.token_hex(32)
+    CONFIG_FILE.write_text(f'jid = "{jid}"\nrecipient = "{recipient}"\nsocket_token = "{token}"\n')
+
+    token_file = CONFIG_DIR / "socket_token"
+    token_file.write_text(token + "\n")
+    token_file.chmod(0o600)
+
+    print(f"  Saved: {CONFIG_FILE} (with generated socket_token)")
     return True
 
 
@@ -333,9 +355,34 @@ def _step_systemd(yes_mode: bool) -> bool:
     return True
 
 
+def _step_sandbox(yes_mode: bool) -> bool:
+    """Step 7: Install sandbox script."""
+    print("\n--- Step 7: Sandbox script ---")
+
+    sandbox_src = _find_sandbox_script()
+    if not sandbox_src:
+        print("  Warning: sandbox script source not found, skipping")
+        return True
+
+    dst = Path.home() / ".local" / "bin" / "sandbox"
+
+    if dst.is_file():
+        print(f"  Sandbox script already exists: {dst}")
+        if not _confirm("  Overwrite?", default=False, yes_mode=False):
+            return True
+    elif not _confirm("  Install sandbox script to ~/.local/bin/sandbox?", yes_mode=yes_mode):
+        return True
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(sandbox_src, dst)
+    dst.chmod(0o755)
+    print(f"  Installed: {dst}")
+    return True
+
+
 def _step_switches(yes_mode: bool) -> bool:
-    """Step 7: Enable on/off switches."""
-    print("\n--- Step 7: Notification switches ---")
+    """Step 8: Enable on/off switches."""
+    print("\n--- Step 8: Notification switches ---")
 
     SWITCHES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -381,6 +428,7 @@ def setup_main() -> None:
         ("hooks", lambda: _step_hooks(args.yes)),
         ("opencode", lambda: _step_opencode(args.yes)),
         ("systemd", lambda: _step_systemd(args.yes)),
+        ("sandbox", lambda: _step_sandbox(args.yes)),
         ("switches", lambda: _step_switches(args.yes)),
     ]
 

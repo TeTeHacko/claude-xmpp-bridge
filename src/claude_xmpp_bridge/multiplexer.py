@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from typing import Protocol
 
@@ -20,6 +21,15 @@ _TARGET_RE = re.compile(r"^[a-zA-Z0-9_.\-]{0,128}$")
 def sanitize_text(text: str) -> str:
     """Remove control characters from text, preserving newlines and unicode."""
     return _CONTROL_CHARS_RE.sub("", text)
+
+
+def _get_safe_env() -> dict[str, str]:
+    """Return a minimal environment for safely executing subprocesses."""
+    env = {}
+    for var in ("PATH", "USER", "HOME", "LANG", "LC_ALL", "TERM"):
+        if var in os.environ:
+            env[var] = os.environ[var]
+    return env
 
 
 class Multiplexer(Protocol):
@@ -67,6 +77,7 @@ class ScreenMultiplexer:
             f"{window}#",
             "stuff",
             text,
+            env=_get_safe_env(),
         )
         try:
             if await asyncio.wait_for(proc1.wait(), timeout=5) != 0:
@@ -88,6 +99,7 @@ class ScreenMultiplexer:
             f"{window}#",
             "stuff",
             "\r",
+            env=_get_safe_env(),
         )
         try:
             if await asyncio.wait_for(proc2.wait(), timeout=5) != 0:
@@ -120,6 +132,7 @@ class TmuxMultiplexer:
             "-l",
             "--",
             text,
+            env=_get_safe_env(),
         )
         try:
             if await asyncio.wait_for(proc1.wait(), timeout=5) != 0:
@@ -138,6 +151,7 @@ class TmuxMultiplexer:
             "-t",
             target,
             "Enter",
+            env=_get_safe_env(),
         )
         try:
             if await asyncio.wait_for(proc2.wait(), timeout=5) != 0:

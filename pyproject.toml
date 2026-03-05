@@ -60,6 +60,7 @@ packages = ["src/claude_xmpp_bridge"]
 "examples/systemd/claude-xmpp-bridge.service" = "claude-xmpp-bridge/systemd/claude-xmpp-bridge.service"
 "examples/opencode/plugins/xmpp-bridge.js" = "claude-xmpp-bridge/opencode/plugins/xmpp-bridge.js"
 "examples/opencode/opencode.json" = "claude-xmpp-bridge/opencode/opencode.json"
+"examples/sandbox/sandbox" = "claude-xmpp-bridge/sandbox/sandbox"
 
 [tool.ruff]
 line-length = 120
