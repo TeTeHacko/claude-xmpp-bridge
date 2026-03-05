@@ -2418,8 +2418,8 @@ class TestSecurityLimits:
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
-    def test_invalid_source_rejected(self, MockXMPP, tmp_path):
-        """Unknown source value must be rejected."""
+    def test_arbitrary_source_accepted(self, MockXMPP, tmp_path):
+        """Any source string is now accepted (open registry); only length is checked."""
         conn = MagicMock()
         conn.on_message.side_effect = lambda cb: None
         MockXMPP.return_value = conn
@@ -2433,11 +2433,36 @@ class TestSecurityLimits:
                 "window": "",
                 "project": "/proj",
                 "backend": "none",
-                "source": "malicious_tool",
+                "source": "cursor",
+            }
+        )
+        assert resp == {"ok": True}
+        assert bridge.registry.sessions["s1"]["source"] == "cursor"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_source_too_long_rejected(self, MockXMPP, tmp_path):
+        """Source value longer than MAX_SOURCE_LEN must be rejected."""
+        from claude_xmpp_bridge.config import MAX_SOURCE_LEN
+
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config = _make_config(tmp_path)
+        bridge = XMPPBridge(config)
+        resp = bridge._handle_register(
+            {
+                "session_id": "s1",
+                "sty": "",
+                "window": "",
+                "project": "/proj",
+                "backend": "none",
+                "source": "x" * (MAX_SOURCE_LEN + 1),
             }
         )
         assert "error" in resp
-        assert "unsupported source" in resp["error"]
+        assert "too long" in resp["error"]
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -3045,3 +3070,215 @@ class TestNoBackendSessionTTL:
         assert expired[0]["reason"] == "expired"
         assert expired[0]["project"] == "/home/user/expired"
         bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# TestSourceIcons — configurable per-source icons
+# ---------------------------------------------------------------------------
+
+
+class TestSourceIcons:
+    """_source_icon() respects DEFAULT_SOURCE_ICONS and per-config overrides."""
+
+    def _make_bridge(self, tmp_path, source_icons=None):
+        with patch("claude_xmpp_bridge.bridge.XMPPConnection") as MockXMPP:
+            conn = MagicMock()
+            conn.on_message.side_effect = lambda cb: None
+            MockXMPP.return_value = conn
+            cfg = Config(
+                jid="bot@example.com",
+                password="secret",
+                recipient="user@example.com",
+                socket_path=tmp_path / "test.sock",
+                db_path=tmp_path / "test.db",
+                messages_file=None,
+                source_icons=source_icons or {},
+            )
+            return XMPPBridge(cfg)
+
+    def test_default_none_source_is_lightning(self, tmp_path):
+        bridge = self._make_bridge(tmp_path)
+        assert bridge._source_icon(None) == "⚡"
+        bridge.registry.close()
+
+    def test_default_opencode_is_brain(self, tmp_path):
+        bridge = self._make_bridge(tmp_path)
+        assert bridge._source_icon("opencode") == "🧠"
+        bridge.registry.close()
+
+    def test_unknown_source_falls_back_to_default_icon(self, tmp_path):
+        """Unknown source uses the None fallback (⚡)."""
+        bridge = self._make_bridge(tmp_path)
+        assert bridge._source_icon("unknownapp") == "⚡"
+        bridge.registry.close()
+
+    def test_custom_icon_overrides_default(self, tmp_path):
+        """Config source_icons can override the built-in opencode icon."""
+        bridge = self._make_bridge(tmp_path, source_icons={"opencode": "🤖"})
+        assert bridge._source_icon("opencode") == "🤖"
+        bridge.registry.close()
+
+    def test_new_source_with_custom_icon(self, tmp_path):
+        """A completely new source (e.g. cursor) gets its custom icon."""
+        bridge = self._make_bridge(tmp_path, source_icons={"cursor": "🔵"})
+        assert bridge._source_icon("cursor") == "🔵"
+        bridge.registry.close()
+
+    def test_custom_default_icon(self, tmp_path):
+        """Config can override the fallback icon (None key)."""
+        bridge = self._make_bridge(tmp_path, source_icons={None: "🟡"})
+        assert bridge._source_icon(None) == "🟡"
+        assert bridge._source_icon("whatever") == "🟡"
+        bridge.registry.close()
+
+    def test_session_prefix_uses_custom_icon(self, tmp_path):
+        """_session_prefix() uses the icon resolved by _source_icon()."""
+        bridge = self._make_bridge(tmp_path, source_icons={"cursor": "🔵"})
+        proj = str(Path.home() / "proj")
+        info = {
+            "sty": "12345.pts-0",
+            "window": "2",
+            "project": proj,
+            "backend": "screen",
+            "source": "cursor",
+            "registered_at": 0.0,
+        }
+        prefix = bridge._session_prefix(info)  # type: ignore[arg-type]
+        assert prefix == "🔵[~/proj #2]"
+        bridge.registry.close()
+
+
+class TestNotifySourceHint:
+    """notify falls back to source hint when session is not in registry."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_notify_unknown_session_with_source_hint_uses_icon(self, MockXMPP, tmp_path):
+        """If session_id is unknown but source+project are provided, icon is correct."""
+        conn = MagicMock()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        result = bridge._handle_notify(
+            {
+                "session_id": "nonexistent",
+                "source": "opencode",
+                "project": "/home/user/myproj",
+                "message": "hello from opencode",
+            }
+        )
+        assert result == {"ok": True}
+        conn.send.assert_called_once()
+        sent = conn.send.call_args[0][1]
+        assert "🧠" in sent
+        assert "hello from opencode" in sent
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_notify_unknown_session_no_hint_uses_default_icon(self, MockXMPP, tmp_path):
+        """Without session or source hint, default icon (⚡) is used as prefix."""
+        conn = MagicMock()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        result = bridge._handle_notify(
+            {
+                "session_id": "nonexistent",
+                "message": "plain message",
+            }
+        )
+        assert result == {"ok": True}
+        conn.send.assert_called_once()
+        sent = conn.send.call_args[0][1]
+        # No project → prefix is just the default icon
+        assert "⚡" in sent
+        assert "plain message" in sent
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_notify_unknown_session_custom_source_icon(self, MockXMPP, tmp_path):
+        """Custom source icon from config is used even for unknown session."""
+        conn = MagicMock()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        cfg = Config(
+            jid="bot@example.com",
+            password="secret",
+            recipient="user@example.com",
+            socket_path=tmp_path / "test.sock",
+            db_path=tmp_path / "test.db",
+            messages_file=None,
+            source_icons={"cursor": "🔵"},
+        )
+        bridge = XMPPBridge(cfg)
+        result = bridge._handle_notify(
+            {
+                "session_id": "nonexistent",
+                "source": "cursor",
+                "project": "/home/user/proj",
+                "message": "cursor done",
+            }
+        )
+        assert result == {"ok": True}
+        sent = conn.send.call_args[0][1]
+        assert "🔵" in sent
+        assert "cursor done" in sent
+        bridge.registry.close()
+
+
+class TestSourceIconsConfig:
+    """source_icons loaded from TOML [source_icons] section."""
+
+    def test_source_icons_loaded_from_toml(self, monkeypatch, credentials_file, tmp_path):
+        from claude_xmpp_bridge import config
+
+        toml_file = tmp_path / "config.toml"
+        toml_file.write_text(
+            'jid = "bot@example.com"\n'
+            'recipient = "rcpt@example.com"\n'
+            "[source_icons]\n"
+            'opencode = "🤖"\n'
+            'cursor = "🔵"\n'
+            'default = "💡"\n'
+        )
+        monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
+        from claude_xmpp_bridge.config import load_config
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+        assert cfg.source_icons["opencode"] == "🤖"
+        assert cfg.source_icons["cursor"] == "🔵"
+        assert cfg.source_icons[None] == "💡"
+
+    def test_source_icons_empty_when_section_missing(self, monkeypatch, credentials_file, tmp_path):
+        from claude_xmpp_bridge import config
+
+        toml_file = tmp_path / "config.toml"
+        toml_file.write_text('jid = "bot@example.com"\nrecipient = "rcpt@example.com"\n')
+        monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
+        from claude_xmpp_bridge.config import load_config
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+        assert cfg.source_icons == {}
+
+    def test_source_icons_ignores_non_string_values(self, monkeypatch, credentials_file, tmp_path):
+        from claude_xmpp_bridge import config
+
+        toml_file = tmp_path / "config.toml"
+        toml_file.write_text(
+            'jid = "bot@example.com"\n'
+            'recipient = "rcpt@example.com"\n'
+            "[source_icons]\n"
+            'opencode = "🧠"\n'
+            "cursor = 42\n"  # non-string — should be ignored
+        )
+        monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
+        from claude_xmpp_bridge.config import load_config
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+        assert "opencode" in cfg.source_icons
+        assert "cursor" not in cfg.source_icons

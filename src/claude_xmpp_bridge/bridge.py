@@ -12,7 +12,7 @@ from pathlib import Path
 import slixmpp
 
 from .audit import AuditLogger
-from .config import Config
+from .config import Config, DEFAULT_SOURCE_ICONS, MAX_SOURCE_LEN
 from .messages import Messages, load_messages
 from .multiplexer import get_multiplexer
 from .registry import SessionInfo, SessionRegistry
@@ -30,9 +30,6 @@ MAX_XMPP_BODY = 10_000  # max length of incoming XMPP message body (chars)
 # for sending notifications but cannot receive messages.  They are automatically
 # expired after this many seconds so stale entries don't accumulate.
 NO_BACKEND_SESSION_TTL = 24 * 3600  # 24 hours
-
-# Allowed values for the 'source' field
-_VALID_SOURCES: frozenset[str | None] = frozenset({"opencode", None})
 
 _ALIVE_CHECK_CMDS: dict[str, list[str]] = {
     "screen": ["screen", "-ls"],
@@ -133,7 +130,7 @@ class XMPPBridge:
             marker = " *" if sid == active_id else ""
             backend = info["backend"]
             source = info.get("source")
-            icon = "🧠" if source == "opencode" else "⚡"
+            icon = self._source_icon(source)
             window_label = self._window_label(info)
             if backend == "screen":
                 tag = f"[{icon}screen{window_label}]"
@@ -242,9 +239,20 @@ class XMPPBridge:
             return f" :{sty}"
         return ""
 
+    def _source_icon(self, source: str | None) -> str:
+        """Return the icon for a given source string.
+
+        Lookup order:
+          1. Per-instance config (from [source_icons] TOML section)
+          2. Built-in DEFAULT_SOURCE_ICONS
+          3. Hardcoded fallback "⚡"
+        """
+        icons = {**DEFAULT_SOURCE_ICONS, **self.config.source_icons}
+        return icons.get(source) or icons.get(None, "⚡")
+
     def _session_prefix(self, info: SessionInfo) -> str:
         """Return icon + bracketed project + window label, e.g. '⚡[~/foo #2]'."""
-        icon = "🧠" if info.get("source") == "opencode" else "⚡"
+        icon = self._source_icon(info.get("source"))
         project = self._short_path(info["project"])
         loc = self._window_label(info)
         return f"{icon}[{project}{loc}]"
@@ -470,8 +478,8 @@ class XMPPBridge:
 
             source_raw = req.get("source")
             source = str(source_raw) if source_raw is not None else None
-            if source not in _VALID_SOURCES:
-                return {"error": f"unsupported source: {source!r}"}
+            if source is not None and len(source) > MAX_SOURCE_LEN:
+                return {"error": f"source too long (max {MAX_SOURCE_LEN} chars)"}
 
             # Deduplicate: remove old sessions occupying the same multiplexer slot (sty+window
             # for screen, or sty/pane for tmux). This handles restarts inside the same terminal
@@ -571,14 +579,27 @@ class XMPPBridge:
 
         Looks up the session in the registry to obtain the icon, project path
         and window/pane identifier so every outgoing message is clearly labelled.
-        Falls back to a plain message when the session is not found.
+        If the session is not found (e.g. race condition on startup) but the
+        request contains a ``source`` hint, the correct icon is still used.
+        Falls back to a plain message when neither session nor source is available.
         """
         session_id = str(req.get("session_id", ""))
         message = str(req.get("message", ""))
         if not message:
             return {"ok": True}
         info = self.registry.get(session_id)
-        prefix = self._session_prefix(info) if info else ""
+        if info:
+            prefix = self._session_prefix(info)
+        else:
+            # Session not in registry yet — build minimal prefix from request fields.
+            source_raw = req.get("source")
+            source = str(source_raw) if source_raw is not None else None
+            icon = self._source_icon(source)
+            project_raw = req.get("project", "")
+            if project_raw:
+                prefix = f"{icon}[{self._short_path(str(project_raw))}]"
+            else:
+                prefix = icon if icon else ""
         full_msg = f"{prefix} {message}".strip() if prefix else message
         self._xmpp_send(full_msg)
         return {"ok": True}

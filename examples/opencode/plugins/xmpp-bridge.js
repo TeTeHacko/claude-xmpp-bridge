@@ -6,7 +6,7 @@
  *                               + zaregistruje aktivní session (odloženě, po server startu)
  *  - session.created          → registrace nové top-level session (při /new)
  *  - session.deleted          → odhlásí session z bridge
- *  - session.idle             → titul ⌨projekt + XMPP notifikace s poslední odpovědí
+ *  - session.idle             → titul 🧠❓projekt + XMPP notifikace s poslední odpovědí
  *  - session.status (running) → titul 🧠projekt
  *  - permission.asked         → informativní XMPP notifikace (co se chystá spustit); potvrzení přes TUI
  *  - server.instance.disposed → unregister + obnova původního screen titulu
@@ -224,9 +224,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           }
         }
 
-        const shortSes = (perm.sessionID ?? "").slice(0, 7)
-        const msg = `[🧠${projectName} #${WINDOW} ses_${shortSes}] ${perm.permission}\n${detail}`
-        await $`claude-xmpp-client send ${msg}`.nothrow()
+        // Použít notify — bridge sestaví prefix přes _session_prefix()
+        // (sjednocený formát s Claude Code a dalšími aplikacemi)
+        const sessionID = perm.sessionID ?? registeredSessionID ?? ""
+        const payload = JSON.stringify({
+          cmd:        "notify",
+          session_id: sessionID,
+          source:     "opencode",
+          project:    directory,
+          message:    `${perm.permission}\n${detail}`,
+        })
+        await $`claude-xmpp-client notify ${payload}`.nothrow()
         return
       }
 

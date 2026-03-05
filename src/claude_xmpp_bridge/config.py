@@ -7,7 +7,7 @@ import os
 import shutil
 import stat
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -17,6 +17,16 @@ CONFIG_FILE = CONFIG_DIR / "config.toml"
 LEGACY_CREDENTIALS_FILE = Path.home() / ".config" / "xmpp-notify" / "credentials"
 DEFAULT_SOCKET_PATH = Path.home() / ".claude" / "bridge.sock"
 DEFAULT_DB_PATH = Path.home() / ".claude" / "bridge.db"
+
+
+# Default icons per source value. None key = fallback for unknown/unset source.
+DEFAULT_SOURCE_ICONS: dict[str | None, str] = {
+    "opencode": "🧠",
+    None: "⚡",
+}
+
+# Maximum allowed length for a source field value
+MAX_SOURCE_LEN = 64
 
 
 @dataclass(frozen=True)
@@ -32,6 +42,9 @@ class Config:
     socket_token: str | None = None  # shared secret for socket auth (None = disabled)
     force_starttls: bool = True  # require TLS on XMPP connection
     audit_log: str = "journald"  # "journald" or path to a rotating JSON Lines file
+    # Per-source icons: keys are source strings (or None for default/unknown).
+    # Loaded from [source_icons] TOML section; missing keys fall back to DEFAULT_SOURCE_ICONS.
+    source_icons: dict[str | None, str] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         token_repr = "'***'" if self.socket_token else "None"
@@ -39,7 +52,8 @@ class Config:
             f"Config(jid={self.jid!r}, password='***', recipient={self.recipient!r}, "
             f"socket_path={self.socket_path!r}, db_path={self.db_path!r}, "
             f"messages_file={self.messages_file!r}, socket_token={token_repr}, "
-            f"force_starttls={self.force_starttls!r}, audit_log={self.audit_log!r})"
+            f"force_starttls={self.force_starttls!r}, audit_log={self.audit_log!r}, "
+            f"source_icons={self.source_icons!r})"
         )
 
 
@@ -182,6 +196,21 @@ def load_config(
     # Audit log destination: "journald" (default) or path to a file
     audit_log = os.environ.get("CLAUDE_XMPP_AUDIT_LOG") or _toml_str(toml, "audit_log") or "journald"
 
+    # Source icons: loaded from [source_icons] TOML section.
+    # Keys are source strings; special key "default" maps to None (unknown/unset source).
+    # Example:
+    #   [source_icons]
+    #   opencode = "🧠"
+    #   cursor   = "🔵"
+    #   default  = "⚡"
+    source_icons: dict[str | None, str] = {}
+    raw_icons = toml.get("source_icons")
+    if isinstance(raw_icons, dict):
+        for k, v in raw_icons.items():
+            if isinstance(k, str) and isinstance(v, str):
+                actual_key: str | None = None if k == "default" else k
+                source_icons[actual_key] = v
+
     return Config(
         jid=jid,
         password=password,
@@ -192,6 +221,7 @@ def load_config(
         socket_token=socket_token,
         force_starttls=force_starttls,
         audit_log=audit_log,
+        source_icons=source_icons,
     )
 
 
