@@ -158,32 +158,35 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (askEnabled.exitCode !== 0) return
 
         const perm = event.properties
-        const meta = perm.metadata ?? {}
+        const meta    = perm.metadata ?? {}
+        const pattern = (perm.patterns ?? [])[0] ?? ""
         let detail = ""
 
         switch (perm.permission) {
           case "bash": {
             const desc = meta.description ?? ""
-            const cmd  = String(meta.command ?? "").slice(0, 300)
+            const cmd  = pattern || String(meta.command ?? "").slice(0, 300)
             detail = desc ? `${desc}\n$ ${cmd}` : `$ ${cmd}`
             break
           }
           case "edit":
           case "write":
           case "multiedit": {
-            const file = meta.filePath ?? meta.file_path ?? ""
+            const file = pattern || (meta.filePath ?? meta.file_path ?? "")
             const old  = String(meta.old_string ?? meta.oldString ?? "").slice(0, 100)
             detail = old ? `${file}\n- ${old}...` : file
             break
           }
           default: {
-            detail = JSON.stringify(meta).slice(0, 200)
+            detail = pattern || JSON.stringify(meta).slice(0, 200)
           }
         }
 
         const msg = `[opencode] ${perm.permission}\n${detail}\n\nPovolit? (y/n/a=always)`
 
-        const result = await $`claude-xmpp-ask --timeout 300 ${msg}`.nothrow()
+        // --session-id zajistí že odpověď z Jabberu (prostý y/n/a) bude správně
+        // přiřazena k tomuto ask requestu, ne routována jako zpráva do session
+        const result = await $`claude-xmpp-ask --timeout 300 --session-id ${perm.sessionID} ${msg}`.nothrow()
         const r = result.stdout.trim().toLowerCase()
 
         // Mapování odpovědi na OpenCode reply hodnoty
@@ -196,12 +199,16 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           reply = "reject"
         }
 
-        // Odpovědět přes API — TUI dialog se zavře.
-        // Pokud uživatel mezitím odpověděl v TUI, request už neexistuje → ignorovat chybu.
-        await client.permission.reply({
-          requestID: perm.id,
-          reply,
+        // Odpovědět přes REST API: POST /permission/:id/reply
+        // client.permission.reply() v plugin kontextu neexistuje —
+        // voláme přímo HTTP na OpenCode server (výchozí port 4096).
+        // Pokud uživatel mezitím odpověděl v TUI → 404 → tiše ignorovat.
+        await fetch(`http://127.0.0.1:4096/permission/${perm.id}/reply`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reply }),
         }).catch(() => {})
+
         return
       }
     },
