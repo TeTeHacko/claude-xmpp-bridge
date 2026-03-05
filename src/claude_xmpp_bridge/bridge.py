@@ -26,6 +26,11 @@ MAX_SESSIONS = 50  # max registered sessions per bridge instance
 MAX_PROJECT_LEN = 4096  # max length of project path
 MAX_XMPP_BODY = 10_000  # max length of incoming XMPP message body (chars)
 
+# Sessions registered without a terminal multiplexer (backend=None) are useful
+# for sending notifications but cannot receive messages.  They are automatically
+# expired after this many seconds so stale entries don't accumulate.
+NO_BACKEND_SESSION_TTL = 24 * 3600  # 24 hours
+
 # Allowed values for the 'source' field
 _VALID_SOURCES: frozenset[str | None] = frozenset({"opencode", None})
 
@@ -273,7 +278,7 @@ class XMPPBridge:
 
     async def _cleanup_stale_sessions(self) -> int:
         """Remove dead sessions and deduplicate (keep newest per key)."""
-        to_remove: set[str] = set()
+        to_remove: dict[str, str] = {}  # sid -> reason
 
         # 1. Remove sessions whose multiplexer is dead (check in parallel)
         items = list(self.registry.sessions.items())
@@ -281,9 +286,19 @@ class XMPPBridge:
             alive_results = await asyncio.gather(*(self._is_session_alive(info) for _, info in items))
             for (sid, _), alive in zip(items, alive_results, strict=True):
                 if not alive:
-                    to_remove.add(sid)
+                    to_remove[sid] = "dead"
 
-        # 2. Deduplicate — keep only the newest per multiplexer slot (sty+window for screen,
+        # 2. Expire no-backend sessions older than NO_BACKEND_SESSION_TTL.
+        now = time.time()
+        for sid, info in list(self.registry.sessions.items()):
+            if sid in to_remove:
+                continue
+            if info["backend"] is None and (now - info["registered_at"]) > NO_BACKEND_SESSION_TTL:
+                age_h = (now - info["registered_at"]) / 3600
+                to_remove[sid] = "expired"
+                log.info("Expiring no-backend session %s (age=%.0fh)", sid, age_h)
+
+        # 3. Deduplicate — keep only the newest per multiplexer slot (sty+window for screen,
         # sty/pane for tmux). Multiple instances in different windows of the same project are
         # kept alive; only entries sharing the exact same terminal slot are collapsed.
         groups: dict[object, list[tuple[str, float]]] = {}
@@ -298,13 +313,14 @@ class XMPPBridge:
             if len(entries) > 1:
                 entries.sort(key=lambda e: e[1])  # oldest first
                 for sid, _ in entries[:-1]:  # remove all but newest
-                    to_remove.add(sid)
+                    to_remove[sid] = "duplicate"
 
-        for sid in to_remove:
+        for sid, reason in to_remove.items():
             stale = self.registry.sessions.get(sid)
             project = stale["project"] if stale else "?"
             self.registry.unregister(sid)
-            log.info("Cleaned stale session %s (project=%s)", sid, project)
+            log.info("Cleaned stale session %s (project=%s, reason=%s)", sid, project, reason)
+            self.audit.log("SESSION_EXPIRED", session_id=sid, project=project, reason=reason)
         if to_remove:
             log.info(self.messages.stale_sessions_cleaned.format(count=len(to_remove)))
         return len(to_remove)

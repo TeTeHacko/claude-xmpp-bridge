@@ -2934,3 +2934,114 @@ class TestAuditSessionLifecycle:
         assert unreg[0]["session_id"] == "sess-del"
         assert unreg[0]["project"] == "/home/user/del-proj"
         bridge.registry.close()
+
+
+class TestNoBackendSessionTTL:
+    """Sessions without a backend are auto-expired after NO_BACKEND_SESSION_TTL."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_expired_no_backend_session_is_removed(self, MockXMPP, tmp_path):
+        """A no-backend session older than TTL is cleaned up on /list."""
+        import time
+
+        from claude_xmpp_bridge.bridge import NO_BACKEND_SESSION_TTL
+
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        # Manually register a no-backend session with an old timestamp
+        old_ts = time.time() - NO_BACKEND_SESSION_TTL - 10
+        bridge.registry.register(
+            "stale-no-backend",
+            sty="",
+            window="",
+            project="/home/user/stale",
+            backend=None,
+            registered_at=old_ts,
+        )
+        assert "stale-no-backend" in bridge.registry.sessions
+
+        removed = await bridge._cleanup_stale_sessions()
+
+        assert removed >= 1
+        assert "stale-no-backend" not in bridge.registry.sessions
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_fresh_no_backend_session_is_kept(self, MockXMPP, tmp_path):
+        """A no-backend session younger than TTL must NOT be removed."""
+        import time
+
+        from claude_xmpp_bridge.bridge import NO_BACKEND_SESSION_TTL
+
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        fresh_ts = time.time() - (NO_BACKEND_SESSION_TTL // 2)
+        bridge.registry.register(
+            "fresh-no-backend",
+            sty="",
+            window="",
+            project="/home/user/fresh",
+            backend=None,
+            registered_at=fresh_ts,
+        )
+
+        removed = await bridge._cleanup_stale_sessions()
+
+        assert removed == 0
+        assert "fresh-no-backend" in bridge.registry.sessions
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_expired_session_emits_audit_event(self, MockXMPP, tmp_path):
+        """SESSION_EXPIRED audit event is emitted when a no-backend session expires."""
+        import time
+
+        from claude_xmpp_bridge.bridge import NO_BACKEND_SESSION_TTL
+
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        log_file = tmp_path / "audit.log"
+        config = Config(
+            jid="bot@example.com",
+            password="secret",
+            recipient="user@example.com",
+            socket_path=tmp_path / "test.sock",
+            db_path=tmp_path / "test.db",
+            messages_file=None,
+            audit_log=str(log_file),
+        )
+        bridge = XMPPBridge(config)
+        old_ts = time.time() - NO_BACKEND_SESSION_TTL - 10
+        bridge.registry.register(
+            "expired-audit",
+            sty="",
+            window="",
+            project="/home/user/expired",
+            backend=None,
+            registered_at=old_ts,
+        )
+
+        await bridge._cleanup_stale_sessions()
+        bridge.audit.close()
+
+        records = _read_audit_log(log_file)
+        expired = [r for r in records if r["event"] == "SESSION_EXPIRED"]
+        assert len(expired) == 1
+        assert expired[0]["session_id"] == "expired-audit"
+        assert expired[0]["reason"] == "expired"
+        assert expired[0]["project"] == "/home/user/expired"
+        bridge.registry.close()
