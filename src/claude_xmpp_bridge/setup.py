@@ -173,7 +173,11 @@ def _step_config(yes_mode: bool) -> bool:
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     token = secrets.token_hex(32)
-    CONFIG_FILE.write_text(f'jid = "{jid}"\nrecipient = "{recipient}"\nsocket_token = "{token}"\n')
+    # Escape TOML special characters in user input to prevent injection
+    safe_jid = jid.replace("\\", "\\\\").replace('"', '\\"')
+    safe_recipient = recipient.replace("\\", "\\\\").replace('"', '\\"')
+    CONFIG_FILE.write_text(f'jid = "{safe_jid}"\nrecipient = "{safe_recipient}"\nsocket_token = "{token}"\n')
+    CONFIG_FILE.chmod(0o600)
 
     token_file = CONFIG_DIR / "socket_token"
     token_file.write_text(token + "\n")

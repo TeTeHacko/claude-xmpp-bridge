@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -102,7 +103,7 @@ class SocketServer:
             # interacting with the bridge socket.
             if self._socket_token is not None:
                 provided = request.get("token")
-                if provided != self._socket_token:
+                if not isinstance(provided, str) or not hmac.compare_digest(provided, self._socket_token):
                     log.warning("Socket request rejected: invalid or missing token")
                     if self._audit is not None:
                         self._audit.log(

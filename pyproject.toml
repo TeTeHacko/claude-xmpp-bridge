@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-xmpp-bridge"
-version = "0.2.0"
+version = "0.2.1"
 description = "XMPP bridge for Claude Code — route messages between Jabber and Claude sessions"
 readme = "README.md"
 license = "MIT"
@@ -75,6 +75,17 @@ select = ["E", "F", "W", "I", "UP", "S", "B", "SIM"]
 [tool.mypy]
 strict = true
 python_version = "3.11"
+
+[tool.coverage.run]
+source = ["claude_xmpp_bridge"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

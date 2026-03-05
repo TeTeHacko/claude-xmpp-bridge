@@ -6,6 +6,7 @@ import sys
 
 import pytest
 
+from claude_xmpp_bridge import __version__
 from claude_xmpp_bridge.cli import ask_main, bridge_main, client_main, notify_main
 
 
@@ -54,7 +55,7 @@ class TestVersionExitsZero:
             bridge_main()
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert "0.2.0" in captured.out
+        assert __version__ in captured.out
 
     def test_client_main_version(self, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "--version"])
@@ -62,7 +63,7 @@ class TestVersionExitsZero:
             client_main()
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert "0.2.0" in captured.out
+        assert __version__ in captured.out
 
     def test_notify_main_version(self, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", ["claude-xmpp-notify", "--version"])
@@ -70,7 +71,7 @@ class TestVersionExitsZero:
             notify_main()
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert "0.2.0" in captured.out
+        assert __version__ in captured.out
 
     def test_ask_main_version(self, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", ["claude-xmpp-ask", "--version"])
@@ -78,7 +79,7 @@ class TestVersionExitsZero:
             ask_main()
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert "0.2.0" in captured.out
+        assert __version__ in captured.out
 
 
 class TestMissingConfig:

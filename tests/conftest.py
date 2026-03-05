@@ -15,13 +15,6 @@ def credentials_file(tmp_path):
 
 
 @pytest.fixture
-def config_toml(tmp_path):
-    """Create a temporary config TOML file."""
-    conf = tmp_path / "config.toml"
-    return conf
-
-
-@pytest.fixture
 def db_path(tmp_path):
     """Temporary database path."""
     return tmp_path / "test.db"

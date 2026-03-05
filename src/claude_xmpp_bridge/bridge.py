@@ -67,6 +67,14 @@ class XMPPBridge:
     # --- XMPP message handling ---
 
     async def _on_xmpp_message(self, msg: slixmpp.Message) -> None:
+        """Route an incoming XMPP message from the authorized sender.
+
+        Priority: (1) if an ask is pending and the message is not a command,
+        deliver it as the ask reply; (2) commands starting with '/' are
+        dispatched to _handle_command; (3) plain text is sent to the active
+        terminal session via _send_to_session.  Messages from unauthorized
+        senders or non-chat types are silently dropped.
+        """
         if msg["type"] not in ("chat", "normal"):
             return
         sender = msg["from"].bare
@@ -426,6 +434,12 @@ class XMPPBridge:
     # --- Socket request handling ---
 
     async def _handle_request(self, req: dict[str, object]) -> dict[str, object]:
+        """Dispatch a JSON request received over the Unix socket.
+
+        Supported commands: register, unregister, send, notify, response,
+        ask, query.  Each command is delegated to its _handle_* method.
+        Every request (and its outcome) is recorded as a SOCKET_CMD audit event.
+        """
         cmd = str(req.get("cmd", ""))
         session_id = str(req.get("session_id", "")) or None
 
@@ -462,6 +476,14 @@ class XMPPBridge:
         return response
 
     def _handle_register(self, req: dict[str, object]) -> dict[str, object]:
+        """Register (or re-register) a coding session with the bridge.
+
+        Validates all fields (session_id, sty, window, project, backend, source),
+        deduplicates by multiplexer slot (same sty+window replaces old entry while
+        inheriting its registered_at timestamp to keep stable /list ordering), and
+        enforces the MAX_SESSIONS limit.  Multiple instances of the same project in
+        different terminal windows are intentionally allowed.
+        """
         try:
             sid = str(req.get("session_id", ""))
             if not sid:
@@ -604,7 +626,7 @@ class XMPPBridge:
             source = str(source_raw) if source_raw is not None else None
             icon = self._source_icon(source)
             project_raw = req.get("project", "")
-            if project_raw:
+            if project_raw:  # noqa: SIM108 — ternary would be unreadable here
                 prefix = f"{icon}[{self._short_path(str(project_raw))}]"
             else:
                 prefix = icon if icon else ""
