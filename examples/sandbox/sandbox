@@ -7,6 +7,7 @@ set -euo pipefail
 HOME_DIR="$HOME"
 USER_NAME="$USER"
 SANDBOX_CWD="$(pwd)"
+PROJECT_NAME="${SANDBOX_CWD##*/}"
 
 # Arrays for collected options
 declare -a SSH_KEYS=()
@@ -272,6 +273,43 @@ BWRAP_ARGS+=(--setenv DISABLE_AUTOUPDATER 1)
 [[ -n "${TMUX:-}" ]] && BWRAP_ARGS+=(--setenv TMUX "$TMUX")
 [[ -n "${TMUX_PANE:-}" ]] && BWRAP_ARGS+=(--setenv TMUX_PANE "$TMUX_PANE")
 
+# ---------------------------------------------------------------------------
+# Window title management
+# Set title via ANSI escape sequences directly on /dev/tty — works because
+# the sandbox script itself runs with a controlling terminal (unlike hooks
+# which are subprocesses of Claude/OpenCode with detached stderr).
+# \033k...\033\\ — Screen window name
+# \033]2;...\007  — xterm/tmux title bar
+# ---------------------------------------------------------------------------
+_set_title() {
+    local title="$1"
+    printf '\033k%s\033\\' "$title" > /dev/tty 2>/dev/null || true
+    printf '\033]2;%s\007' "$title" > /dev/tty 2>/dev/null || true
+}
+
+_detect_icon() {
+    # Detect icon from the command being sandboxed
+    local cmd="${1:-}"
+    case "$cmd" in
+        *opencode*) printf '🧠' ;;
+        *claude*)   printf '⚡' ;;
+        *)          printf '⚡' ;;
+    esac
+}
+
+_restore_title() {
+    _set_title "$PROJECT_NAME"
+}
+trap _restore_title EXIT
+
+# Set title now — detect from -c cmd or first positional arg
+if [[ -n "$BASH_C_MODE" ]]; then
+    _icon=$(_detect_icon "$BASH_C_CMD")
+else
+    _icon=$(_detect_icon "${1:-}")
+fi
+_set_title "${_icon}${PROJECT_NAME}"
+
 # Build the inner command
 if [[ ${#SSH_KEYS[@]} -gt 0 ]]; then
     # ssh-agent wrapper: start agent, add keys, exec command
@@ -291,12 +329,12 @@ if [[ ${#SSH_KEYS[@]} -gt 0 ]]; then
         inner_cmd="${inner_cmd# }"
     fi
 
-    exec bwrap "${BWRAP_ARGS[@]}" \
+    bwrap "${BWRAP_ARGS[@]}" \
         /bin/bash -c "eval \"\$(ssh-agent -s)\" >/dev/null && ssh-add${ssh_add_args} && exec ${inner_cmd}"
 else
     if [[ -n "$BASH_C_MODE" ]]; then
-        exec bwrap "${BWRAP_ARGS[@]}" /bin/bash -c "$BASH_C_CMD"
+        bwrap "${BWRAP_ARGS[@]}" /bin/bash -c "$BASH_C_CMD"
     else
-        exec bwrap "${BWRAP_ARGS[@]}" "$@"
+        bwrap "${BWRAP_ARGS[@]}" "$@"
     fi
 fi

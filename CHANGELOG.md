@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.10] - 2025-03-05
+
+### Fixed
+- Sandbox: set window title (`⚡`/`🧠` + project name) via ANSI escape
+  sequences written to `/dev/tty` before launching bwrap — the wrapper
+  script has a controlling terminal unlike hook subprocesses; restore title
+  to bare project name on exit via `trap EXIT`; detect icon from command
+  (`claude` → `⚡`, `opencode` → `🧠`)
+- Sandbox: replace `exec bwrap` with plain `bwrap` so the `trap EXIT`
+  title-restore handler runs after the sandbox exits
+
 ## [0.2.9] - 2025-03-05
 
 ### Fixed
