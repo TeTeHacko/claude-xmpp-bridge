@@ -54,7 +54,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   let originalTitle = null
   if (STY) {
     const res = await $`screen -S ${STY} -p ${WINDOW} -Q title`.nothrow()
-    originalTitle = res.stdout.trim() || null
+    originalTitle = res.stdout?.toString().trim() || null
     await setTitle("🧠" + projectName)
   }
 
