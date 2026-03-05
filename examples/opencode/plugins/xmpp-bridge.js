@@ -88,10 +88,13 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     // -------------------------------------------------------------------------
     event: async ({ event }) => {
 
-      // --- SERVER INSTANCE DISPOSED: OpenCode se ukončuje → odhlásit session ---
+      // --- SERVER INSTANCE DISPOSED: OpenCode se ukončuje → odhlásit session + reset titulu ---
       if (event.type === "server.instance.disposed") {
         if (registeredSessionID) {
           await $`claude-xmpp-client unregister ${registeredSessionID}`.nothrow()
+        }
+        if (STY) {
+          await $`screen -S ${STY} -p ${WINDOW} -X title ${projectName}`.nothrow()
         }
         return
       }
