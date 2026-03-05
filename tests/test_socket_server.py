@@ -390,7 +390,7 @@ class TestEmptyData:
             writer.write(b"")
             writer.write_eof()
             # Server may close without writing anything — just ensure it doesn't crash
-            data = await asyncio.wait_for(reader.read(65536), timeout=2)
+            await asyncio.wait_for(reader.read(65536), timeout=2)
             writer.close()
             await writer.wait_closed()
             # No handler call expected
@@ -407,7 +407,7 @@ class TestEmptyData:
             reader, writer = await asyncio.open_unix_connection(str(socket_path))
             writer.write(b"   \n  \n")
             writer.write_eof()
-            data = await asyncio.wait_for(reader.read(65536), timeout=2)
+            await asyncio.wait_for(reader.read(65536), timeout=2)
             writer.close()
             await writer.wait_closed()
             assert len(handler.calls) == 0
@@ -423,8 +423,6 @@ class TestEmptyData:
 class TestLiveSocketCollision:
     async def test_start_exits_when_live_socket_exists(self, socket_path: Path) -> None:
         """If a live process is already listening on the socket, start() calls sys.exit(1)."""
-        import sys
-
         # Start a real server to hold the socket
         first_handler = MockHandler({"status": "ok"})
         first_server = SocketServer(socket_path, first_handler)

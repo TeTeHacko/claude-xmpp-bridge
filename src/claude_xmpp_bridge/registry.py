@@ -79,7 +79,7 @@ class SessionRegistry:
         for row in self._db.execute(
             "SELECT session_id, sty, window, project, backend, source, registered_at FROM sessions"
         ):
-            self.sessions[row[0]] = {  # type: ignore[assignment]
+            self.sessions[row[0]] = {
                 "sty": row[1],
                 "window": row[2],
                 "project": row[3],
@@ -141,7 +141,7 @@ class SessionRegistry:
         _validate_window(window)
 
         is_reregister = session_id in self.sessions
-        self.sessions[session_id] = {  # type: ignore[assignment]
+        self.sessions[session_id] = {
             "sty": sty,
             "window": window,
             "project": project,
@@ -154,15 +154,13 @@ class SessionRegistry:
         if not is_reregister:
             self.last_active = session_id
         self._save_session(session_id)
-        log.info("Registered session %s (backend=%s, source=%s)", session_id, backend, source)
-        log.debug("Registered session %s (project=%s, backend=%s, source=%s)", session_id, project, backend, source)
+        log.info("Registered session %s (project=%s, backend=%s, source=%s)", session_id, project, backend, source)
 
     def unregister(self, session_id: str) -> None:
         """Unregister a session."""
         if session_id in self.sessions:
             info = self.sessions.pop(session_id)
-            log.info("Unregistered session %s", session_id)
-            log.debug("Unregistered session %s (project=%s)", session_id, info["project"])
+            log.info("Unregistered session %s (project=%s)", session_id, info["project"])
             if self.last_active == session_id:
                 if self.sessions:
                     self.last_active = max(
@@ -196,10 +194,7 @@ class SessionRegistry:
         """Set the active session."""
         if session_id in self.sessions:
             self.last_active = session_id
-            self._db.execute(
-                "INSERT OR REPLACE INTO state (key, value) VALUES ('last_active', ?)",
-                (self.last_active,),
-            )
+            self._save_last_active()
             self._db.commit()
 
     def get_active(self) -> tuple[str | None, SessionInfo | None]:

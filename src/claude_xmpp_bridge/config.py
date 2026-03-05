@@ -31,6 +31,7 @@ class Config:
     messages_file: Path | None
     socket_token: str | None = None  # shared secret for socket auth (None = disabled)
     force_starttls: bool = True  # require TLS on XMPP connection
+    audit_log: str = "journald"  # "journald" or path to a rotating JSON Lines file
 
     def __repr__(self) -> str:
         token_repr = "'***'" if self.socket_token else "None"
@@ -38,7 +39,7 @@ class Config:
             f"Config(jid={self.jid!r}, password='***', recipient={self.recipient!r}, "
             f"socket_path={self.socket_path!r}, db_path={self.db_path!r}, "
             f"messages_file={self.messages_file!r}, socket_token={token_repr}, "
-            f"force_starttls={self.force_starttls!r})"
+            f"force_starttls={self.force_starttls!r}, audit_log={self.audit_log!r})"
         )
 
 
@@ -178,6 +179,9 @@ def load_config(
     force_starttls_raw = toml.get("force_starttls")
     force_starttls = bool(force_starttls_raw) if force_starttls_raw is not None else True
 
+    # Audit log destination: "journald" (default) or path to a file
+    audit_log = os.environ.get("CLAUDE_XMPP_AUDIT_LOG") or _toml_str(toml, "audit_log") or "journald"
+
     return Config(
         jid=jid,
         password=password,
@@ -187,6 +191,7 @@ def load_config(
         messages_file=messages_file,
         socket_token=socket_token,
         force_starttls=force_starttls,
+        audit_log=audit_log,
     )
 
 
@@ -242,6 +247,13 @@ def validate_config(cfg: Config) -> None:
 
     if cfg.messages_file and not cfg.messages_file.is_file():
         errors.append(f"Messages file does not exist: {cfg.messages_file}")
+
+    if cfg.audit_log != "journald":
+        audit_parent = Path(cfg.audit_log).expanduser().parent
+        if not audit_parent.is_dir():
+            errors.append(f"Audit log parent directory does not exist: {audit_parent}")
+        elif not os.access(audit_parent, os.W_OK):
+            errors.append(f"Audit log parent directory is not writable: {audit_parent}")
 
     if errors:
         raise SystemExit("Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors))

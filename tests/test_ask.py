@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
+from helpers import make_slixmpp_message as _make_slixmpp_message
 
 from claude_xmpp_bridge.ask import send_and_wait
 from claude_xmpp_bridge.config import NotifyConfig
@@ -17,17 +18,6 @@ def _make_config() -> NotifyConfig:
         password="secret",
         recipient="user@example.com",
     )
-
-
-def _make_slixmpp_message(from_bare: str, body: str, mtype: str = "chat") -> MagicMock:
-    """Create a fake slixmpp Message object."""
-    msg = MagicMock()
-    msg.__getitem__ = lambda self, key: {
-        "type": mtype,
-        "from": MagicMock(bare=from_bare),
-        "body": body,
-    }[key]
-    return msg
 
 
 class TestSendAndWaitWithReply:

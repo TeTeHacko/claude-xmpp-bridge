@@ -29,6 +29,15 @@ def _setup_logging(verbose: bool = False, quiet: bool = False) -> None:
     )
 
 
+def _parse_json_arg(raw: str) -> dict[str, object]:
+    """Parse a JSON string argument, printing error and exiting on failure."""
+    try:
+        return json.loads(raw)  # type: ignore[no-any-return]
+    except json.JSONDecodeError:
+        print("Error: invalid JSON", file=sys.stderr)
+        sys.exit(1)
+
+
 # --- bridge ---
 
 
@@ -89,6 +98,14 @@ def client_main() -> None:
     p_unreg = sub.add_parser("unregister", help="Unregister a session")
     p_unreg.add_argument("session_id", help="Session ID")
 
+    # notify
+    p_notify = sub.add_parser(
+        "notify",
+        help="Send a session-tagged XMPP notification (bridge adds icon + window ID)",
+        epilog='JSON: {"session_id":"…","message":"…"}',
+    )
+    p_notify.add_argument("json_data", help="Notification JSON data")
+
     # response
     p_resp = sub.add_parser("response", help="Send a response notification")
     p_resp.add_argument("json_data", help="Response JSON data")
@@ -127,29 +144,39 @@ def client_main() -> None:
             sys.exit(1)
 
     elif args.command == "register":
-        try:
-            data = json.loads(args.json_data)
-        except json.JSONDecodeError:
-            print("Error: invalid JSON", file=sys.stderr)
-            sys.exit(1)
+        data = _parse_json_arg(args.json_data)
         data["cmd"] = "register"
-        send_to_bridge(data, socket_path)
+        result = send_to_bridge(data, socket_path)
+        if result is not None and "error" in result:
+            print(f"Error: {result['error']}", file=sys.stderr)
+            sys.exit(1)
 
     elif args.command == "unregister":
-        send_to_bridge({"cmd": "unregister", "session_id": args.session_id}, socket_path)
+        result = send_to_bridge({"cmd": "unregister", "session_id": args.session_id}, socket_path)
+        if result is not None and "error" in result:
+            print(f"Error: {result['error']}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.command == "notify":
+        data = _parse_json_arg(args.json_data)
+        data["cmd"] = "notify"
+        result = send_to_bridge(data, socket_path)
+        if result is None:
+            message = str(data.get("message", ""))
+            if message:
+                fallback_notify(message)
+        elif "error" in result:
+            print(f"Error: {result['error']}", file=sys.stderr)
+            sys.exit(1)
 
     elif args.command == "response":
-        try:
-            data = json.loads(args.json_data)
-        except json.JSONDecodeError:
-            print("Error: invalid JSON", file=sys.stderr)
-            sys.exit(1)
+        data = _parse_json_arg(args.json_data)
         data["cmd"] = "response"
         result = send_to_bridge(data, socket_path)
         if result is None:
-            message = data.get("message", "")
+            message = str(data.get("message", ""))
             if message:
-                fallback_notify(str(message))
+                fallback_notify(message)
         elif "error" in result:
             print(f"Error: {result['error']}", file=sys.stderr)
             sys.exit(1)
@@ -215,6 +242,7 @@ def ask_main() -> None:
     _add_common_args(parser)
     parser.add_argument("message", nargs="?", default=None, help="Message (reads stdin if omitted)")
     parser.add_argument("--timeout", type=int, default=300, help="Reply timeout in seconds (default: 300)")
+    parser.add_argument("--session-id", default=None, help="Session ID for tagging the ask message")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--quiet", "-q", action="store_true")
     args = parser.parse_args()
@@ -232,6 +260,29 @@ def ask_main() -> None:
     if not message:
         sys.exit(0)
 
+    # Try bridge socket first (avoids opening a separate XMPP connection).
+    # Only treat the result as authoritative when "ok" is present — that means
+    # the bridge understood the "ask" command.  A bare {"error": …} (e.g.
+    # "unknown command") means the bridge is too old → fall through to XMPP.
+    from .client import send_to_bridge
+
+    ask_req: dict[str, object] = {"cmd": "ask", "message": message, "timeout": args.timeout}
+    if args.session_id:
+        ask_req["session_id"] = args.session_id
+    result = send_to_bridge(
+        ask_req,
+        socket_timeout=args.timeout + 10,
+    )
+    if result is not None and "ok" in result:
+        if result["ok"] and result.get("reply"):
+            print(result["reply"])
+            sys.exit(0)
+        else:
+            error = result.get("error", "no reply")
+            print(f"No reply ({error})", file=sys.stderr)
+            sys.exit(1)
+
+    # Fallback: direct XMPP connection (bridge not running)
     from .ask import send_and_wait
     from .config import load_notify_config
 

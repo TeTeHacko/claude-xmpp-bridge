@@ -124,6 +124,8 @@ class TestMissingConfig:
             "claude_xmpp_bridge.config.CONFIG_FILE",
             __import__("pathlib").Path("/nonexistent/config.toml"),
         )
+        # Simulate no bridge running so ask_main falls through to direct XMPP path
+        monkeypatch.setattr("claude_xmpp_bridge.client.send_to_bridge", lambda *a, **kw: None)
         with pytest.raises(SystemExit) as exc_info:
             ask_main()
         msg = str(exc_info.value)
@@ -171,8 +173,6 @@ class TestClientSubcommands:
 
     def test_send_empty_message_exits_zero(self, monkeypatch, tmp_path):
         """send with empty stdin and no args should exit 0 silently."""
-        import io
-
         monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "send"])
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
         monkeypatch.setattr(sys.stdin, "read", lambda: "   ")  # whitespace only

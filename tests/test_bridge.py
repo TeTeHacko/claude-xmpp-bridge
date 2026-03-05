@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from helpers import make_mock_conn as _make_mock_conn
+from helpers import make_slixmpp_message as _make_slixmpp_message
 
 from claude_xmpp_bridge.bridge import XMPPBridge
 from claude_xmpp_bridge.config import Config
@@ -22,17 +24,6 @@ def _make_config(tmp_path: Path) -> Config:
         db_path=tmp_path / "test.db",
         messages_file=None,
     )
-
-
-def _make_slixmpp_message(from_bare: str, body: str, mtype: str = "chat") -> MagicMock:
-    """Create a fake slixmpp Message object."""
-    msg = MagicMock()
-    msg.__getitem__ = lambda self, key: {
-        "type": mtype,
-        "from": MagicMock(bare=from_bare),
-        "body": body,
-    }[key]
-    return msg
 
 
 async def _socket_request(socket_path: Path, request: dict) -> dict:
@@ -116,17 +107,7 @@ class TestXMPPMessageRouting:
     @patch("claude_xmpp_bridge.bridge.get_multiplexer")
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_plain_text_routes_to_active_session(self, MockXMPP, mock_get_mux, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
+        conn, captured = _make_mock_conn(MockXMPP)
 
         # Set up the mock multiplexer
         mock_mux = AsyncMock()
@@ -147,57 +128,32 @@ class TestXMPPMessageRouting:
 
         # Simulate incoming XMPP message
         fake_msg = _make_slixmpp_message("user@example.com", "hello world")
-        assert captured_callback is not None
-        await captured_callback(fake_msg)
+        await captured["cb"](fake_msg)
 
         mock_get_mux.assert_called_with("screen")
         mock_mux.send_text.assert_called_once_with("12345.pts-0", "0", "hello world")
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_ignores_message_from_stranger(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
+        conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         XMPPBridge(config)
 
         # No sessions, so if it tries to route it would fail
         fake_msg = _make_slixmpp_message("stranger@example.com", "evil text")
-        assert captured_callback is not None
-        await captured_callback(fake_msg)
+        await captured["cb"](fake_msg)
 
         # Should not crash or send anything via XMPP (no session to report about)
         conn.send.assert_not_called()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_ignores_groupchat(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
+        conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         XMPPBridge(config)
 
         fake_msg = _make_slixmpp_message("user@example.com", "hello", mtype="groupchat")
-        assert captured_callback is not None
-        await captured_callback(fake_msg)
+        await captured["cb"](fake_msg)
 
         conn.send.assert_not_called()
 
@@ -205,23 +161,10 @@ class TestXMPPMessageRouting:
 class TestHandleCommandEdgeCases:
     """Edge cases in _handle_command: /N without arg, unknown command."""
 
-    def _make_bridge_with_callback(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured = {}
-
-        def capture(cb):
-            captured["cb"] = cb
-
-        conn.on_message.side_effect = capture
-        MockXMPP.return_value = conn
-        bridge = XMPPBridge(_make_config(tmp_path))
-        return bridge, conn, captured
-
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_slash_n_without_message_sends_usage(self, MockXMPP, tmp_path):
-        bridge, conn, captured = self._make_bridge_with_callback(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         fake_msg = _make_slixmpp_message("user@example.com", "/1")
         await captured["cb"](fake_msg)
         conn.send.assert_called_once()
@@ -230,7 +173,8 @@ class TestHandleCommandEdgeCases:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_unknown_command_replies_with_error(self, MockXMPP, tmp_path):
-        bridge, conn, captured = self._make_bridge_with_callback(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         fake_msg = _make_slixmpp_message("user@example.com", "/foobar")
         await captured["cb"](fake_msg)
         conn.send.assert_called_once()
@@ -239,7 +183,8 @@ class TestHandleCommandEdgeCases:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_empty_body_ignored(self, MockXMPP, tmp_path):
-        bridge, conn, captured = self._make_bridge_with_callback(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         fake_msg = _make_slixmpp_message("user@example.com", "   ")
         await captured["cb"](fake_msg)
         conn.send.assert_not_called()
@@ -251,18 +196,7 @@ class TestListCommand:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_with_sessions(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
+        conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
 
@@ -276,34 +210,20 @@ class TestListCommand:
 
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             fake_msg = _make_slixmpp_message("user@example.com", "/list")
-            assert captured_callback is not None
-            await captured_callback(fake_msg)
+            await captured["cb"](fake_msg)
 
         conn.send.assert_called_once()
         sent_text = conn.send.call_args[0][1]
         assert "Sessions:" in sent_text
-        assert "[⚡screen]" in sent_text
+        assert "[⚡screen #0]" in sent_text  # window label included
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_empty(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
-        config = _make_config(tmp_path)
-        XMPPBridge(config)
+        conn, captured = _make_mock_conn(MockXMPP)
+        XMPPBridge(_make_config(tmp_path))
 
         fake_msg = _make_slixmpp_message("user@example.com", "/list")
-        assert captured_callback is not None
-        await captured_callback(fake_msg)
+        await captured["cb"](fake_msg)
 
         conn.send.assert_called_once()
         sent_text = conn.send.call_args[0][1]
@@ -311,18 +231,7 @@ class TestListCommand:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_short_alias(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
+        conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
 
@@ -336,8 +245,7 @@ class TestListCommand:
 
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             fake_msg = _make_slixmpp_message("user@example.com", "/l")
-            assert captured_callback is not None
-            await captured_callback(fake_msg)
+            await captured["cb"](fake_msg)
 
         conn.send.assert_called_once()
         sent_text = conn.send.call_args[0][1]
@@ -345,18 +253,7 @@ class TestListCommand:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_shows_tmux_tag(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
+        conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
         bridge.registry.register(
@@ -369,27 +266,15 @@ class TestListCommand:
 
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             fake_msg = _make_slixmpp_message("user@example.com", "/list")
-            assert captured_callback is not None
-            await captured_callback(fake_msg)
+            await captured["cb"](fake_msg)
 
         sent_text = conn.send.call_args[0][1]
-        assert "[⚡tmux]" in sent_text
+        assert "[⚡tmux :tmux-session]" in sent_text
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_shows_read_only_tag_for_no_backend(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
+        conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
         bridge.registry.register(
@@ -401,8 +286,7 @@ class TestListCommand:
         )
 
         fake_msg = _make_slixmpp_message("user@example.com", "/list")
-        assert captured_callback is not None
-        await captured_callback(fake_msg)
+        await captured["cb"](fake_msg)
 
         sent_text = conn.send.call_args[0][1]
         assert "[⚡read-only]" in sent_text
@@ -411,18 +295,7 @@ class TestListCommand:
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_shows_opencode_read_only_tag(self, MockXMPP, tmp_path):
         """OpenCode session with no backend should show [🧠read-only]."""
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
+        conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
         bridge.registry.register(
@@ -435,8 +308,7 @@ class TestListCommand:
         )
 
         fake_msg = _make_slixmpp_message("user@example.com", "/list")
-        assert captured_callback is not None
-        await captured_callback(fake_msg)
+        await captured["cb"](fake_msg)
 
         sent_text = conn.send.call_args[0][1]
         assert "[🧠read-only]" in sent_text
@@ -448,24 +320,11 @@ class TestHelpCommand:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_help_returns_help_text(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
-        config = _make_config(tmp_path)
-        XMPPBridge(config)
+        conn, captured = _make_mock_conn(MockXMPP)
+        XMPPBridge(_make_config(tmp_path))
 
         fake_msg = _make_slixmpp_message("user@example.com", "/help")
-        assert captured_callback is not None
-        await captured_callback(fake_msg)
+        await captured["cb"](fake_msg)
 
         conn.send.assert_called_once()
         sent_text = conn.send.call_args[0][1]
@@ -786,18 +645,7 @@ class TestStaleSessionCleanup:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_calls_cleanup(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
+        conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
 
@@ -812,8 +660,7 @@ class TestStaleSessionCleanup:
         # /list should clean up dead sessions before listing
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(1)):
             fake_msg = _make_slixmpp_message("user@example.com", "/list")
-            assert captured_callback is not None
-            await captured_callback(fake_msg)
+            await captured["cb"](fake_msg)
 
         conn.send.assert_called_once()
         sent_text = conn.send.call_args[0][1]
@@ -822,8 +669,13 @@ class TestStaleSessionCleanup:
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
-    async def test_cleanup_deduplicates_by_project(self, MockXMPP, tmp_path):
-        """Multiple alive sessions for same project — keep only newest."""
+    async def test_cleanup_deduplicates_by_sty_window_same_session(self, MockXMPP, tmp_path):
+        """Two alive sessions sharing the same sty+window — keep only newest.
+
+        Multiple instances of the same agent in *different* windows are intentionally
+        kept alive. Deduplication only fires for entries sharing the *exact same*
+        terminal slot (same sty + same window number).
+        """
         conn = MagicMock()
         conn.connected = asyncio.Event()
         conn.connected.set()
@@ -833,37 +685,74 @@ class TestStaleSessionCleanup:
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
 
-        # Register 3 sessions for same project (simulating stale duplicates)
+        # Two sessions, same sty+window (e.g. ghost entry from a previous run)
         bridge.registry.register(
-            session_id="oldest",
-            sty="12345.pts-0",
-            window="1",
-            project="/home/user/project",
-            backend="screen",
-        )
-        bridge.registry.register(
-            session_id="middle",
+            session_id="ghost",
             sty="12345.pts-0",
             window="2",
             project="/home/user/project",
             backend="screen",
         )
         bridge.registry.register(
-            session_id="newest",
+            session_id="current",
+            sty="12345.pts-0",
+            window="2",
+            project="/home/user/project",
+            backend="screen",
+        )
+
+        # Both alive — but same slot → keep only current
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            removed = await bridge._cleanup_stale_sessions()
+
+        assert removed == 1
+        assert "current" in bridge.registry.sessions
+        assert "ghost" not in bridge.registry.sessions
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_cleanup_keeps_multiple_instances_same_project(self, MockXMPP, tmp_path):
+        """Multiple alive sessions for same project in different windows — all kept."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config = _make_config(tmp_path)
+        bridge = XMPPBridge(config)
+
+        # 3 instances of the same agent in 3 different windows of the same project
+        bridge.registry.register(
+            session_id="inst-1",
+            sty="12345.pts-0",
+            window="1",
+            project="/home/user/project",
+            backend="screen",
+        )
+        bridge.registry.register(
+            session_id="inst-2",
+            sty="12345.pts-0",
+            window="2",
+            project="/home/user/project",
+            backend="screen",
+        )
+        bridge.registry.register(
+            session_id="inst-3",
             sty="12345.pts-0",
             window="3",
             project="/home/user/project",
             backend="screen",
         )
 
-        # All screen sessions alive (exit 0) — but duplicates should be removed
+        # All screen sessions alive (exit 0) — all 3 must survive
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             removed = await bridge._cleanup_stale_sessions()
 
-        assert removed == 2
-        assert "newest" in bridge.registry.sessions
-        assert "oldest" not in bridge.registry.sessions
-        assert "middle" not in bridge.registry.sessions
+        assert removed == 0
+        assert "inst-1" in bridge.registry.sessions
+        assert "inst-2" in bridge.registry.sessions
+        assert "inst-3" in bridge.registry.sessions
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -985,18 +874,7 @@ class TestOpenCodeSourceTag:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_shows_brain_tag_for_opencode(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
+        conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
 
@@ -1011,28 +889,16 @@ class TestOpenCodeSourceTag:
 
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             fake_msg = _make_slixmpp_message("user@example.com", "/list")
-            assert captured_callback is not None
-            await captured_callback(fake_msg)
+            await captured["cb"](fake_msg)
 
         conn.send.assert_called_once()
         sent_text = conn.send.call_args[0][1]
-        assert "[🧠screen]" in sent_text
+        assert "[🧠screen #0]" in sent_text
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_no_brain_tag_for_claude(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
-
+        conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
 
@@ -1047,12 +913,11 @@ class TestOpenCodeSourceTag:
 
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             fake_msg = _make_slixmpp_message("user@example.com", "/list")
-            assert captured_callback is not None
-            await captured_callback(fake_msg)
+            await captured["cb"](fake_msg)
 
         conn.send.assert_called_once()
         sent_text = conn.send.call_args[0][1]
-        assert "[⚡screen]" in sent_text
+        assert "[⚡screen #0]" in sent_text
         assert "🧠" not in sent_text
         bridge.registry.close()
 
@@ -1095,8 +960,13 @@ class TestRegisterDeduplication:
     """Registering with same project or sty+window should replace old session."""
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
-    async def test_register_same_project_replaces_old(self, MockXMPP, tmp_path):
-        """Same project with different sty — old session replaced."""
+    async def test_register_same_project_different_window_keeps_both(self, MockXMPP, tmp_path):
+        """Same project but different sty+window — both sessions coexist.
+
+        Multiple instances of the same agent running in different terminal windows
+        of the same project are all welcome; deduplication only fires when the
+        *exact same* multiplexer slot (sty+window) is reused.
+        """
         conn = MagicMock()
         conn.connected = asyncio.Event()
         conn.connected.set()
@@ -1112,7 +982,7 @@ class TestRegisterDeduplication:
                 config.socket_path,
                 {
                     "cmd": "register",
-                    "session_id": "old-sess",
+                    "session_id": "inst-1",
                     "sty": "11111.pts-0",
                     "window": "2",
                     "project": "/home/user/project",
@@ -1120,14 +990,14 @@ class TestRegisterDeduplication:
                 },
             )
             assert resp1 == {"ok": True}
-            assert "old-sess" in bridge.registry.sessions
+            assert "inst-1" in bridge.registry.sessions
 
-            # New session, same project, different sty+window
+            # Second instance, same project, different sty+window — must NOT replace first
             resp2 = await _socket_request(
                 config.socket_path,
                 {
                     "cmd": "register",
-                    "session_id": "new-sess",
+                    "session_id": "inst-2",
                     "sty": "22222.pts-0",
                     "window": "5",
                     "project": "/home/user/project",
@@ -1135,8 +1005,8 @@ class TestRegisterDeduplication:
                 },
             )
             assert resp2 == {"ok": True}
-            assert "new-sess" in bridge.registry.sessions
-            assert "old-sess" not in bridge.registry.sessions
+            assert "inst-2" in bridge.registry.sessions
+            assert "inst-1" in bridge.registry.sessions  # both survive
         finally:
             await bridge.socket_server.stop()
             bridge.registry.close()
@@ -1288,8 +1158,13 @@ class TestStableOrdering:
     """Session restarts must not change /list numbering or hijack plain-text routing."""
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
-    async def test_restart_inherits_registered_at(self, MockXMPP, tmp_path):
-        """New session_id replacing same project preserves original registered_at."""
+    async def test_restart_same_window_inherits_registered_at(self, MockXMPP, tmp_path):
+        """New session_id reusing the same sty+window preserves original registered_at.
+
+        When Claude Code restarts inside the same Screen window the new session_id
+        takes over the slot; we inherit the original registered_at so that /list
+        numbering stays stable.
+        """
         conn = MagicMock()
         conn.connected = asyncio.Event()
         conn.connected.set()
@@ -1315,24 +1190,76 @@ class TestStableOrdering:
             assert resp1 == {"ok": True}
             original_time = bridge.registry.sessions["old-sess"]["registered_at"]
 
-            # Session restarts: new session_id, same project, same source
+            # Session restarts in the SAME window (same sty + same window number)
             resp2 = await _socket_request(
                 config.socket_path,
                 {
                     "cmd": "register",
                     "session_id": "new-sess",
-                    "sty": "22222.pts-0",
+                    "sty": "11111.pts-0",
                     "window": "1",
                     "project": "/home/user/project",
                     "backend": "screen",
                 },
             )
             assert resp2 == {"ok": True}
+            # Old session replaced because it occupied the same slot
             assert "old-sess" not in bridge.registry.sessions
             assert "new-sess" in bridge.registry.sessions
-            # registered_at must be inherited from old session
+            # registered_at must be inherited from old session for stable /list ordering
             new_time = bridge.registry.sessions["new-sess"]["registered_at"]
             assert abs(new_time - original_time) < 0.001
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_restart_different_window_keeps_both(self, MockXMPP, tmp_path):
+        """Session restart in a different window does NOT displace the old slot.
+
+        If the user opens a new Screen window for the same project, both instances
+        should coexist — they occupy different multiplexer slots.
+        """
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config = _make_config(tmp_path)
+        bridge = XMPPBridge(config)
+
+        await bridge.socket_server.start()
+        try:
+            resp1 = await _socket_request(
+                config.socket_path,
+                {
+                    "cmd": "register",
+                    "session_id": "old-sess",
+                    "sty": "11111.pts-0",
+                    "window": "1",
+                    "project": "/home/user/project",
+                    "backend": "screen",
+                },
+            )
+            assert resp1 == {"ok": True}
+
+            # New instance in a DIFFERENT window (same Screen session, different window#)
+            resp2 = await _socket_request(
+                config.socket_path,
+                {
+                    "cmd": "register",
+                    "session_id": "new-sess",
+                    "sty": "11111.pts-0",
+                    "window": "2",
+                    "project": "/home/user/project",
+                    "backend": "screen",
+                },
+            )
+            assert resp2 == {"ok": True}
+            # Both survive — different multiplexer slots
+            assert "old-sess" in bridge.registry.sessions
+            assert "new-sess" in bridge.registry.sessions
         finally:
             await bridge.socket_server.stop()
             bridge.registry.close()
@@ -1404,24 +1331,11 @@ class TestStableOrdering:
 class TestSendToSessionEdgeCases:
     """Error paths in _send_to_session_by_index and _send_to_session."""
 
-    def _make_bridge(self, MockXMPP, tmp_path):
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured = {}
-
-        def capture(cb):
-            captured["cb"] = cb
-
-        conn.on_message.side_effect = capture
-        MockXMPP.return_value = conn
-        bridge = XMPPBridge(_make_config(tmp_path))
-        return bridge, conn, captured
-
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_send_to_index_not_found(self, MockXMPP, tmp_path):
         """Sending to /99 with no sessions should report session not found."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         fake_msg = _make_slixmpp_message("user@example.com", "/99 hello")
         await captured["cb"](fake_msg)
         conn.send.assert_called_once()
@@ -1431,7 +1345,8 @@ class TestSendToSessionEdgeCases:
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_send_to_index_no_backend(self, MockXMPP, tmp_path):
         """Sending to a read-only session should reply with no-backend message."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
             session_id="ro-sess",
             sty="",
@@ -1448,7 +1363,8 @@ class TestSendToSessionEdgeCases:
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_send_to_index_delivery_failed(self, MockXMPP, tmp_path):
         """/N send when multiplexer fails should reply with delivery-failed."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
             session_id="sess-1",
             sty="12345.pts-0",
@@ -1466,14 +1382,9 @@ class TestSendToSessionEdgeCases:
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_send_to_index_xmpp_confirm_fails(self, MockXMPP, tmp_path):
         """Successful send but XMPP confirm fails — must not raise."""
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
+        conn, captured = _make_mock_conn(MockXMPP)
         # send() returns False (XMPP down) to simulate confirmation failure
         conn.send.return_value = False
-        captured = {}
-        conn.on_message.side_effect = lambda cb: captured.__setitem__("cb", cb)
-        MockXMPP.return_value = conn
 
         bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
@@ -1492,7 +1403,8 @@ class TestSendToSessionEdgeCases:
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_plain_text_no_active_session(self, MockXMPP, tmp_path):
         """Plain text with no sessions should reply with no-active-session."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         fake_msg = _make_slixmpp_message("user@example.com", "hello world")
         await captured["cb"](fake_msg)
         conn.send.assert_called_once()
@@ -1502,7 +1414,8 @@ class TestSendToSessionEdgeCases:
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_plain_text_no_backend(self, MockXMPP, tmp_path):
         """Plain text to a read-only active session replies with no-backend."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
             session_id="ro-sess",
             sty="",
@@ -1519,7 +1432,8 @@ class TestSendToSessionEdgeCases:
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_plain_text_delivery_failed(self, MockXMPP, tmp_path):
         """Plain text when multiplexer fails should reply with delivery-failed."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
             session_id="sess-1",
             sty="12345.pts-0",
@@ -1537,13 +1451,8 @@ class TestSendToSessionEdgeCases:
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_plain_text_xmpp_confirm_fails(self, MockXMPP, tmp_path):
         """Successful plain-text send but XMPP confirm fails — must not raise."""
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
+        conn, captured = _make_mock_conn(MockXMPP)
         conn.send.return_value = False
-        captured = {}
-        conn.on_message.side_effect = lambda cb: captured.__setitem__("cb", cb)
-        MockXMPP.return_value = conn
 
         bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
@@ -1573,7 +1482,6 @@ class TestShortPath:
         conn.connected = asyncio.Event()
         conn.on_message.side_effect = lambda cb: None
         MockXMPP.return_value = conn
-        from pathlib import Path
 
         bridge = XMPPBridge(_make_config(tmp_path))
         assert bridge._short_path(str(Path.home())) == "~"
@@ -1585,7 +1493,6 @@ class TestShortPath:
         conn.connected = asyncio.Event()
         conn.on_message.side_effect = lambda cb: None
         MockXMPP.return_value = conn
-        from pathlib import Path
 
         bridge = XMPPBridge(_make_config(tmp_path))
         result = bridge._short_path(str(Path.home() / "projects" / "foo"))
@@ -1667,7 +1574,7 @@ class TestSocketCommandEdgeCases:
         await bridge.socket_server.start()
         try:
             resp = await _socket_request(
-                _make_config(tmp_path).socket_path if False else bridge.config.socket_path,
+                bridge.config.socket_path,
                 {"cmd": "send", "message": ""},
             )
             assert resp == {"ok": True}
@@ -1847,21 +1754,11 @@ class TestSocketCommandEdgeCases:
 class TestListIcons:
     """Consistency of ⚡ (Claude Code) and 🧠 (OpenCode) icons in /list output."""
 
-    def _make_bridge(self, MockXMPP: object, tmp_path: object) -> tuple[object, object, object]:
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
-        captured: list = []
-        conn.on_message.side_effect = lambda cb: captured.append(cb)
-        MockXMPP.return_value = conn  # type: ignore[attr-defined]
-        config = _make_config(tmp_path)  # type: ignore[arg-type]
-        bridge = XMPPBridge(config)
-        return bridge, conn, captured
-
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_claude_code_screen_has_lightning(self, MockXMPP, tmp_path):
         """Claude Code screen sessions should have ⚡ prefix."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
             session_id="cc-1",
             sty="100.pts-0",
@@ -1870,16 +1767,17 @@ class TestListIcons:
             backend="screen",
         )
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
-            await captured[0](_make_slixmpp_message("user@example.com", "/list"))
+            await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        assert "[⚡screen]" in text
+        assert "[⚡screen #0]" in text  # window label appended
         assert "🧠" not in text
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_claude_code_tmux_has_lightning(self, MockXMPP, tmp_path):
         """Claude Code tmux sessions should have ⚡ prefix."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
             session_id="cc-2",
             sty="session",
@@ -1888,16 +1786,17 @@ class TestListIcons:
             backend="tmux",
         )
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
-            await captured[0](_make_slixmpp_message("user@example.com", "/list"))
+            await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        assert "[⚡tmux]" in text
+        assert "[⚡tmux :session]" in text  # pane label in tmux style
         assert "🧠" not in text
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_claude_code_readonly_has_lightning(self, MockXMPP, tmp_path):
         """Claude Code read-only sessions should have ⚡ prefix."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
             session_id="cc-3",
             sty="",
@@ -1905,7 +1804,7 @@ class TestListIcons:
             project="/home/u/proj",
             backend=None,
         )
-        await captured[0](_make_slixmpp_message("user@example.com", "/list"))
+        await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
         assert "[⚡read-only]" in text
         assert "🧠" not in text
@@ -1914,7 +1813,8 @@ class TestListIcons:
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_opencode_still_has_brain(self, MockXMPP, tmp_path):
         """OpenCode sessions must still show 🧠 prefix."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
             session_id="oc-1",
             sty="200.pts-0",
@@ -1924,16 +1824,17 @@ class TestListIcons:
             source="opencode",
         )
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
-            await captured[0](_make_slixmpp_message("user@example.com", "/list"))
+            await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        assert "[🧠screen]" in text
+        assert "[🧠screen #0]" in text  # window label appended
         assert "⚡" not in text
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_mixed_sessions_both_icons(self, MockXMPP, tmp_path):
         """List with both Claude Code and OpenCode shows both icons."""
-        bridge, conn, captured = self._make_bridge(MockXMPP, tmp_path)
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
             session_id="cc-4",
             sty="300.pts-0",
@@ -1950,11 +1851,302 @@ class TestListIcons:
             source="opencode",
         )
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
-            await captured[0](_make_slixmpp_message("user@example.com", "/list"))
+            await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        assert "[⚡screen]" in text
-        assert "[🧠screen]" in text
+        assert "[⚡screen #0]" in text
+        assert "[🧠screen #0]" in text
         bridge.registry.close()
+
+
+class TestSessionPrefix:
+    """_session_prefix() and _window_label() produce correct strings."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_prefix_screen(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+        bridge = XMPPBridge(_make_config(tmp_path))
+        info = {
+            "sty": "12345.pts-0",
+            "window": "3",
+            "project": str(Path.home() / "myproject"),
+            "backend": "screen",
+            "source": None,
+            "registered_at": 0.0,
+        }
+        prefix = bridge._session_prefix(info)
+        assert prefix == "⚡[~/myproject #3]"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_prefix_tmux(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+        bridge = XMPPBridge(_make_config(tmp_path))
+        info = {
+            "sty": "%5",
+            "window": "",
+            "project": "/srv/app",
+            "backend": "tmux",
+            "source": None,
+            "registered_at": 0.0,
+        }
+        prefix = bridge._session_prefix(info)
+        assert prefix == "⚡[/srv/app :%5]"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_prefix_opencode(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+        bridge = XMPPBridge(_make_config(tmp_path))
+        info = {
+            "sty": "12345.pts-0",
+            "window": "1",
+            "project": "/tmp/proj",
+            "backend": "screen",
+            "source": "opencode",
+            "registered_at": 0.0,
+        }
+        prefix = bridge._session_prefix(info)
+        assert prefix == "🧠[/tmp/proj #1]"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_prefix_readonly(self, MockXMPP, tmp_path):
+        """Read-only session (no backend, no sty) should have no window label."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+        bridge = XMPPBridge(_make_config(tmp_path))
+        info = {
+            "sty": "",
+            "window": "",
+            "project": "/tmp/proj",
+            "backend": None,
+            "source": None,
+            "registered_at": 0.0,
+        }
+        prefix = bridge._session_prefix(info)
+        assert prefix == "⚡[/tmp/proj]"
+        bridge.registry.close()
+
+
+class TestNotifyCommand:
+    """The 'notify' socket command sends a session-prefixed XMPP message."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_notify_known_session_includes_prefix(self, MockXMPP, tmp_path):
+        """notify with a registered session prepends icon + window label."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register(
+            session_id="sess-1",
+            sty="12345.pts-0",
+            window="2",
+            project="/home/user/myproject",
+            backend="screen",
+        )
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {
+                    "cmd": "notify",
+                    "session_id": "sess-1",
+                    "message": "[TaskCompleted] Build done",
+                },
+            )
+            assert resp == {"ok": True}
+            conn.send.assert_called_once()
+            sent = conn.send.call_args[0][1]
+            assert "⚡" in sent
+            assert "#2" in sent
+            assert "Build done" in sent
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_notify_unknown_session_sends_plain_message(self, MockXMPP, tmp_path):
+        """notify with an unknown session_id falls back to plain message."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {
+                    "cmd": "notify",
+                    "session_id": "nonexistent",
+                    "message": "plain notification",
+                },
+            )
+            assert resp == {"ok": True}
+            conn.send.assert_called_once()
+            sent = conn.send.call_args[0][1]
+            assert "plain notification" in sent
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_notify_empty_message_noop(self, MockXMPP, tmp_path):
+        """notify with empty message must not call XMPP send."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "notify", "session_id": "s", "message": ""},
+            )
+            assert resp == {"ok": True}
+            conn.send.assert_not_called()
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_notify_opencode_uses_brain_icon(self, MockXMPP, tmp_path):
+        """notify for OpenCode session uses 🧠 prefix."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register(
+            session_id="oc-sess",
+            sty="12345.pts-0",
+            window="4",
+            project="/home/user/project",
+            backend="screen",
+            source="opencode",
+        )
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {
+                    "cmd": "notify",
+                    "session_id": "oc-sess",
+                    "message": "OpenCode task done",
+                },
+            )
+            assert resp == {"ok": True}
+            sent = conn.send.call_args[0][1]
+            assert "🧠" in sent
+            assert "#4" in sent
+            assert "OpenCode task done" in sent
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+
+class TestMultiInstanceSameProject:
+    """Multiple instances of the same agent in the same project must coexist."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_three_instances_all_registered(self, MockXMPP, tmp_path):
+        """Three Claude Code sessions in three different Screen windows, same project."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        await bridge.socket_server.start()
+        try:
+            for _i, (sid, win) in enumerate([("s1", "1"), ("s2", "2"), ("s3", "3")]):
+                resp = await _socket_request(
+                    bridge.config.socket_path,
+                    {
+                        "cmd": "register",
+                        "session_id": sid,
+                        "sty": "12345.pts-0",
+                        "window": win,
+                        "project": "/home/user/project",
+                        "backend": "screen",
+                    },
+                )
+                assert resp == {"ok": True}
+
+            assert len(bridge.registry.sessions) == 3
+            for sid in ("s1", "s2", "s3"):
+                assert sid in bridge.registry.sessions
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_notify_targets_correct_window(self, MockXMPP, tmp_path):
+        """notify for session in window #3 includes #3, not #1 or #2."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        for sid, win in [("s1", "1"), ("s2", "2"), ("s3", "3")]:
+            bridge.registry.register(
+                session_id=sid,
+                sty="12345.pts-0",
+                window=win,
+                project="/home/user/project",
+                backend="screen",
+            )
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {
+                    "cmd": "notify",
+                    "session_id": "s3",
+                    "message": "Done in window 3",
+                },
+            )
+            assert resp == {"ok": True}
+            sent = conn.send.call_args[0][1]
+            assert "#3" in sent
+            assert "#1" not in sent
+            assert "#2" not in sent
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
 
 
 class TestListSessionsReturnsCopy:
@@ -2037,6 +2229,7 @@ class TestMessagesFrozen:
 
     def test_messages_is_frozen(self):
         import dataclasses
+
         from claude_xmpp_bridge.messages import Messages
 
         assert dataclasses.fields(Messages)  # has fields
@@ -2044,7 +2237,7 @@ class TestMessagesFrozen:
         msgs = Messages()
         try:
             msgs.bridge_started = "changed"  # type: ignore[misc]
-            assert False, "Should have raised FrozenInstanceError"
+            raise AssertionError("Should have raised FrozenInstanceError")
         except dataclasses.FrozenInstanceError:
             pass
 
@@ -2276,18 +2469,8 @@ class TestSecurityLimits:
         """XMPP message body longer than MAX_XMPP_BODY must be truncated."""
         from claude_xmpp_bridge.bridge import MAX_XMPP_BODY
 
-        conn = MagicMock()
-        conn.connected = asyncio.Event()
-        conn.connected.set()
+        conn, captured = _make_mock_conn(MockXMPP)
         conn.send.return_value = True
-        captured_callback = None
-
-        def capture_on_message(cb):
-            nonlocal captured_callback
-            captured_callback = cb
-
-        conn.on_message.side_effect = capture_on_message
-        MockXMPP.return_value = conn
 
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
@@ -2304,19 +2487,168 @@ class TestSecurityLimits:
         long_text = "A" * (MAX_XMPP_BODY + 5000)
         sent_texts: list[str] = []
 
-        async def mock_stuff(info, text):
+        async def mock_stuff(session_id, info, text):
             sent_texts.append(text)
             return True
 
         bridge._stuff_to_session = mock_stuff  # type: ignore[method-assign]
 
         fake_msg = _make_slixmpp_message("user@example.com", long_text)
-        assert captured_callback is not None
-        await captured_callback(fake_msg)
+        await captured["cb"](fake_msg)
 
         assert sent_texts, "Expected _stuff_to_session to be called"
         assert len(sent_texts[0]) <= MAX_XMPP_BODY
         bridge.registry.close()
+
+
+class TestUnexpectedSenderLogging:
+    """Bridge must log a WARNING and ignore messages from unexpected senders."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_stranger_message_logs_warning(self, MockXMPP, tmp_path, caplog):
+        """Message from an unexpected JID must produce a WARNING log entry."""
+        import logging
+
+        conn, captured = _make_mock_conn(MockXMPP)
+        XMPPBridge(_make_config(tmp_path))
+
+        with caplog.at_level(logging.WARNING, logger="claude_xmpp_bridge.bridge"):
+            fake_msg = _make_slixmpp_message("evil@attacker.example", "exploit")
+            await captured["cb"](fake_msg)
+
+        assert any("evil@attacker.example" in r.message for r in caplog.records if r.levelno >= logging.WARNING)
+        conn.send.assert_not_called()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_authorised_sender_does_not_log_warning(self, MockXMPP, tmp_path, caplog):
+        """Authorised sender must not produce a sender-warning log entry."""
+        import logging
+
+        conn, captured = _make_mock_conn(MockXMPP)
+        XMPPBridge(_make_config(tmp_path))
+
+        with caplog.at_level(logging.WARNING, logger="claude_xmpp_bridge.bridge"):
+            fake_msg = _make_slixmpp_message("user@example.com", "/help")
+            await captured["cb"](fake_msg)
+
+        unexpected_warn = [
+            r for r in caplog.records if r.levelno >= logging.WARNING and "unexpected sender" in r.message
+        ]
+        assert not unexpected_warn
+
+
+class TestAskTimeoutValidation:
+    """_handle_ask must validate the timeout value from the socket request."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_ask_non_integer_timeout_returns_error(self, MockXMPP, tmp_path):
+        """Non-integer timeout value must return an error, not raise."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "ask", "message": "ok?", "timeout": "not-a-number"},
+            )
+            assert "error" in resp
+            assert "timeout" in resp["error"]
+            conn.send.assert_not_called()
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_ask_zero_timeout_returns_error(self, MockXMPP, tmp_path):
+        """Zero timeout must be rejected."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "ask", "message": "ok?", "timeout": 0},
+            )
+            assert "error" in resp
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_ask_negative_timeout_returns_error(self, MockXMPP, tmp_path):
+        """Negative timeout must be rejected."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "ask", "message": "ok?", "timeout": -1},
+            )
+            assert "error" in resp
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_ask_over_max_timeout_returns_error(self, MockXMPP, tmp_path):
+        """Timeout exceeding MAX_ASK_TIMEOUT must be rejected."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "ask", "message": "ok?", "timeout": XMPPBridge.MAX_ASK_TIMEOUT + 1},
+            )
+            assert "error" in resp
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_ask_valid_timeout_is_accepted(self, MockXMPP, tmp_path):
+        """Valid timeout within range must be accepted (ask queued, times out quickly)."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "ask", "message": "ok?", "timeout": 1},  # 1s — will timeout quickly
+            )
+            # Should timeout with ok=False, not an error about timeout value
+            assert resp.get("ok") is False
+            assert resp.get("error") == "timeout"
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
 
 
 class TestRegistryValidationLimits:
@@ -2371,8 +2703,8 @@ class TestClientTokenInjection:
         captured: list[dict] = []
 
         # Create a minimal fake socket server
-        import socket as _socket
         import json
+        import socket as _socket
         import threading
 
         server_sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
@@ -2388,8 +2720,8 @@ class TestClientTokenInjection:
                 captured.append(req)
                 client.sendall(json.dumps({"ok": True}).encode() + b"\n")
                 client.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: S110
+                pass  # timeout or parse error during test teardown — ignore
             finally:
                 server_sock.close()
 
@@ -2402,3 +2734,203 @@ class TestClientTokenInjection:
         assert result == {"ok": True}
         assert len(captured) == 1
         assert captured[0].get("token") == "mytoken"
+
+
+# ---------------------------------------------------------------------------
+# Audit log assertions
+# ---------------------------------------------------------------------------
+
+
+def _make_config_with_audit(tmp_path: Path) -> tuple[Config, Path]:
+    """Return a Config that writes audit events to a file in tmp_path."""
+    from claude_xmpp_bridge.config import Config
+
+    log_file = tmp_path / "audit.log"
+    cfg = Config(
+        jid="bot@example.com",
+        password="secret",
+        recipient="user@example.com",
+        socket_path=tmp_path / "test.sock",
+        db_path=tmp_path / "test.db",
+        messages_file=None,
+        audit_log=str(log_file),
+    )
+    return cfg, log_file
+
+
+def _read_audit_log(log_file: Path) -> list[dict]:
+    """Read all JSON Lines from the audit log file."""
+    if not log_file.exists():
+        return []
+    lines = log_file.read_text(encoding="utf-8").strip().splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+class TestAuditXmppRejected:
+    """XMPP_REJECTED event must be emitted for unauthorized senders."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_stranger_message_emits_xmpp_rejected(self, MockXMPP, tmp_path):
+        conn, captured = _make_mock_conn(MockXMPP)
+        config, log_file = _make_config_with_audit(tmp_path)
+        bridge = XMPPBridge(config)
+
+        fake_msg = _make_slixmpp_message("evil@attacker.example", "exploit")
+        await captured["cb"](fake_msg)
+        bridge.audit.close()
+
+        records = _read_audit_log(log_file)
+        rejected = [r for r in records if r["event"] == "XMPP_REJECTED"]
+        assert len(rejected) == 1
+        assert rejected[0]["from_jid"] == "evil@attacker.example"
+        bridge.registry.close()
+
+
+class TestAuditTokenRejected:
+    """TOKEN_REJECTED event must be emitted when socket token check fails."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_wrong_token_emits_token_rejected(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        from claude_xmpp_bridge.config import Config
+
+        log_file = tmp_path / "audit.log"
+        config = Config(
+            jid="bot@example.com",
+            password="secret",
+            recipient="user@example.com",
+            socket_path=tmp_path / "test.sock",
+            db_path=tmp_path / "test.db",
+            messages_file=None,
+            socket_token="correct-token",
+            audit_log=str(log_file),
+        )
+        bridge = XMPPBridge(config)
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                config.socket_path,
+                {"cmd": "send", "message": "hi", "token": "wrong-token"},
+            )
+            assert resp.get("error") == "unauthorized"
+        finally:
+            await bridge.socket_server.stop()
+            bridge.audit.close()
+
+        records = _read_audit_log(log_file)
+        rejected = [r for r in records if r["event"] == "TOKEN_REJECTED"]
+        assert len(rejected) == 1
+        assert rejected[0]["cmd"] == "send"
+        assert rejected[0]["token_provided"] is True
+        bridge.registry.close()
+
+
+class TestAuditAskTimeout:
+    """ASK_TIMEOUT event must be emitted when ask times out."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_ask_timeout_emits_audit_event(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config, log_file = _make_config_with_audit(tmp_path)
+        bridge = XMPPBridge(config)
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                config.socket_path,
+                {"cmd": "ask", "message": "are you there?", "timeout": 1},
+            )
+            assert resp.get("error") == "timeout"
+        finally:
+            await bridge.socket_server.stop()
+            bridge.audit.close()
+
+        records = _read_audit_log(log_file)
+        timeouts = [r for r in records if r["event"] == "ASK_TIMEOUT"]
+        assert len(timeouts) == 1
+        assert timeouts[0]["timeout"] == 1
+        bridge.registry.close()
+
+
+class TestAuditSessionLifecycle:
+    """SESSION_REGISTERED and SESSION_UNREGISTERED events."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_register_emits_session_registered(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config, log_file = _make_config_with_audit(tmp_path)
+        bridge = XMPPBridge(config)
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                config.socket_path,
+                {
+                    "cmd": "register",
+                    "session_id": "audit-sess",
+                    "sty": "12345.pts-0",
+                    "window": "1",
+                    "project": "/home/user/project",
+                    "backend": "screen",
+                },
+            )
+            assert resp == {"ok": True}
+        finally:
+            await bridge.socket_server.stop()
+            bridge.audit.close()
+
+        records = _read_audit_log(log_file)
+        registered = [r for r in records if r["event"] == "SESSION_REGISTERED"]
+        assert len(registered) == 1
+        assert registered[0]["session_id"] == "audit-sess"
+        assert registered[0]["project"] == "/home/user/project"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_unregister_emits_session_unregistered(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        config, log_file = _make_config_with_audit(tmp_path)
+        bridge = XMPPBridge(config)
+        bridge.registry.register(
+            session_id="sess-del",
+            sty="",
+            window="",
+            project="/home/user/del-proj",
+            backend=None,
+        )
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                config.socket_path,
+                {"cmd": "unregister", "session_id": "sess-del"},
+            )
+            assert resp == {"ok": True}
+        finally:
+            await bridge.socket_server.stop()
+            bridge.audit.close()
+
+        records = _read_audit_log(log_file)
+        unreg = [r for r in records if r["event"] == "SESSION_UNREGISTERED"]
+        assert len(unreg) == 1
+        assert unreg[0]["session_id"] == "sess-del"
+        assert unreg[0]["project"] == "/home/user/del-proj"
+        bridge.registry.close()

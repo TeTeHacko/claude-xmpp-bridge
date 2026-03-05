@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 
 import slixmpp
 
@@ -11,6 +12,8 @@ from .config import NotifyConfig
 from .xmpp import XMPPConnection
 
 DEFAULT_TIMEOUT = 300
+
+log = logging.getLogger(__name__)
 
 
 async def send_and_wait(
@@ -24,9 +27,14 @@ async def send_and_wait(
 
     async def on_message(msg: slixmpp.Message) -> None:
         nonlocal reply_text
-        if msg["type"] in ("chat", "normal") and msg["from"].bare == config.recipient:
-            reply_text = msg["body"].strip()
-            got_reply.set()
+        if msg["type"] not in ("chat", "normal"):
+            return
+        sender = msg["from"].bare
+        if sender != config.recipient:
+            log.warning("Ignored XMPP reply from unexpected sender: %s", sender)
+            return
+        reply_text = msg["body"].strip()
+        got_reply.set()
 
     conn = XMPPConnection(config.jid, config.password)
     conn.on_message(on_message)
@@ -35,9 +43,7 @@ async def send_and_wait(
         try:
             await asyncio.wait_for(conn.connected.wait(), timeout=30)
         except TimeoutError:
-            raise ConnectionError(
-                "XMPP connection timeout (30s) — server may be unavailable"
-            ) from None
+            raise ConnectionError("XMPP connection timeout (30s) — server may be unavailable") from None
         if not conn.send(config.recipient, message):
             raise ConnectionError("XMPP send failed — not connected")
 

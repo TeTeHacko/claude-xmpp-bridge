@@ -33,8 +33,13 @@ def _get_socket_token() -> str | None:
 def send_to_bridge(
     request: dict[str, object],
     socket_path: Path = DEFAULT_SOCKET_PATH,
+    socket_timeout: float | None = None,
 ) -> dict[str, object] | None:
-    """Send JSON request to bridge socket. Returns response dict or None on failure."""
+    """Send JSON request to bridge socket. Returns response dict or None on failure.
+
+    ``socket_timeout`` overrides the default 5 s read timeout — use a higher
+    value for long-running commands like ``ask`` that wait for a human reply.
+    """
     if not socket_path.exists():
         return None
 
@@ -45,7 +50,7 @@ def send_to_bridge(
 
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(5)
+            sock.settimeout(socket_timeout if socket_timeout is not None else 5)
             sock.connect(str(socket_path))
             sock.sendall(json.dumps(request).encode() + b"\n")
             sock.shutdown(socket.SHUT_WR)

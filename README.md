@@ -1,5 +1,9 @@
 # claude-xmpp-bridge
 
+[![CI](https://github.com/TeTeHacko/claude-xmpp-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/TeTeHacko/claude-xmpp-bridge/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 XMPP bridge for [Claude Code](https://claude.ai/claude-code) and [OpenCode](https://opencode.ai) — route messages between your Jabber/XMPP client and AI coding sessions running in GNU Screen or tmux.
 
 ## Quick Start
@@ -28,10 +32,11 @@ claude-xmpp-notify "Hello from bridge!"
 - **Session management** — register multiple sessions, switch between them with `/1`, `/2`, …
 - **Multiplexer support** — GNU Screen and tmux backends; reliable background-window delivery
 - **Permission requests** — approve/deny AI actions via XMPP
-- **Notifications** — receive task completions, errors, and other events
+- **Notifications** — receive task completions, errors, and other events with session icon + window ID prefix
 - **Configurable messages** — English default, easily translatable (Czech, German, Polish, Slovak included)
 - **SQLite persistence** — sessions survive bridge restarts; stable `/list` numbering across session restarts
-- **Secure** — credentials file permission checks, input validation, socket permissions
+- **Secure** — credentials file permission checks, input validation, socket permissions, optional socket token auth
+- **Audit log** — structured JSON Lines event log for SIEM integration (journald or rotating file)
 - **Setup wizard** — interactive `claude-xmpp-bridge-setup` configures everything including OpenCode
 
 ## System Dependencies
@@ -115,8 +120,49 @@ recipient = "you@example.com"
 | `CLAUDE_XMPP_SOCKET` | Unix socket path |
 | `CLAUDE_XMPP_DB` | SQLite database path |
 | `CLAUDE_XMPP_MESSAGES` | Messages TOML file path |
+| `CLAUDE_XMPP_SOCKET_TOKEN` | Shared secret for socket authentication |
+| `CLAUDE_XMPP_AUDIT_LOG` | Audit log destination (`journald` or file path) |
 
 Configuration priority: CLI flags > environment variables > config.toml > defaults.
+
+### Socket token authentication
+
+To prevent unauthorized local processes from interacting with the bridge socket, set a shared secret:
+
+```toml
+# config.toml
+socket_token = "your-random-secret"
+```
+
+Or via environment variable:
+
+```bash
+export CLAUDE_XMPP_SOCKET_TOKEN="your-random-secret"
+```
+
+All hook scripts read this token from `CLAUDE_XMPP_SOCKET_TOKEN` automatically.
+
+### Audit log
+
+The bridge emits a structured JSON Lines event log suitable for SIEM integration:
+
+```toml
+# config.toml
+
+# Write to systemd journal (default)
+audit_log = "journald"
+
+# Write to a rotating file (10 MB × 5 backups)
+audit_log = "/var/log/claude-xmpp-bridge/audit.jsonl"
+```
+
+Each record is one JSON object per line:
+
+```json
+{"ts": "2026-03-05T14:32:01.123456Z", "event": "XMPP_IN", "from_jid": "user@example.com", "allowed": true, "body": "hello", "body_len": 5, "routed_to": "session"}
+```
+
+Audited events: `BRIDGE_START`, `BRIDGE_STOP`, `XMPP_IN`, `XMPP_REJECTED`, `TOKEN_REJECTED`, `SESSION_REGISTERED`, `SESSION_REPLACED`, `SESSION_LIMIT_HIT`, `SESSION_UNREGISTERED`, `TERMINAL_SEND`, `TERMINAL_SEND_FAILED`, `ASK_QUEUED`, `ASK_ANSWERED`, `ASK_TIMEOUT`, `SOCKET_CMD`.
 
 ## Usage
 
@@ -149,17 +195,20 @@ The active session is marked with `*`.
 ### Standalone tools
 
 ```bash
-# Send a notification
+# Send a notification (direct XMPP, no bridge needed)
 claude-xmpp-notify "Build completed"
 echo "Pipeline failed" | claude-xmpp-notify
 
 # Send and wait for reply
+# When the bridge is running, ask is routed through it (FIFO queue, no extra XMPP connection).
+# Falls back to a direct XMPP connection when the bridge is not running.
 reply=$(claude-xmpp-ask "Deploy to production? (y/n)" --timeout 300)
 
-# Client (communicates with running bridge, falls back to notify)
+# Client (communicates with running bridge)
 claude-xmpp-client send "Hello"
 claude-xmpp-client register '{"session_id":"abc","sty":"12345.pts-0","window":"0","project":"/home/user/project","backend":"screen"}'
 claude-xmpp-client unregister abc
+claude-xmpp-client notify '{"session_id":"abc","message":"Task completed"}'
 ```
 
 ### systemd service
@@ -378,6 +427,9 @@ ruff check src/ tests/
 # Type check
 mypy src/
 ```
+
+CI runs automatically on every push and pull request via GitHub Actions
+(`.github/workflows/ci.yml`), testing Python 3.11, 3.12 and 3.13.
 
 ## License
 

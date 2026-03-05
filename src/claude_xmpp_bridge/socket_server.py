@@ -11,6 +11,10 @@ import socket as _socket
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .audit import AuditLogger
 
 log = logging.getLogger(__name__)
 
@@ -25,10 +29,12 @@ class SocketServer:
         socket_path: Path,
         request_handler: Callable[[dict[str, object]], Awaitable[dict[str, object]]],
         socket_token: str | None = None,
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         self.socket_path = socket_path
         self._request_handler = request_handler
         self._socket_token = socket_token
+        self._audit = audit_logger
         self._server: asyncio.AbstractServer | None = None
         self._owns_socket = False
 
@@ -96,6 +102,12 @@ class SocketServer:
                 provided = request.get("token")
                 if provided != self._socket_token:
                     log.warning("Socket request rejected: invalid or missing token")
+                    if self._audit is not None:
+                        self._audit.log(
+                            "TOKEN_REJECTED",
+                            cmd=str(request.get("cmd", "")),
+                            token_provided=provided is not None,
+                        )
                     writer.write(json.dumps({"error": "unauthorized"}).encode() + b"\n")
                     await writer.drain()
                     return
