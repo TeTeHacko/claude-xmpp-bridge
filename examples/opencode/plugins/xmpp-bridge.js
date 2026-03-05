@@ -41,14 +41,18 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   let registeredSessionID = null
 
   // ---------------------------------------------------------------------------
-  // Pomocník pro nastavení titulu okna přes ANSI escape sekvence.
-  // Funguje i v bubblewrap sandboxu — nepotřebuje přístup k screen socketu.
-  //   \x1bk...\x1b\\ — Screen window title (když $TERM=screen*)
-  //   \x1b]2;...\x07 — xterm/tmux window title
+  // Pomocník pro nastavení titulu okna.
+  // Mimo sandbox: screen -X title (přímý přístup k socket démonovi).
+  // Uvnitř sandboxu nebo bez STY: ANSI escape na /dev/tty.
   // ---------------------------------------------------------------------------
-  const setTitle = (title) => {
-    process.stderr.write(`\x1bk${title}\x1b\\`)
-    process.stderr.write(`\x1b]2;${title}\x07`)
+  const setTitle = async (title) => {
+    if (STY) {
+      const res = await $`screen -S ${STY} -p ${WINDOW} -X title ${title}`.nothrow()
+      if (res.exitCode === 0) return
+    }
+    // Fallback: ANSI escape na /dev/tty (funguje v sandboxu i v tmux)
+    await $`printf '\x1bk%s\x1b\\' ${title}`.nothrow()
+    await $`printf '\x1b]2;%s\x07' ${title}`.nothrow()
   }
 
   // ---------------------------------------------------------------------------
@@ -57,7 +61,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   //    — po ukončení opencode zůstane titulek 🧠projekt, dokud ho nepřepíše
   //    další session-start-title.sh hook nebo manuálně uživatel.
   // ---------------------------------------------------------------------------
-  setTitle("🧠" + projectName)
+  await setTitle("🧠" + projectName)
 
   // ---------------------------------------------------------------------------
   // 2. Registrace aktivní session do bridge — ODLOŽENA přes setImmediate()
@@ -107,7 +111,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           await $`claude-xmpp-client unregister ${registeredSessionID}`.nothrow()
         }
         // Resetovat titul okna
-        setTitle("")
+        await setTitle("")
         return
       }
 
@@ -118,7 +122,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (info.parentID) return
 
         const name = info.directory.split("/").pop() || info.directory
-        setTitle("🧠" + name)
+        await setTitle("🧠" + name)
 
         const reg = JSON.stringify({
           session_id: info.id,
@@ -145,7 +149,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       if (event.type === "session.status") {
         const status = event.properties.status
         if (status === "running") {
-          setTitle("🧠" + projectName)
+          await setTitle("🧠" + projectName)
         }
         return
       }
@@ -153,7 +157,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // --- SESSION IDLE: titul ⌨ + XMPP notifikace ---
       if (event.type === "session.idle") {
         // Titul: přepnout na 🧠❓ (čeká na vstup)
-        setTitle("🧠❓" + projectName)
+        await setTitle("🧠❓" + projectName)
 
         const notifyEnabled =
           await $`test -f ${process.env.HOME}/.config/xmpp-notify/notify-enabled`.nothrow()
@@ -192,7 +196,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // co se chystá spustit; potvrzení musí jít přes TUI.
       if (event.type === "permission.asked") {
         // Titul: přepnout na 🧠❓ (čeká na potvrzení)
-        setTitle("🧠❓" + projectName)
+        await setTitle("🧠❓" + projectName)
 
         const notifyEnabled =
           await $`test -f ${process.env.HOME}/.config/xmpp-notify/notify-enabled`.nothrow()
@@ -239,7 +243,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
       // --- PERMISSION REPLIED: obnovit titul 🧠 (dialog uzavřen) ---
       if (event.type === "permission.replied") {
-        setTitle("🧠" + projectName)
+        await setTitle("🧠" + projectName)
         return
       }
     },
