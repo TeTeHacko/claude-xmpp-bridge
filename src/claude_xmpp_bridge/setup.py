@@ -95,6 +95,21 @@ def _find_sandbox_script() -> Path | None:
     return None
 
 
+def _find_sandbox_completion() -> Path | None:
+    """Find the sandbox bash-completion source file."""
+    source = Path(__file__).resolve().parent.parent.parent / "examples" / "sandbox" / "sandbox.bash-completion"
+    if source.is_file():
+        return source
+
+    data_path = sysconfig.get_path("data")
+    if data_path:
+        shared = Path(data_path) / "share" / "claude-xmpp-bridge" / "sandbox" / "sandbox.bash-completion"
+        if shared.is_file():
+            return shared
+
+    return None
+
+
 def _find_systemd_unit() -> Path | None:
     """Find the example systemd unit file."""
     source_dir = Path(__file__).resolve().parent.parent.parent / "examples" / "systemd"
@@ -360,7 +375,7 @@ def _step_systemd(yes_mode: bool) -> bool:
 
 
 def _step_sandbox(yes_mode: bool) -> bool:
-    """Step 7: Install sandbox script."""
+    """Step 7: Install sandbox script and bash completion."""
     print("\n--- Step 7: Sandbox script ---")
 
     sandbox_src = _find_sandbox_script()
@@ -381,6 +396,16 @@ def _step_sandbox(yes_mode: bool) -> bool:
     shutil.copy2(sandbox_src, dst)
     dst.chmod(0o755)
     print(f"  Installed: {dst}")
+
+    # Install bash completion
+    comp_src = _find_sandbox_completion()
+    if comp_src:
+        comp_dir = Path.home() / ".local" / "share" / "bash-completion" / "completions"
+        comp_dst = comp_dir / "sandbox"
+        comp_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(comp_src, comp_dst)
+        print(f"  Installed bash completion: {comp_dst}")
+
     return True
 
 

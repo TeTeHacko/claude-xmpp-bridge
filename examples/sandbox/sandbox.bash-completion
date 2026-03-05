@@ -1,0 +1,53 @@
+# Bash completion for the sandbox (bwrap) wrapper script
+# Install: cp sandbox.bash-completion ~/.local/share/bash-completion/completions/sandbox
+
+_sandbox() {
+    local cur prev opts
+    _init_completion || return
+
+    opts="-c -k -K -w -r -h --help"
+
+    case "$prev" in
+        -k)
+            # Complete SSH key names from ~/.ssh/id_* (without .pub)
+            local keys=()
+            local f
+            for f in "$HOME"/.ssh/id_*; do
+                [[ "$f" == *.pub ]] && continue
+                [[ -f "$f" ]] || continue
+                keys+=("$(basename "$f")")
+            done
+            keys+=("list")
+            COMPREPLY=($(compgen -W "${keys[*]}" -- "$cur"))
+            return
+            ;;
+        -K)
+            # Complete Kubernetes contexts
+            local contexts
+            contexts="$(kubectl config get-contexts -o name 2>/dev/null)"
+            contexts+=$'\nlist'
+            COMPREPLY=($(compgen -W "$contexts" -- "$cur"))
+            return
+            ;;
+        -w|-r)
+            # Complete filesystem paths
+            _filedir
+            return
+            ;;
+        -c)
+            # Free-form command string — no completion
+            return
+            ;;
+    esac
+
+    # If current word starts with -, offer options
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=($(compgen -W "$opts" -- "$cur"))
+        return
+    fi
+
+    # After options (or after --), complete with commands from PATH
+    COMPREPLY=($(compgen -c -- "$cur"))
+}
+
+complete -F _sandbox sandbox

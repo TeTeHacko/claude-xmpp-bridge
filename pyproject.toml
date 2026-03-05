@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-xmpp-bridge"
-version = "0.2.2"
+version = "0.2.3"
 description = "XMPP bridge for Claude Code — route messages between Jabber and Claude sessions"
 readme = "README.md"
 license = "MIT"
@@ -61,6 +61,7 @@ packages = ["src/claude_xmpp_bridge"]
 "examples/opencode/plugins/xmpp-bridge.js" = "share/claude-xmpp-bridge/opencode/plugins/xmpp-bridge.js"
 "examples/opencode/opencode.json" = "share/claude-xmpp-bridge/opencode/opencode.json"
 "examples/sandbox/sandbox" = "share/claude-xmpp-bridge/sandbox/sandbox"
+"examples/sandbox/sandbox.bash-completion" = "share/claude-xmpp-bridge/sandbox/sandbox.bash-completion"
 
 [tool.ruff]
 line-length = 120

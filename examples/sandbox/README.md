@@ -26,6 +26,10 @@ Or install manually:
 mkdir -p ~/.local/bin
 cp examples/sandbox/sandbox ~/.local/bin/
 chmod +x ~/.local/bin/sandbox
+
+# Bash completion (optional)
+mkdir -p ~/.local/share/bash-completion/completions
+cp examples/sandbox/sandbox.bash-completion ~/.local/share/bash-completion/completions/sandbox
 ```
 
 ## Usage
@@ -72,3 +76,13 @@ sandbox -K prod-cluster claude
 ```bash
 sandbox -w /var/log/my-app opencode
 ```
+
+## Bash Completion
+
+Tab completion is installed automatically by `claude-xmpp-bridge-setup` (Step 7) to `~/.local/share/bash-completion/completions/sandbox`. It completes:
+
+- Options (`-c`, `-k`, `-K`, `-w`, `-r`, `-h`)
+- SSH key names from `~/.ssh/` (for `-k`)
+- Kubernetes contexts from `kubectl` (for `-K`)
+- Filesystem paths (for `-w` and `-r`)
+- Commands from `$PATH` (for the sandboxed command)
