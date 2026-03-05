@@ -187,11 +187,14 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- PERMISSION ASKED: informativní XMPP notifikace ---
+      // --- PERMISSION ASKED: titul 🧠❓ + informativní XMPP notifikace ---
       // OpenCode nečeká na výsledek event handlerů — TUI dialog nelze zavřít
       // z pluginu přes permission.asked event. Posíláme tedy jen notifikaci
       // co se chystá spustit; potvrzení musí jít přes TUI.
       if (event.type === "permission.asked") {
+        // Titul: přepnout na 🧠❓ (čeká na potvrzení)
+        await setTitle("🧠❓" + projectName)
+
         const notifyEnabled =
           await $`test -f ${process.env.HOME}/.config/xmpp-notify/notify-enabled`.nothrow()
         if (notifyEnabled.exitCode !== 0) return
@@ -224,6 +227,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const shortSes = (perm.sessionID ?? "").slice(0, 7)
         const msg = `[🧠${projectName} #${WINDOW} ses_${shortSes}] ${perm.permission}\n${detail}`
         await $`claude-xmpp-client send ${msg}`.nothrow()
+        return
+      }
+
+      // --- PERMISSION REPLIED: obnovit titul 🧠 (dialog uzavřen) ---
+      if (event.type === "permission.replied") {
+        await setTitle("🧠" + projectName)
         return
       }
     },
