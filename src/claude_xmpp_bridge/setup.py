@@ -421,16 +421,33 @@ def setup_main() -> None:
     print(f"claude-xmpp-bridge setup wizard v{__version__}")
     print("=" * 40)
 
-    steps: list[tuple[str, Callable[[], bool]]] = [
-        ("credentials", lambda: _step_credentials(args.yes)),
-        ("config", lambda: _step_config(args.yes)),
-        ("test", _step_test),
-        ("hooks", lambda: _step_hooks(args.yes)),
-        ("opencode", lambda: _step_opencode(args.yes)),
-        ("systemd", lambda: _step_systemd(args.yes)),
-        ("sandbox", lambda: _step_sandbox(args.yes)),
-        ("switches", lambda: _step_switches(args.yes)),
-    ]
+    mode = "1"
+    if not args.yes:
+        print("\nWhat do you want to install?")
+        print("  1) Full XMPP bridge (routes messages to your Jabber client)")
+        print("  2) Local tools only (nice screen titles, OpenCode plugin, sandbox script)")
+        choice = input("Choose [1/2] (default 1): ").strip()
+        if choice in ("1", "2"):
+            mode = choice
+
+    if mode == "1":
+        steps: list[tuple[str, Callable[[], bool]]] = [
+            ("credentials", lambda: _step_credentials(args.yes)),
+            ("config", lambda: _step_config(args.yes)),
+            ("test", _step_test),
+            ("hooks", lambda: _step_hooks(args.yes)),
+            ("opencode", lambda: _step_opencode(args.yes)),
+            ("systemd", lambda: _step_systemd(args.yes)),
+            ("sandbox", lambda: _step_sandbox(args.yes)),
+            ("switches", lambda: _step_switches(args.yes)),
+        ]
+    else:
+        print("\n--- Installing Local Tools Only ---")
+        steps = [
+            ("hooks", lambda: _step_hooks(args.yes)),
+            ("opencode", lambda: _step_opencode(args.yes)),
+            ("sandbox", lambda: _step_sandbox(args.yes)),
+        ]
 
     for name, step_fn in steps:
         try:
