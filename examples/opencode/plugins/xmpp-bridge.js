@@ -36,6 +36,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
   const projectName = directory.split("/").pop() || directory
 
+  // Sledovaná session ID — nastavena při registraci, použita při ukončení
+  let registeredSessionID = null
+
   // ---------------------------------------------------------------------------
   // 1. Přejmenovat Screen okno — jen shell příkaz, bezpečné volat hned v init
   // ---------------------------------------------------------------------------
@@ -63,6 +66,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       const active = sorted.find(s => !s.parentID)
       if (!active) return
 
+      registeredSessionID = active.id
+
       const reg = JSON.stringify({
         session_id: active.id,
         sty:        STY,
@@ -76,6 +81,22 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // Bridge neběží nebo session list selhal — tiše přeskočit
     }
   })
+
+  // ---------------------------------------------------------------------------
+  // 3. Odhlášení při ukončení OpenCode — process.on("exit") je synchronní,
+  //    použijeme spawnSync aby unregister proběhl před koncem procesu.
+  // ---------------------------------------------------------------------------
+  const { spawnSync } = await import("child_process")
+  const doUnregister = () => {
+    if (!registeredSessionID) return
+    spawnSync("claude-xmpp-client", ["unregister", registeredSessionID], {
+      stdio: "ignore",
+      timeout: 2000,
+    })
+  }
+  process.once("exit", doUnregister)
+  process.once("SIGTERM", () => { doUnregister(); process.exit(0) })
+  process.once("SIGINT",  () => { doUnregister(); process.exit(0) })
 
   return {
     // -------------------------------------------------------------------------
