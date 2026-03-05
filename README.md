@@ -353,6 +353,12 @@ The OpenCode plugin registers sessions with `source: "opencode"`:
 }
 ```
 
+## Security Sandbox (Optional)
+
+To further secure your AI coding sessions against accessing sensitive files in your home directory (e.g., `~/.ssh`, `~/.aws`), you can run Claude Code or OpenCode inside a restricted **Bubblewrap sandbox**.
+
+See [`examples/sandbox/README.md`](examples/sandbox/README.md) for details. The `claude-xmpp-bridge-setup` wizard offers to install this wrapper automatically.
+
 ## Custom messages
 
 Copy one of the example locale files and customize:
