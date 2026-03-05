@@ -261,6 +261,12 @@ BWRAP_ARGS+=(--setenv DISABLE_AUTOUPDATER 1)
 [[ -n "${DISPLAY:-}" ]] && BWRAP_ARGS+=(--setenv DISPLAY "$DISPLAY")
 [[ -n "${EDITOR:-}" ]] && BWRAP_ARGS+=(--setenv EDITOR "$EDITOR")
 
+# Terminal multiplexer vars (needed by Claude Code hooks for session registration)
+[[ -n "${STY:-}" ]] && BWRAP_ARGS+=(--setenv STY "$STY")
+[[ -n "${WINDOW:-}" ]] && BWRAP_ARGS+=(--setenv WINDOW "$WINDOW")
+[[ -n "${TMUX:-}" ]] && BWRAP_ARGS+=(--setenv TMUX "$TMUX")
+[[ -n "${TMUX_PANE:-}" ]] && BWRAP_ARGS+=(--setenv TMUX_PANE "$TMUX_PANE")
+
 # Build the inner command
 if [[ ${#SSH_KEYS[@]} -gt 0 ]]; then
     # ssh-agent wrapper: start agent, add keys, exec command
