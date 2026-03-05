@@ -137,6 +137,13 @@ def _confirm(prompt: str, default: bool = True, yes_mode: bool = False) -> bool:
     return answer in ("y", "yes")
 
 
+def _needs_update(src: Path, dst: Path) -> bool:
+    """Return True if dst does not exist or differs from src."""
+    if not dst.is_file():
+        return True
+    return src.read_bytes() != dst.read_bytes()
+
+
 def _step_credentials(yes_mode: bool) -> bool:
     """Step 1: Create credentials file."""
     print("\n--- Step 1: Credentials ---")
@@ -228,7 +235,7 @@ def _step_test() -> bool:
         return False
 
 
-def _step_hooks(yes_mode: bool) -> bool:
+def _step_hooks(yes_mode: bool, upgrade: bool = False) -> bool:
     """Step 4: Install hook scripts and merge settings.json."""
     print("\n--- Step 4: Hook scripts ---")
 
@@ -237,23 +244,35 @@ def _step_hooks(yes_mode: bool) -> bool:
         print("  Warning: hook source files not found, skipping")
         return True
 
-    if not _confirm("  Install hook scripts to ~/.claude/hooks/?", yes_mode=yes_mode):
+    if not upgrade and not _confirm("  Install hook scripts to ~/.claude/hooks/?", yes_mode=yes_mode):
         return True
 
     HOOKS_DIR.mkdir(parents=True, exist_ok=True)
-    installed = 0
+    updated = 0
+    up_to_date = 0
     for src_name, dst_name in HOOK_FILES.items():
         src = hooks_source / src_name
         dst = HOOKS_DIR / dst_name
         if not src.is_file():
             continue
-        if dst.is_file() and not yes_mode and not _confirm(f"    Overwrite {dst.name}?", default=False):
+        if not _needs_update(src, dst):
+            up_to_date += 1
+            continue
+        if not upgrade and dst.is_file() and not yes_mode and not _confirm(f"    Overwrite {dst.name}?", default=False):
             continue
         shutil.copy2(src, dst)
         dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        installed += 1
+        updated += 1
+        if upgrade:
+            print(f"    {dst.name}: updated")
 
-    print(f"  Installed {installed} hook scripts to {HOOKS_DIR}")
+    if upgrade:
+        if up_to_date and not updated:
+            print(f"  All {up_to_date} hook scripts up to date")
+        elif updated:
+            print(f"  {updated} updated, {up_to_date} up to date")
+    else:
+        print(f"  Installed {updated} hook scripts to {HOOKS_DIR}")
 
     # Merge settings.json
     settings_src = _find_settings_json()
@@ -293,7 +312,7 @@ def _step_hooks(yes_mode: bool) -> bool:
     return True
 
 
-def _step_opencode(yes_mode: bool) -> bool:
+def _step_opencode(yes_mode: bool, upgrade: bool = False) -> bool:
     """Step 5: Install OpenCode plugin and config."""
     print("\n--- Step 5: OpenCode plugin ---")
 
@@ -302,19 +321,22 @@ def _step_opencode(yes_mode: bool) -> bool:
         print("  Warning: OpenCode plugin source files not found, skipping")
         return True
 
-    if not _confirm("  Install OpenCode XMPP plugin to ~/.config/opencode/plugins/?", yes_mode=yes_mode):
+    if not upgrade and not _confirm(
+        "  Install OpenCode XMPP plugin to ~/.config/opencode/plugins/?", yes_mode=yes_mode
+    ):
         return True
 
     OPENCODE_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
 
     src = opencode_source / "plugins" / "xmpp-bridge.js"
     dst = OPENCODE_PLUGINS_DIR / "xmpp-bridge.js"
-    if dst.is_file() and not yes_mode and not _confirm("    Overwrite xmpp-bridge.js?", default=False):
-        pass
-    else:
+    if not _needs_update(src, dst):
+        if upgrade:
+            print("  xmpp-bridge.js: up to date")
+    elif upgrade or yes_mode or not dst.is_file() or _confirm("    Overwrite xmpp-bridge.js?", default=False):
         shutil.copy2(src, dst)
         dst.chmod(dst.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR)
-        print(f"  Installed: {dst}")
+        print(f"  xmpp-bridge.js: {'updated' if upgrade else 'installed'}")
 
     # Merge permission config into opencode.json
     config_src = opencode_source / "opencode.json"
@@ -345,7 +367,7 @@ def _step_opencode(yes_mode: bool) -> bool:
     return True
 
 
-def _step_systemd(yes_mode: bool) -> bool:
+def _step_systemd(yes_mode: bool, upgrade: bool = False) -> bool:
     """Step 6: Install systemd user unit."""
     print("\n--- Step 6: systemd service ---")
 
@@ -358,23 +380,27 @@ def _step_systemd(yes_mode: bool) -> bool:
         print("  Warning: systemd unit file not found, skipping")
         return True
 
-    if not _confirm("  Install systemd user service?", yes_mode=yes_mode):
-        return True
-
     SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
     dst = SYSTEMD_DIR / "claude-xmpp-bridge.service"
 
-    if dst.is_file() and not yes_mode and not _confirm(f"    Overwrite {dst}?", default=False):
+    if not _needs_update(unit_src, dst):
+        if upgrade:
+            print("  systemd unit: up to date")
+        return True
+
+    if not upgrade and not _confirm("  Install systemd user service?", yes_mode=yes_mode):
+        return True
+
+    if not upgrade and dst.is_file() and not yes_mode and not _confirm(f"    Overwrite {dst}?", default=False):
         return True
 
     shutil.copy2(unit_src, dst)
-    print(f"  Installed: {dst}")
+    print(f"  systemd unit: {'updated' if upgrade else 'installed'}")
     print("  Run: systemctl --user daemon-reload")
-    print("  Run: systemctl --user enable --now claude-xmpp-bridge")
     return True
 
 
-def _step_sandbox(yes_mode: bool) -> bool:
+def _step_sandbox(yes_mode: bool, upgrade: bool = False) -> bool:
     """Step 7: Install sandbox script and bash completion."""
     print("\n--- Step 7: Sandbox script ---")
 
@@ -385,26 +411,32 @@ def _step_sandbox(yes_mode: bool) -> bool:
 
     dst = Path.home() / ".local" / "bin" / "sandbox"
 
-    if dst.is_file():
-        print(f"  Sandbox script already exists: {dst}")
-        if not _confirm("  Overwrite?", default=False, yes_mode=False):
+    if _needs_update(sandbox_src, dst):
+        if upgrade or yes_mode or not dst.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(sandbox_src, dst)
+            dst.chmod(0o755)
+            print(f"  sandbox: {'updated' if upgrade else 'installed'}")
+        elif _confirm("  Overwrite sandbox script?", default=False):
+            shutil.copy2(sandbox_src, dst)
+            dst.chmod(0o755)
+            print("  sandbox: updated")
+        else:
             return True
-    elif not _confirm("  Install sandbox script to ~/.local/bin/sandbox?", yes_mode=yes_mode):
-        return True
-
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(sandbox_src, dst)
-    dst.chmod(0o755)
-    print(f"  Installed: {dst}")
+    elif upgrade:
+        print("  sandbox: up to date")
 
     # Install bash completion
     comp_src = _find_sandbox_completion()
     if comp_src:
         comp_dir = Path.home() / ".local" / "share" / "bash-completion" / "completions"
         comp_dst = comp_dir / "sandbox"
-        comp_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(comp_src, comp_dst)
-        print(f"  Installed bash completion: {comp_dst}")
+        if _needs_update(comp_src, comp_dst):
+            comp_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(comp_src, comp_dst)
+            print(f"  bash completion: {'updated' if upgrade else 'installed'}")
+        elif upgrade:
+            print("  bash completion: up to date")
 
     return True
 
@@ -440,6 +472,9 @@ def setup_main() -> None:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--yes", "-y", action="store_true", help="Accept defaults without prompting")
+    parser.add_argument(
+        "--upgrade", "-u", action="store_true", help="Upgrade managed files (overwrite changed, skip identical)"
+    )
     parser.add_argument("--test-only", action="store_true", help="Only test XMPP connectivity")
     args = parser.parse_args()
 
@@ -447,36 +482,47 @@ def setup_main() -> None:
         ok = _step_test()
         sys.exit(0 if ok else 1)
 
+    upgrade = args.upgrade
+
     print(f"claude-xmpp-bridge setup wizard v{__version__}")
     print("=" * 40)
 
-    mode = "1"
-    if not args.yes:
-        print("\nWhat do you want to install?")
-        print("  1) Full XMPP bridge (routes messages to your Jabber client)")
-        print("  2) Local tools only (nice screen titles, OpenCode plugin, sandbox script)")
-        choice = input("Choose [1/2] (default 1): ").strip()
-        if choice in ("1", "2"):
-            mode = choice
-
-    if mode == "1":
+    if upgrade:
+        print("\nUpgrade mode: updating managed files...")
         steps: list[tuple[str, Callable[[], bool]]] = [
-            ("credentials", lambda: _step_credentials(args.yes)),
-            ("config", lambda: _step_config(args.yes)),
-            ("test", _step_test),
-            ("hooks", lambda: _step_hooks(args.yes)),
-            ("opencode", lambda: _step_opencode(args.yes)),
-            ("systemd", lambda: _step_systemd(args.yes)),
-            ("sandbox", lambda: _step_sandbox(args.yes)),
-            ("switches", lambda: _step_switches(args.yes)),
+            ("hooks", lambda: _step_hooks(yes_mode=True, upgrade=True)),
+            ("opencode", lambda: _step_opencode(yes_mode=True, upgrade=True)),
+            ("systemd", lambda: _step_systemd(yes_mode=True, upgrade=True)),
+            ("sandbox", lambda: _step_sandbox(yes_mode=True, upgrade=True)),
         ]
     else:
-        print("\n--- Installing Local Tools Only ---")
-        steps = [
-            ("hooks", lambda: _step_hooks(args.yes)),
-            ("opencode", lambda: _step_opencode(args.yes)),
-            ("sandbox", lambda: _step_sandbox(args.yes)),
-        ]
+        mode = "1"
+        if not args.yes:
+            print("\nWhat do you want to install?")
+            print("  1) Full XMPP bridge (routes messages to your Jabber client)")
+            print("  2) Local tools only (nice screen titles, OpenCode plugin, sandbox script)")
+            choice = input("Choose [1/2] (default 1): ").strip()
+            if choice in ("1", "2"):
+                mode = choice
+
+        if mode == "1":
+            steps = [
+                ("credentials", lambda: _step_credentials(args.yes)),
+                ("config", lambda: _step_config(args.yes)),
+                ("test", _step_test),
+                ("hooks", lambda: _step_hooks(args.yes)),
+                ("opencode", lambda: _step_opencode(args.yes)),
+                ("systemd", lambda: _step_systemd(args.yes)),
+                ("sandbox", lambda: _step_sandbox(args.yes)),
+                ("switches", lambda: _step_switches(args.yes)),
+            ]
+        else:
+            print("\n--- Installing Local Tools Only ---")
+            steps = [
+                ("hooks", lambda: _step_hooks(args.yes)),
+                ("opencode", lambda: _step_opencode(args.yes)),
+                ("sandbox", lambda: _step_sandbox(args.yes)),
+            ]
 
     for name, step_fn in steps:
         try:
@@ -488,12 +534,15 @@ def setup_main() -> None:
             print(f"\n  Error in {name}: {e}", file=sys.stderr)
             ok = False
 
-        if not ok and not _confirm(f"\n  Step '{name}' failed. Continue anyway?", yes_mode=args.yes):
+        if not ok and not _confirm(f"\n  Step '{name}' failed. Continue anyway?", yes_mode=args.yes or upgrade):
             sys.exit(1)
 
     print("\n" + "=" * 40)
-    print("Setup complete!")
-    print("\nNext steps:")
-    print("  1. Start the bridge: claude-xmpp-bridge")
-    print("  2. Or via systemd:   systemctl --user start claude-xmpp-bridge")
-    print("  3. Test:             claude-xmpp-notify 'Hello from bridge!'")
+    if upgrade:
+        print("Upgrade complete!")
+    else:
+        print("Setup complete!")
+        print("\nNext steps:")
+        print("  1. Start the bridge: claude-xmpp-bridge")
+        print("  2. Or via systemd:   systemctl --user start claude-xmpp-bridge")
+        print("  3. Test:             claude-xmpp-notify 'Hello from bridge!'")
