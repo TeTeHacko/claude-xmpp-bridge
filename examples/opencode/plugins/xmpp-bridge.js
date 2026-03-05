@@ -2,18 +2,19 @@
  * OpenCode XMPP Bridge Plugin
  *
  * Integrace OpenCode s claude-xmpp-bridge:
- *  - při startu pluginu   → přejmenuje Screen okno na 🧠projekt
- *                           + zaregistruje aktivní session (odloženě, po server startu)
- *  - session.created      → registrace nové top-level session (při /new)
- *  - session.deleted      → odhlásí session z bridge
- *  - session.idle         → pošle poslední assistant zprávu přes XMPP
- *  - permission.asked     → informativní XMPP notifikace (co se chystá spustit); potvrzení přes TUI
+ *  - při startu pluginu       → uloží původní screen titul, přejmenuje na 🧠projekt
+ *                               + zaregistruje aktivní session (odloženě, po server startu)
+ *  - session.created          → registrace nové top-level session (při /new)
+ *  - session.deleted          → odhlásí session z bridge
+ *  - session.idle             → titul ⌨projekt + XMPP notifikace s poslední odpovědí
+ *  - session.status (running) → titul 🧠projekt
+ *  - permission.asked         → informativní XMPP notifikace (co se chystá spustit); potvrzení přes TUI
+ *  - server.instance.disposed → unregister + obnova původního screen titulu
  *
  * Zapínání/vypínání:
  *   touch ~/.config/xmpp-notify/notify-enabled   # notifikace (idle)
- *   touch ~/.config/xmpp-notify/ask-enabled      # blokující permission dotaz
  *
- * Vyžaduje: claude-xmpp-bridge démon + claude-xmpp-{client,ask} v $PATH
+ * Vyžaduje: claude-xmpp-bridge démon + claude-xmpp-client v $PATH
  */
 
 /** Zkrátí absolutní cestu — nahradí $HOME za ~ */
@@ -40,10 +41,21 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   let registeredSessionID = null
 
   // ---------------------------------------------------------------------------
-  // 1. Přejmenovat Screen okno — jen shell příkaz, bezpečné volat hned v init
+  // Pomocník pro nastavení screen titulu
   // ---------------------------------------------------------------------------
+  const setTitle = async (title) => {
+    if (!STY) return
+    await $`screen -S ${STY} -p ${WINDOW} -X title ${title}`.nothrow()
+  }
+
+  // ---------------------------------------------------------------------------
+  // 1. Uložit původní screen titul a přejmenovat na 🧠projekt
+  // ---------------------------------------------------------------------------
+  let originalTitle = null
   if (STY) {
-    await $`screen -S ${STY} -p ${WINDOW} -X title ${"🧠" + projectName}`.nothrow()
+    const res = await $`screen -S ${STY} -p ${WINDOW} -Q title`.nothrow()
+    originalTitle = res.stdout.trim() || null
+    await setTitle("🧠" + projectName)
   }
 
   // ---------------------------------------------------------------------------
@@ -88,13 +100,14 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     // -------------------------------------------------------------------------
     event: async ({ event }) => {
 
-      // --- SERVER INSTANCE DISPOSED: OpenCode se ukončuje → odhlásit session + reset titulu ---
+      // --- SERVER INSTANCE DISPOSED: OpenCode se ukončuje ---
       if (event.type === "server.instance.disposed") {
         if (registeredSessionID) {
           await $`claude-xmpp-client unregister ${registeredSessionID}`.nothrow()
         }
+        // Obnovit původní titul (nebo prázdný string = screen default)
         if (STY) {
-          await $`screen -S ${STY} -p ${WINDOW} -X title ${projectName}`.nothrow()
+          await setTitle(originalTitle ?? "")
         }
         return
       }
@@ -106,10 +119,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (info.parentID) return
 
         const name = info.directory.split("/").pop() || info.directory
-
-        if (STY) {
-          await $`screen -S ${STY} -p ${WINDOW} -X title ${"🧠" + name}`.nothrow()
-        }
+        await setTitle("🧠" + name)
 
         const reg = JSON.stringify({
           session_id: info.id,
@@ -120,6 +130,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           source:     "opencode",
         })
         await $`claude-xmpp-client register ${reg}`.nothrow()
+        registeredSessionID = info.id
         return
       }
 
@@ -131,8 +142,20 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- SESSION IDLE: poslat poslední assistant zprávu přes XMPP ---
+      // --- SESSION STATUS: indikace stavu v titulu ---
+      if (event.type === "session.status") {
+        const status = event.properties.status
+        if (status === "running") {
+          await setTitle("🧠" + projectName)
+        }
+        return
+      }
+
+      // --- SESSION IDLE: titul ⌨ + XMPP notifikace ---
       if (event.type === "session.idle") {
+        // Titul: přepnout na 🧠❓ (čeká na vstup)
+        await setTitle("🧠❓" + projectName)
+
         const notifyEnabled =
           await $`test -f ${process.env.HOME}/.config/xmpp-notify/notify-enabled`.nothrow()
         if (notifyEnabled.exitCode !== 0) return
@@ -198,7 +221,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           }
         }
 
-        const msg = `[opencode] ❓ ${perm.permission}\n${detail}`
+        const shortSes = (perm.sessionID ?? "").slice(0, 7)
+        const msg = `[🧠${projectName} #${WINDOW} ses_${shortSes}] ${perm.permission}\n${detail}`
         await $`claude-xmpp-client send ${msg}`.nothrow()
         return
       }
