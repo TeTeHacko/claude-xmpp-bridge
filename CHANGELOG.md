@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-06
+
+### Added
+- Setup wizard: modular component selection — interactive toggle menu lets the
+  user choose which components to install: `sandbox`, `claude-hooks`,
+  `opencode-plugin`, `bridge-daemon`; all selected by default
+- Setup wizard: `--uninstall` flag — removes installed files for selected
+  components; removes managed hook event keys from `~/.claude/settings.json`
+  and `permission` key from `~/.config/opencode/opencode.json`
+- Setup wizard: `--uninstall --purge` also removes credentials, `config.toml`,
+  `socket_token` and notification switch files
+- Setup wizard: `claude-hooks` without `bridge-daemon` installs only
+  `session-start-title.sh` (title management works without bridge)
+- OpenCode plugin: runtime bridge detection via `claude-xmpp-client ping` at
+  startup — title management always works; XMPP register/unregister/notify/
+  response only active when bridge daemon is running
+- Bridge daemon + client: `ping` command — `claude-xmpp-client ping` exits 0
+  if bridge is running, 1 otherwise
+
+### Changed
+- Setup wizard: Mode 1 / Mode 2 selection replaced by modular component
+  toggle menu; `--upgrade` also respects component selection
+- `bridge-daemon` steps (credentials, config, systemd, switches) now run
+  before hooks/opencode to ensure config is available during install
+
 ## [0.2.11] - 2025-03-05
 
 ### Fixed

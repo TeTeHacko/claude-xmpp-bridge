@@ -463,6 +463,8 @@ class XMPPBridge:
             response = await self._handle_ask(req)
         elif cmd == "query":
             response = self._handle_query(req)
+        elif cmd == "ping":
+            response = {"ok": True}
         else:
             response = {"error": f"unknown command: {cmd}"}
 

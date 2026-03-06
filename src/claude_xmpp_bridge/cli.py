@@ -114,6 +114,9 @@ def client_main() -> None:
     p_query = sub.add_parser("query", help="Query registered project for a session")
     p_query.add_argument("session_id", help="Session ID")
 
+    # ping
+    sub.add_parser("ping", help="Check if bridge daemon is running (exit 0 = running)")
+
     args = parser.parse_args()
 
     from .client import fallback_notify, send_to_bridge
@@ -186,6 +189,14 @@ def client_main() -> None:
         if result and result.get("ok"):
             print(result["project"])
         else:
+            sys.exit(1)
+
+    elif args.command == "ping":
+        result = send_to_bridge({"cmd": "ping"}, socket_path)
+        if result and result.get("ok"):
+            print("bridge: running")
+        else:
+            print("bridge: not running", file=sys.stderr)
             sys.exit(1)
 
     else:
