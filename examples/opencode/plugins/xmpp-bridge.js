@@ -46,7 +46,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // ---------------------------------------------------------------------------
   // Pomocník pro nastavení titulu okna.
   // Mimo sandbox: screen -X title (přímý přístup k socket démonovi).
-  // Uvnitř sandboxu nebo bez STY: ANSI escape na /dev/tty.
+  // Uvnitř sandboxu nebo bez STY: ANSI escape přímo na /dev/tty.
+  //   - Sandbox bind-mountuje /dev/tty z hostitele → zápis funguje.
+  //   - Redirect >/dev/tty 2>/dev/null zajistí že výstup jde na terminál
+  //     i když OpenCode subprocess nemá stdout připojený na tty.
   // ---------------------------------------------------------------------------
   const setTitle = async (title) => {
     if (STY) {
@@ -54,8 +57,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       if (res.exitCode === 0) return
     }
     // Fallback: ANSI escape na /dev/tty (funguje v sandboxu i v tmux)
-    await $`printf '\x1bk%s\x1b\\' ${title}`.nothrow()
-    await $`printf '\x1b]2;%s\x07' ${title}`.nothrow()
+    await $`printf '\x1bk%s\x1b\\' ${title} >/dev/tty 2>/dev/null`.nothrow()
+    await $`printf '\x1b]2;%s\x07' ${title} >/dev/tty 2>/dev/null`.nothrow()
   }
 
   // ---------------------------------------------------------------------------

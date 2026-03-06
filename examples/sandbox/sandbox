@@ -162,6 +162,10 @@ done
 
 # Virtual filesystems
 BWRAP_ARGS+=(--dev /dev)
+# Bind /dev/tty from host so that processes inside the sandbox can write ANSI
+# escape sequences for terminal title management (e.g. OpenCode plugin setTitle).
+# --dev creates a fresh devtmpfs that does not include /dev/tty automatically.
+[[ -e /dev/tty ]] && BWRAP_ARGS+=(--bind /dev/tty /dev/tty)
 BWRAP_ARGS+=(--proc /proc)
 
 # Isolated /tmp

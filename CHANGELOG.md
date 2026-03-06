@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-03-06
+
+### Fixed
+- Sandbox: bind-mount `/dev/tty` from host into the sandbox so that processes
+  inside (e.g. OpenCode plugin) can write ANSI escape sequences for title
+  management — `--dev` creates a fresh devtmpfs that does not include `/dev/tty`
+- OpenCode plugin: redirect `printf` title output explicitly to `>/dev/tty
+  2>/dev/null` so it reaches the terminal even when the subprocess stdout is
+  not a tty
+
 ## [0.3.0] - 2026-03-06
 
 ### Added
