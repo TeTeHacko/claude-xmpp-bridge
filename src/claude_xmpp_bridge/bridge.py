@@ -12,6 +12,7 @@ from pathlib import Path
 
 import slixmpp
 
+from . import __version__
 from .audit import AuditLogger
 from .config import DEFAULT_SOURCE_ICONS, MAX_SOURCE_LEN, Config
 from .messages import Messages, load_messages
@@ -794,7 +795,7 @@ class XMPPBridge:
 
         await self.xmpp.connected.wait()
         self.audit.log("BRIDGE_START", jid=self.config.jid, recipient=self.config.recipient)
-        self._xmpp_send(self.messages.bridge_started)
+        self._xmpp_send(f"{self.messages.bridge_started} (v{__version__})")
         log.info("Bridge running. Press Ctrl+C to stop.")
 
         await stop.wait()
