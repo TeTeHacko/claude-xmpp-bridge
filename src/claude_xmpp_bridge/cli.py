@@ -117,6 +117,25 @@ def client_main() -> None:
     # ping
     sub.add_parser("ping", help="Check if bridge daemon is running (exit 0 = running)")
 
+    # relay
+    p_relay = sub.add_parser(
+        "relay",
+        help="Send a message from one agent to another via the bridge",
+        epilog="Specify target with --to SESSION_ID or --to-index N",
+    )
+    p_relay.add_argument("message", nargs="*", help="Message text (reads stdin if omitted)")
+    p_relay.add_argument("--to", metavar="SESSION_ID", help="Target session ID")
+    p_relay.add_argument("--to-index", type=int, metavar="N", help="Target session index (from /list)")
+    p_relay.add_argument("--session-id", default=None, help="Sender session ID (for labelling)")
+
+    # broadcast
+    p_broadcast = sub.add_parser(
+        "broadcast",
+        help="Send a message to all other registered sessions",
+    )
+    p_broadcast.add_argument("message", nargs="*", help="Message text (reads stdin if omitted)")
+    p_broadcast.add_argument("--session-id", default=None, help="Sender session ID (excluded from delivery)")
+
     args = parser.parse_args()
 
     from .client import fallback_notify, send_to_bridge
@@ -198,6 +217,60 @@ def client_main() -> None:
         else:
             print("bridge: not running", file=sys.stderr)
             sys.exit(1)
+
+    elif args.command == "relay":
+        message_parts = args.message or []
+        if message_parts:
+            message = " ".join(message_parts)
+        elif not sys.stdin.isatty():
+            message = sys.stdin.read().strip()
+        else:
+            print("Error: no message provided", file=sys.stderr)
+            sys.exit(1)
+        if not message:
+            sys.exit(0)
+        if not args.to and args.to_index is None:
+            print("Error: specify --to SESSION_ID or --to-index N", file=sys.stderr)
+            sys.exit(1)
+        req: dict[str, object] = {"cmd": "relay", "message": message}
+        if args.to:
+            req["to"] = args.to
+        if args.to_index is not None:
+            req["to_index"] = args.to_index
+        if args.session_id:
+            req["session_id"] = args.session_id
+        result = send_to_bridge(req, socket_path)
+        if result is None:
+            print("Error: bridge not running", file=sys.stderr)
+            sys.exit(1)
+        elif not result.get("ok"):
+            print(f"Error: {result.get('error', 'unknown')}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.command == "broadcast":
+        message_parts = args.message or []
+        if message_parts:
+            message = " ".join(message_parts)
+        elif not sys.stdin.isatty():
+            message = sys.stdin.read().strip()
+        else:
+            print("Error: no message provided", file=sys.stderr)
+            sys.exit(1)
+        if not message:
+            sys.exit(0)
+        req = {"cmd": "broadcast", "message": message}
+        if args.session_id:
+            req["session_id"] = args.session_id
+        result = send_to_bridge(req, socket_path)
+        if result is None:
+            print("Error: bridge not running", file=sys.stderr)
+            sys.exit(1)
+        elif not result.get("ok"):
+            print(f"Error: {result.get('error', 'unknown')}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            delivered = result.get("delivered", 0)
+            print(f"broadcast delivered to {delivered} session(s)")
 
     else:
         parser.print_help()

@@ -34,6 +34,13 @@ class Messages:
     )
     read_only_tag: str = "read-only"
     stale_sessions_cleaned: str = "Cleaned {count} stale session(s)"
+    relay_no_target: str = "relay requires 'to' (session_id or index)"
+    relay_target_not_found: str = "Relay target session not found"
+    relay_no_backend: str = "Relay target [{project}] has no multiplexer"
+    relay_delivered: str = "relay → {target_prefix}"
+    relay_failed: str = "Relay to [{project}] failed"
+    broadcast_no_message: str = "broadcast requires 'message'"
+    broadcast_sent: str = "broadcast → {count} session(s)"
 
 
 def load_messages(path: Path | None = None) -> Messages:

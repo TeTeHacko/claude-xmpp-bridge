@@ -461,6 +461,10 @@ class XMPPBridge:
             response = self._handle_response(req)
         elif cmd == "ask":
             response = await self._handle_ask(req)
+        elif cmd == "relay":
+            response = await self._handle_relay(req)
+        elif cmd == "broadcast":
+            response = await self._handle_broadcast(req)
         elif cmd == "query":
             response = self._handle_query(req)
         elif cmd == "ping":
@@ -635,6 +639,131 @@ class XMPPBridge:
         full_msg = f"{prefix} {message}".strip() if prefix else message
         self._xmpp_send(full_msg)
         return {"ok": True}
+
+    async def _handle_relay(self, req: dict[str, object]) -> dict[str, object]:
+        """Deliver a message from one agent to another via the terminal multiplexer.
+
+        The sender identifies itself with ``session_id`` (optional but recommended
+        for the XMPP observer notification).  The target is specified via either
+        ``to`` (a session_id string) or ``to_index`` (a 1-based integer matching
+        ``/list`` order).  The bridge stuffs the message into the target terminal
+        and sends an XMPP notification so the human observer can follow along.
+
+        Protocol fields:
+          - ``message``    : text to send to the target agent (required)
+          - ``to``         : target session_id string           (mutually exclusive)
+          - ``to_index``   : target session index (1-based int) (mutually exclusive)
+          - ``session_id`` : sender session_id for labelling    (optional)
+        """
+        message = str(req.get("message", ""))
+        if not message:
+            return {"ok": False, "error": "missing message"}
+
+        # Resolve target session
+        to_raw = req.get("to")
+        to_index_raw = req.get("to_index")
+        if to_raw is not None:
+            target_id = str(to_raw)
+            target_info = self.registry.get(target_id)
+        elif to_index_raw is not None:
+            try:
+                to_index = int(str(to_index_raw))
+            except (ValueError, TypeError):
+                return {"ok": False, "error": "to_index must be an integer"}
+            target_id, target_info = self.registry.get_by_index(to_index)  # type: ignore[assignment]
+        else:
+            return {"ok": False, "error": self.messages.relay_no_target}
+
+        if not target_info or not target_id:
+            return {"ok": False, "error": self.messages.relay_target_not_found}
+
+        if not target_info["backend"]:
+            return {
+                "ok": False,
+                "error": self.messages.relay_no_backend.format(project=self._short_path(target_info["project"])),
+            }
+
+        # Build XMPP observer label
+        sender_id = str(req.get("session_id", ""))
+        sender_info = self.registry.get(sender_id) if sender_id else None
+        sender_prefix = self._session_prefix(sender_info) if sender_info else (sender_id or "?")
+        target_prefix = self._session_prefix(target_info)
+
+        ok = await self._stuff_to_session(target_id, target_info, message)
+
+        self.audit.log(
+            "RELAY_SENT" if ok else "RELAY_FAILED",
+            from_session_id=sender_id or None,
+            to_session_id=target_id,
+            message=message,
+            message_len=len(message),
+        )
+
+        if ok:
+            # Notify observer so they can see inter-agent traffic
+            self._xmpp_send(
+                f"↔ {sender_prefix} → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
+            )
+            return {"ok": True}
+        else:
+            return {
+                "ok": False,
+                "error": self.messages.relay_failed.format(project=self._short_path(target_info["project"])),
+            }
+
+    async def _handle_broadcast(self, req: dict[str, object]) -> dict[str, object]:
+        """Deliver a message to all sessions except the sender.
+
+        The sender is identified by ``session_id`` (excluded from delivery so
+        an agent does not echo its own broadcast back to itself).  The bridge
+        stuffs the message into each target terminal and sends one XMPP summary
+        with the list of recipients so the human observer has a complete picture.
+
+        Protocol fields:
+          - ``message``    : text to send to all other agents (required)
+          - ``session_id`` : sender session_id (excluded from delivery, optional)
+        """
+        message = str(req.get("message", ""))
+        if not message:
+            return {"ok": False, "error": self.messages.broadcast_no_message}
+
+        sender_id = str(req.get("session_id", ""))
+        sender_info = self.registry.get(sender_id) if sender_id else None
+        sender_prefix = self._session_prefix(sender_info) if sender_info else (sender_id or "?")
+
+        targets = {
+            sid: info for sid, info in self.registry.sessions.items() if sid != sender_id and info.get("backend")
+        }
+
+        if not targets:
+            return {"ok": True, "delivered": 0}
+
+        results = await asyncio.gather(
+            *(self._stuff_to_session(sid, info, message) for sid, info in targets.items()),
+        )
+
+        delivered: list[str] = []
+        failed: list[str] = []
+        for (_sid, info), ok in zip(targets.items(), results, strict=True):
+            if ok:
+                delivered.append(self._session_prefix(info))
+            else:
+                failed.append(self._session_prefix(info))
+
+        self.audit.log(
+            "BROADCAST_SENT",
+            from_session_id=sender_id or None,
+            delivered=len(delivered),
+            failed=len(failed),
+            message=message,
+            message_len=len(message),
+        )
+
+        # Single XMPP summary for the observer
+        recipients = ", ".join(delivered) if delivered else "—"
+        self._xmpp_send(f"📢 {sender_prefix} → {recipients}: {message[:200]}" + ("…" if len(message) > 200 else ""))
+
+        return {"ok": True, "delivered": len(delivered), "failed": len(failed)}
 
     def _handle_query(self, req: dict[str, object]) -> dict[str, object]:
         session_id = str(req.get("session_id", ""))

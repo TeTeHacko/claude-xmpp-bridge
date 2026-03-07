@@ -3282,3 +3282,410 @@ class TestSourceIconsConfig:
         cfg = load_config(cli_credentials=str(credentials_file))
         assert "opencode" in cfg.source_icons
         assert "cursor" not in cfg.source_icons
+
+
+# ---------------------------------------------------------------------------
+# TestRelay — agent-to-agent messaging
+# ---------------------------------------------------------------------------
+
+
+class TestRelay:
+    """relay command delivers messages between agents and notifies the XMPP observer."""
+
+    def _make_bridge_with_sessions(self, tmp_path, MockXMPP):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register(
+            session_id="agent-a",
+            sty="12345.pts-0",
+            window="1",
+            project="/home/user/project-a",
+            backend="screen",
+        )
+        bridge.registry.register(
+            session_id="agent-b",
+            sty="12345.pts-0",
+            window="2",
+            project="/home/user/project-b",
+            backend="screen",
+        )
+        return bridge, conn
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_by_session_id_delivers_to_target(self, MockXMPP, tmp_path):
+        """relay with 'to' session_id stuffs the message into the target terminal."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            resp = await bridge._handle_relay(
+                {"session_id": "agent-a", "to": "agent-b", "message": "yo agent-b, done with module X"}
+            )
+
+        assert resp == {"ok": True}
+        # Observer should get an XMPP notification
+        conn.send.assert_called_once()
+        sent = conn.send.call_args[0][1]
+        assert "↔" in sent
+        assert "agent" in sent.lower() or "project" in sent.lower()
+        assert "yo agent-b" in sent
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_by_index_delivers_to_target(self, MockXMPP, tmp_path):
+        """relay with 'to_index' stuffs the message into the Nth session."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            resp = await bridge._handle_relay({"session_id": "agent-a", "to_index": 2, "message": "hello session 2"})
+
+        assert resp == {"ok": True}
+        conn.send.assert_called_once()
+        sent = conn.send.call_args[0][1]
+        assert "hello session 2" in sent
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_missing_to_and_index_returns_error(self, MockXMPP, tmp_path):
+        """relay without 'to' or 'to_index' must return an error."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        resp = await bridge._handle_relay({"session_id": "agent-a", "message": "hello"})
+
+        assert resp.get("ok") is False
+        assert "relay" in resp.get("error", "").lower() or "to" in resp.get("error", "").lower()
+        conn.send.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_missing_message_returns_error(self, MockXMPP, tmp_path):
+        """relay without 'message' must return an error."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b"})
+
+        assert resp.get("ok") is False
+        assert "message" in resp.get("error", "")
+        conn.send.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_unknown_target_returns_error(self, MockXMPP, tmp_path):
+        """relay to a non-existent session_id must return an error."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        resp = await bridge._handle_relay({"session_id": "agent-a", "to": "nonexistent", "message": "hi"})
+
+        assert resp.get("ok") is False
+        assert "not found" in resp.get("error", "").lower()
+        conn.send.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_to_no_backend_returns_error(self, MockXMPP, tmp_path):
+        """relay to a read-only session must return a descriptive error."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("sender", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("readonly", sty="", window="", project="/proj-ro", backend=None)
+
+        resp = await bridge._handle_relay({"session_id": "sender", "to": "readonly", "message": "hello"})
+
+        assert resp.get("ok") is False
+        assert "multiplexer" in resp.get("error", "").lower() or "no" in resp.get("error", "").lower()
+        conn.send.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_invalid_to_index_returns_error(self, MockXMPP, tmp_path):
+        """relay with non-integer to_index must return an error."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        resp = await bridge._handle_relay({"session_id": "agent-a", "to_index": "bad", "message": "hi"})
+
+        assert resp.get("ok") is False
+        assert "integer" in resp.get("error", "").lower()
+        conn.send.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_multiplexer_failure_returns_error(self, MockXMPP, tmp_path):
+        """When the multiplexer fails, relay returns ok=False with error."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(1)):
+            resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": "hello"})
+
+        assert resp.get("ok") is False
+        assert "failed" in resp.get("error", "").lower()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_via_socket(self, MockXMPP, tmp_path):
+        """relay delivered via socket round-trip returns ok=True."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("ag-1", sty="sty1", window="1", project="/proj-1", backend="screen")
+        bridge.registry.register("ag-2", sty="sty1", window="2", project="/proj-2", backend="screen")
+
+        await bridge.socket_server.start()
+        try:
+            with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+                resp = await _socket_request(
+                    bridge.config.socket_path,
+                    {"cmd": "relay", "session_id": "ag-1", "to": "ag-2", "message": "coordinate!"},
+                )
+            assert resp == {"ok": True}
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_long_message_truncated_in_xmpp_notification(self, MockXMPP, tmp_path):
+        """Observer XMPP notification truncates the message body at 200 chars."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        long_msg = "X" * 300
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": long_msg})
+
+        assert resp == {"ok": True}
+        sent = conn.send.call_args[0][1]
+        assert "…" in sent  # truncation marker
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_without_sender_uses_fallback_label(self, MockXMPP, tmp_path):
+        """relay without session_id still works and uses '?' as sender label."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            resp = await bridge._handle_relay({"to": "agent-b", "message": "anonymous relay"})
+
+        assert resp == {"ok": True}
+        sent = conn.send.call_args[0][1]
+        assert "?" in sent
+        assert "anonymous relay" in sent
+        bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# TestBroadcast — one-to-all messaging
+# ---------------------------------------------------------------------------
+
+
+class TestBroadcast:
+    """broadcast command delivers a message to all sessions except the sender."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_delivers_to_all_other_sessions(self, MockXMPP, tmp_path):
+        """broadcast from agent-a reaches agent-b and agent-c, not agent-a."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
+        bridge.registry.register("agent-c", sty="sty1", window="3", project="/proj-c", backend="screen")
+
+        stuffed: list[tuple[str, str]] = []
+
+        async def _mock_stuff(session_id, info, text):
+            stuffed.append((session_id, text))
+            return True
+
+        bridge._stuff_to_session = _mock_stuff  # type: ignore[method-assign]
+
+        resp = await bridge._handle_broadcast({"session_id": "agent-a", "message": "start feature X"})
+
+        assert resp["ok"] is True
+        assert resp["delivered"] == 2
+        delivered_sids = [s[0] for s in stuffed]
+        assert "agent-b" in delivered_sids
+        assert "agent-c" in delivered_sids
+        assert "agent-a" not in delivered_sids
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_xmpp_notification_sent_once(self, MockXMPP, tmp_path):
+        """Observer gets exactly one XMPP summary, not one per target."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
+        bridge.registry.register("agent-c", sty="sty1", window="3", project="/proj-c", backend="screen")
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            await bridge._handle_broadcast({"session_id": "agent-a", "message": "broadcast!"})
+
+        assert conn.send.call_count == 1
+        sent = conn.send.call_args[0][1]
+        assert "📢" in sent
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_no_message_returns_error(self, MockXMPP, tmp_path):
+        """broadcast without 'message' must return an error."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+
+        resp = await bridge._handle_broadcast({"session_id": "agent-a"})
+
+        assert resp.get("ok") is False
+        assert "message" in resp.get("error", "")
+        conn.send.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_no_other_sessions_returns_zero_delivered(self, MockXMPP, tmp_path):
+        """broadcast when only the sender is registered returns delivered=0."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+
+        resp = await bridge._handle_broadcast({"session_id": "agent-a", "message": "lonely"})
+
+        assert resp["ok"] is True
+        assert resp["delivered"] == 0
+        conn.send.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_skips_no_backend_sessions(self, MockXMPP, tmp_path):
+        """Read-only sessions (no backend) are skipped by broadcast."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("ro-sess", sty="", window="", project="/proj-ro", backend=None)
+
+        resp = await bridge._handle_broadcast({"session_id": "agent-a", "message": "hello"})
+
+        # ro-sess has no backend → skipped → delivered=0
+        assert resp["ok"] is True
+        assert resp["delivered"] == 0
+        conn.send.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_partial_failure_reported(self, MockXMPP, tmp_path):
+        """broadcast tracks delivered and failed counts separately."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
+        bridge.registry.register("agent-c", sty="sty1", window="3", project="/proj-c", backend="screen")
+
+        call_count = [0]
+
+        async def _partial_stuff(session_id, info, text):
+            call_count[0] += 1
+            # First target succeeds, second fails
+            return call_count[0] == 1
+
+        bridge._stuff_to_session = _partial_stuff  # type: ignore[method-assign]
+
+        resp = await bridge._handle_broadcast({"session_id": "agent-a", "message": "test"})
+
+        assert resp["ok"] is True
+        assert resp["delivered"] == 1
+        assert resp["failed"] == 1
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_via_socket(self, MockXMPP, tmp_path):
+        """broadcast delivered via socket round-trip returns ok=True and delivered count."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("ag-1", sty="sty1", window="1", project="/proj-1", backend="screen")
+        bridge.registry.register("ag-2", sty="sty1", window="2", project="/proj-2", backend="screen")
+
+        await bridge.socket_server.start()
+        try:
+            with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+                resp = await _socket_request(
+                    bridge.config.socket_path,
+                    {"cmd": "broadcast", "session_id": "ag-1", "message": "all agents stand by"},
+                )
+            assert resp.get("ok") is True
+            assert resp.get("delivered") == 1
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_long_message_truncated_in_xmpp(self, MockXMPP, tmp_path):
+        """Observer XMPP notification truncates message at 200 chars."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            await bridge._handle_broadcast({"session_id": "agent-a", "message": "Y" * 300})
+
+        sent = conn.send.call_args[0][1]
+        assert "…" in sent
+        bridge.registry.close()

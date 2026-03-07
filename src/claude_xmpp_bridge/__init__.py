@@ -1,3 +1,3 @@
 """XMPP bridge for Claude Code — route messages between Jabber and Claude sessions."""
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
