@@ -143,6 +143,16 @@ Or via environment variable:
 export CLAUDE_XMPP_SOCKET_TOKEN="your-random-secret"
 ```
 
+Or store it in a dedicated file (must be `chmod 600`):
+
+```bash
+echo 'your-random-secret' > ~/.config/claude-xmpp-bridge/socket_token
+chmod 600 ~/.config/claude-xmpp-bridge/socket_token
+```
+
+The client reads the token from (in order of precedence): `CLAUDE_XMPP_SOCKET_TOKEN` env var → `~/.config/claude-xmpp-bridge/socket_token` file.
+The token file **must** have `0600` permissions — the client exits with an error if the file is group/other-readable.
+
 All hook scripts read this token from `CLAUDE_XMPP_SOCKET_TOKEN` automatically.
 
 ### Audit log
@@ -413,7 +423,7 @@ The OpenCode plugin registers sessions with `source: "opencode"` and reports its
   "project": "/home/user/project",
   "backend": "screen",
   "source": "opencode",
-  "plugin_version": "0.7.11"
+  "plugin_version": "0.7.16"
 }
 ```
 

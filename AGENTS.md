@@ -10,6 +10,14 @@ When working in this repository, you MUST follow these rules:
 2. **Version Bump**: If you make any functional changes, add new features, or fix bugs, you MUST bump the version number before committing.
    Update the version in both `pyproject.toml` and `src/claude_xmpp_bridge/__init__.py`.
 
-3. **Security**: Maintain the security posture. 
+3. **Security**: Maintain the security posture.
    - Never use `shell=True` or raw `subprocess.Popen` when interacting with terminal multiplexers. Always use `asyncio.create_subprocess_exec` with a sanitized environment.
    - All Unix socket files must explicitly have `0600` permissions.
+   - Token/credentials files must be checked for `0600` permissions before reading (use `_check_permissions()` from `config.py`).
+
+4. **Documentation**: After any functional change, update the documentation to match:
+   - `README.md` — keep configuration examples, CLI flags, and security notes accurate.
+   - `CHANGELOG.md` — add an entry for the new version with a short description of changes.
+   - `examples/opencode/plugins/xmpp-bridge.js` — keep `PLUGIN_VERSION` in sync with the package version in `pyproject.toml`.
+   - `examples/opencode/README.md` and `examples/hooks/README.md` — keep behaviour descriptions and version references accurate.
+   - If you add or remove config keys, CLI flags, environment variables, MCP tools, or socket commands, update all relevant sections in `README.md`.

@@ -81,7 +81,7 @@ The plugin reports its version (`plugin_version`) in the registration payload an
 - `idle` — after registration and after each `session.idle` event
 - `running` — when the model starts generating output
 
-This information appears in `/list` output as `⏸`/`▶` icons and a `v0.7.11` tag.
+This information appears in `/list` output as `⏸`/`▶` icons and a version tag.
 
 ## MCP Inbox Polling
 

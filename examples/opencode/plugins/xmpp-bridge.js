@@ -28,7 +28,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.12"
+  const PLUGIN_VERSION = "0.7.16"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
