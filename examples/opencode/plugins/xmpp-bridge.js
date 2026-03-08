@@ -34,7 +34,7 @@ function shortPath(dir) {
 }
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.4"
+  const PLUGIN_VERSION = "0.7.5"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -73,7 +73,15 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   let pollTimer = null
 
   // ---------------------------------------------------------------------------
+  // messageBuffer: lokální fronta zpráv čekajících na doručení.
+  // Zprávy se vybírají po jedné per poll cycle, aby se předešlo race condition
+  // kdy druhá zpráva dorazí dřív než model zpracuje první (→ "assistant prefill" chyba).
+  // ---------------------------------------------------------------------------
+  let messageBuffer = []
+
+  // ---------------------------------------------------------------------------
   // pollInbox(): zkontroluje MCP inbox a doručí čekající zprávy do terminálu.
+  // Vždy injektuje nejvýše JEDNU zprávu — zbytek jde do messageBuffer.
   // Volá se okamžitě při session.idle a periodicky každých 30s pokud isIdle.
   // Funguje jen pro screen sessions (STY musí být nastaveno).
   // ---------------------------------------------------------------------------
@@ -82,6 +90,16 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   const pollInbox = async () => {
     if (!registeredSessionID || !STY) return
     try {
+      // Nejdřív zkusit lokální buffer — pokud tam je zpráva, injektovat ji
+      // a nechodit vůbec na MCP (model ještě zpracovává předchozí).
+      if (messageBuffer.length > 0) {
+        const msg = messageBuffer.shift()
+        await dbg("relaying buffered msg to " + registeredSessionID + ": " + msg.slice(0, 80))
+        const relayRes = await $`claude-xmpp-client relay --to ${registeredSessionID} ${msg}`.nothrow()
+        await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
+        return
+      }
+
       // Step 1: initialize — get mcp-session-id
       const initRes = await fetch("http://127.0.0.1:7878/mcp", {
         method:  "POST",
@@ -124,14 +142,19 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         // receive_messages returns each message as a separate content item (type=text)
         const contentItems = body?.result?.content
         if (Array.isArray(contentItems) && contentItems.length > 0) {
-          for (const item of contentItems) {
-            const msg = item?.text
-            if (msg) {
-              await dbg("relaying msg to " + registeredSessionID + ": " + msg.slice(0, 80))
-              // Inject into session via screen stuff (same mechanism as socket relay)
-              const relayRes = await $`claude-xmpp-client relay --to ${registeredSessionID} ${msg}`.nothrow()
-              await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
+          // Injektovat pouze PRVNÍ zprávu; zbytek do lokálního bufferu.
+          // Každá další zpráva se injektuje až po session.idle (model zpracoval předchozí).
+          const first = contentItems[0]?.text
+          if (first) {
+            // Přidat zbytek do bufferu (budou injektovány postupně při dalších poll cycles)
+            for (const item of contentItems.slice(1)) {
+              if (item?.text) messageBuffer.push(item.text)
             }
+            await dbg("relaying msg to " + registeredSessionID + ": " + first.slice(0, 80)
+              + (messageBuffer.length ? " (+" + messageBuffer.length + " buffered)" : ""))
+            // Inject into session via screen stuff (same mechanism as socket relay)
+            const relayRes = await $`claude-xmpp-client relay --to ${registeredSessionID} ${first}`.nothrow()
+            await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
           }
         }
       }
@@ -227,6 +250,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       if (event.type === "server.instance.disposed") {
         isIdle = false
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+        messageBuffer = []
         if (registeredSessionID) {
           await $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow()
           await $`claude-xmpp-client unregister ${registeredSessionID}`.nothrow()
@@ -302,7 +326,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         // Calls the xmpp-bridge MCP tool receive_messages() to drain any messages
         // that other agents sent via send_message() or broadcast_message().
         // Each pending message is injected into this session via screen relay.
+        // Delay 1.5s: session.idle fires immediately after model finishes — OpenCode
+        // needs a moment to fully transition to "awaiting user input" state before
+        // we inject a new message, otherwise the message arrives while the conversation
+        // still ends with an assistant turn → "assistant message prefill" API error.
         await dbg("session.idle fired — registeredSessionID=" + registeredSessionID + " STY=" + STY + " WINDOW=" + WINDOW)
+        await new Promise(resolve => setTimeout(resolve, 1500))
         await pollInbox()
 
         const notifyEnabled =
