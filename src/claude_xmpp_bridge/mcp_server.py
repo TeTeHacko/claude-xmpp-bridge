@@ -329,7 +329,13 @@ class BridgeMCPServer:
         delivered = 0
         for (sid, _info), ok in zip(targets.items(), results, strict=True):
             if ok:
+                # Screen relay succeeded — no MCP inbox needed.
+                # Enqueueing here would cause double-delivery: the plugin's
+                # pollInbox() would inject the same message a second time.
                 delivered += 1
+            else:
+                # Screen relay failed — enqueue in MCP inbox as fallback so
+                # the plugin can pick it up on the next session.idle poll.
                 self.enqueue(sid, message)
 
         sender_info = bridge.registry.get(sender_session_id) if sender_session_id else None

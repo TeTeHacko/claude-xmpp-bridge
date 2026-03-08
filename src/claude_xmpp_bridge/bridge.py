@@ -814,9 +814,12 @@ class XMPPBridge:
         for (_sid, info), ok in zip(targets.items(), results, strict=True):
             if ok:
                 delivered.append(self._session_prefix(info))
-                self._enqueue_for_mcp(_sid, message)
+                # Screen relay succeeded — no MCP inbox needed.
+                # Enqueueing here would cause double-delivery via pollInbox().
             else:
                 failed.append(self._session_prefix(info))
+                # Screen relay failed — enqueue as fallback for pollInbox().
+                self._enqueue_for_mcp(_sid, message)
 
         self.audit.log(
             "BROADCAST_SENT",

@@ -269,10 +269,20 @@ class TestBroadcastMessageTool:
         assert "1" in result  # only ses_BBB
         assert started_server._bridge._stuff_to_session.await_count == 1
 
-    async def test_broadcast_enqueues_for_mcp(self, started_server: BridgeMCPServer):
+    async def test_broadcast_does_not_enqueue_on_success(self, started_server: BridgeMCPServer):
+        """Successful screen relay must NOT enqueue in MCP inbox (would cause double-delivery via pollInbox)."""
         await started_server._tool_broadcast_message(message="broadcast msg", sender_session_id="ses_AAA")
-        # ses_BBB should have message in its MCP queue
+        # ses_BBB received the message via screen relay — MCP inbox should be empty
         msgs = started_server._tool_receive_messages(session_id="ses_BBB")
+        assert msgs == [], "broadcast via screen relay must not enqueue in MCP inbox (double-delivery prevention)"
+
+    async def test_broadcast_enqueues_on_relay_failure(self, started_server: BridgeMCPServer):
+        """Failed screen relay must enqueue in MCP inbox as fallback for pollInbox()."""
+        started_server._bridge._stuff_to_session = AsyncMock(return_value=False)
+        await started_server._tool_broadcast_message(message="broadcast msg", sender_session_id="ses_AAA")
+        # relay failed → message should be in MCP inbox as fallback
+        msgs = started_server._tool_receive_messages(session_id="ses_BBB")
+        assert msgs == ["broadcast msg"], "failed relay should fall back to MCP inbox"
         assert msgs == ["broadcast msg"]
 
     async def test_broadcast_missing_message(self, started_server: BridgeMCPServer):
