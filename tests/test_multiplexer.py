@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from claude_xmpp_bridge.multiplexer import (
     ScreenMultiplexer,
     TmuxMultiplexer,
+    _screen_stuff_escape,
     get_multiplexer,
     sanitize_text,
 )
@@ -51,6 +52,49 @@ class TestSanitizeText:
 
     def test_mixed_content(self):
         assert sanitize_text("ok\x00\nnext\x07line") == "ok\nnextline"
+
+
+# ---------------------------------------------------------------------------
+# _screen_stuff_escape
+# ---------------------------------------------------------------------------
+
+
+class TestScreenStuffEscape:
+    """Tests for _screen_stuff_escape — GNU Screen $VAR and backslash escaping."""
+
+    def test_plain_text_unchanged(self):
+        assert _screen_stuff_escape("hello world") == "hello world"
+
+    def test_dollar_escaped(self):
+        assert _screen_stuff_escape("$HOME") == r"\$HOME"
+
+    def test_multiple_dollars(self):
+        assert _screen_stuff_escape("$USER and $HOME") == r"\$USER and \$HOME"
+
+    def test_backslash_escaped(self):
+        assert _screen_stuff_escape("back\\slash") == "back\\\\slash"
+
+    def test_backslash_before_dollar(self):
+        # backslash must be escaped first to avoid double-escaping
+        # input: \$ → output: \\\$ (escaped backslash + escaped dollar)
+        assert _screen_stuff_escape("\\$HOME") == "\\\\\\$HOME"
+
+    def test_empty_string(self):
+        assert _screen_stuff_escape("") == ""
+
+    def test_no_special_chars(self):
+        text = "FANOUT w1: 5050"
+        assert _screen_stuff_escape(text) == text
+
+    def test_pipe_and_quotes_unchanged(self):
+        # | and ' are NOT screen metacharacters in stuff — only $ and \ are
+        text = "cmd | grep 'foo'"
+        assert _screen_stuff_escape(text) == text
+
+    def test_real_world_message(self):
+        msg = "send $BRIDGE_SESSION_ID to /home/user\\config"
+        expected = r"send \$BRIDGE_SESSION_ID to /home/user\\config"
+        assert _screen_stuff_escape(msg) == expected
 
 
 # ---------------------------------------------------------------------------

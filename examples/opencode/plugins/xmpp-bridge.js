@@ -25,7 +25,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.8"
+  const PLUGIN_VERSION = "0.7.9"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -107,11 +107,13 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // rawRelay(): posílá zprávu přes claude-xmpp-client relay BEZ bun shell.
   // Důvod: bun shell $`...` interpretuje shell metaznaky ($, |, ', >) v obsahu
   // zprávy, čímž ji poškodí. Bun.spawn předá argumenty přímo (exec, ne shell).
+  // "--" před msg zajistí, že zprávy začínající "-" nejsou interpretovány jako
+  // přepínače CLI. stdout: "ignore" zabrání zablokování při přeplnění pipe bufferu.
   // ---------------------------------------------------------------------------
   const rawRelay = async (to, msg) => {
     try {
-      const proc = Bun.spawn(["claude-xmpp-client", "relay", "--to", to, msg], {
-        stdout: "pipe", stderr: "pipe",
+      const proc = Bun.spawn(["claude-xmpp-client", "relay", "--to", to, "--", msg], {
+        stdout: "ignore", stderr: "pipe",
       })
       const exitCode = await proc.exited
       const stderr = await new Response(proc.stderr).text()
