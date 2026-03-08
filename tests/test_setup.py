@@ -714,23 +714,28 @@ class TestBridgePing:
 
 
 class TestOpencodePluginBridgeDetection:
-    def test_plugin_contains_ping_call(self):
-        """Plugin must call claude-xmpp-client ping for runtime detection."""
+    def test_plugin_uses_nothrow_for_resilience(self):
+        """Plugin must use .nothrow() on all claude-xmpp-client calls (no bridgeAvailable guard needed)."""
         plugin_dir = _find_opencode_dir()
         assert plugin_dir is not None
         text = (plugin_dir / "plugins" / "xmpp-bridge.js").read_text()
-        assert "claude-xmpp-client ping" in text
-        assert "bridgeAvailable" in text
+        # bridgeAvailable guard was removed — .nothrow() handles bridge-not-running gracefully
+        assert "bridgeAvailable" not in text
+        assert "claude-xmpp-client ping" not in text
 
-    def test_bridge_unavailable_guard_on_register(self):
-        """All register/unregister/notify/response calls must be guarded by bridgeAvailable."""
+    def test_bridge_client_calls_use_nothrow(self):
+        """All register/unregister/notify/response calls must use .nothrow() for resilience."""
         plugin_dir = _find_opencode_dir()
         assert plugin_dir is not None
         text = (plugin_dir / "plugins" / "xmpp-bridge.js").read_text()
-        # Every claude-xmpp-client call except ping must be inside a bridgeAvailable block
         import re
 
-        client_calls = re.findall(r"claude-xmpp-client (register|unregister|notify|response)", text)
-        assert len(client_calls) > 0, "expected bridge client calls in plugin"
-        # The bridgeAvailable variable must appear in the file (guards exist)
-        assert text.count("bridgeAvailable") >= len(client_calls)
+        # Find all claude-xmpp-client call lines
+        lines = text.splitlines()
+        client_call_lines = [
+            line for line in lines if re.search(r"claude-xmpp-client (register|unregister|notify|response)", line)
+        ]
+        assert len(client_call_lines) > 0, "expected bridge client calls in plugin"
+        # Every such call must be followed by .nothrow() on the same line
+        for line in client_call_lines:
+            assert ".nothrow()" in line, f"missing .nothrow() on: {line.strip()}"
