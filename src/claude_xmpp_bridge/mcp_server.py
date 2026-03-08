@@ -189,6 +189,8 @@ class BridgeMCPServer:
               - backend: multiplexer type (screen/tmux/null)
               - source: agent type (opencode/etc)
               - window: terminal window number (for screen)
+              - plugin_version: version of the OpenCode plugin (if reported)
+              - agent_state: last known agent state ("idle", "running", etc.)
 
             Returns:
                 List of session dicts.
@@ -379,6 +381,8 @@ class BridgeMCPServer:
                     "source": info.get("source") or "",
                     "window": info.get("window") or "",
                     "sty": info.get("sty") or "",
+                    "plugin_version": info.get("plugin_version") or "",
+                    "agent_state": info.get("agent_state") or "",
                 }
             )
         return result

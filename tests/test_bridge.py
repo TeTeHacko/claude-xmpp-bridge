@@ -4010,3 +4010,174 @@ class TestHeartbeat:
         await asyncio.wait_for(task, timeout=2)
         # Task should complete without hanging
         bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# TestStateCommand — state socket command updates agent_state
+# ---------------------------------------------------------------------------
+
+
+class TestStateCommand:
+    """state socket command updates agent_state in registry."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_state_updates_known_session(self, MockXMPP, tmp_path):
+        """state cmd with valid session_id and state returns ok=True."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("st-sess", "", "", "/proj", backend=None)
+
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "state", "session_id": "st-sess", "state": "idle"},
+            )
+            assert resp == {"ok": True}
+            info = bridge.registry.get("st-sess")
+            assert info is not None
+            assert info["agent_state"] == "idle"
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_state_updates_to_running(self, MockXMPP, tmp_path):
+        """state cmd sets agent_state to 'running'."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("st-sess", "", "", "/proj", backend=None)
+
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "state", "session_id": "st-sess", "state": "running"},
+            )
+            assert resp == {"ok": True}
+            assert bridge.registry.get("st-sess")["agent_state"] == "running"  # type: ignore[index]
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_state_unknown_session_returns_error(self, MockXMPP, tmp_path):
+        """state cmd for unknown session_id returns error."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "state", "session_id": "nonexistent", "state": "idle"},
+            )
+            assert "error" in resp
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_state_missing_session_id_returns_error(self, MockXMPP, tmp_path):
+        """state cmd without session_id returns error."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "state", "state": "idle"},
+            )
+            assert "error" in resp
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_state_missing_state_returns_error(self, MockXMPP, tmp_path):
+        """state cmd without state field returns error."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("st-sess", "", "", "/proj", backend=None)
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "state", "session_id": "st-sess"},
+            )
+            assert "error" in resp
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_register_stores_plugin_version(self, MockXMPP, tmp_path):
+        """register cmd with plugin_version stores it in registry."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {
+                    "cmd": "register",
+                    "session_id": "pv-sess",
+                    "sty": "",
+                    "window": "",
+                    "project": "/proj",
+                    "backend": "screen",
+                    "plugin_version": "0.7.4",
+                },
+            )
+            assert resp == {"ok": True}
+            info = bridge.registry.get("pv-sess")
+            assert info is not None
+            assert info["plugin_version"] == "0.7.4"
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_state_direct_call(self, MockXMPP, tmp_path):
+        """_handle_state can be called directly without socket."""
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "", "", "/proj", backend=None)
+
+        result = bridge._handle_state({"session_id": "s1", "state": "running"})
+        assert result == {"ok": True}
+        assert bridge.registry.get("s1")["agent_state"] == "running"  # type: ignore[index]
+        bridge.registry.close()

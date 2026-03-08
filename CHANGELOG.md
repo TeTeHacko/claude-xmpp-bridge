@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-03-08
+
+### Added
+- Registry: `plugin_version` and `agent_state` fields on `SessionInfo` — stored in
+  SQLite with automatic schema migration; `plugin_version` is populated from the
+  OpenCode plugin registration payload; `agent_state` is updated via the new `state`
+  socket command
+- Registry: `update_state(session_id, state)` method for updating agent state
+- Bridge: `state` socket command — agents report their current state ("idle",
+  "running") so the bridge can surface it in `/list` and `list_sessions`
+- Bridge: `/list` XMPP output now shows `⏸`/`▶` state icon and `v{version}` for
+  each session that has reported state and plugin version
+- MCP `list_sessions` and socket `list` command now include `plugin_version` and
+  `agent_state` in the response
+- CLI: `claude-xmpp-client state '{"session_id":"…","state":"idle"}'` subcommand
+- OpenCode plugin: sends `plugin_version` in the `register` payload; updates
+  `agent_state` to "idle"/"running" on `session.idle` / model output events
+
+### Fixed
+- OpenCode plugin: `isIdle = true` set immediately after `register` so that the
+  `setInterval` inbox-polling loop starts running without waiting for the first
+  `session.idle` event
+
+## [0.7.3] - 2026-03-08
+
+### Fixed
+- MCP: `_handle_relay` no longer enqueues screen-delivered messages into the MCP
+  inbox — doing so caused the idle-handler to re-inject already-delivered messages
+  on the next `session.idle` event (infinite feedback loop, Bug #1)
+- MCP: `send_message(screen=True)` no longer enqueues the message into the inbox —
+  every stop/notification sent with `screen=True` was re-delivered to the terminal
+  on the next `session.idle` poll (Bug #2)
+
+## [0.7.2] - 2026-03-08
+
+### Fixed
+- OpenCode plugin: correct `claude-xmpp-client relay` call syntax (`--to` flag and
+  positional message argument); log relay exit code and stderr for debugging
+
+## [0.7.1] - 2026-03-08
+
+### Fixed
+- OpenCode plugin: parse SSE (`data: …` lines) response format instead of raw JSON
+  for `receive_messages` MCP tool response
+- OpenCode plugin: add MCP HTTP initialize step to obtain `mcp-session-id` header
+  before calling `tools/call`
+- OpenCode plugin: use per-window `session_id` with underscore separator
+  (`ses_<sty>_w<window>`) to avoid registry collisions when multiple OpenCode
+  instances run inside the same Screen session
+- OpenCode plugin: fix `receive_messages` JSON content-block parsing
+
+## [0.7.0] - 2026-03-08
+
+### Added
+- MCP `send_message`: `screen` boolean parameter (default `true`) — when `false`,
+  the message is enqueued into the MCP inbox only, without terminal relay; useful
+  for sessions without a multiplexer or for testing
+- MCP tools: structured audit events via `AuditLogger`:
+  - `MCP_SEND` — includes `message_id`, `to_session_id`, `screen` flag, `ok`/`reason`
+  - `MCP_BROADCAST` — includes `from_session_id`, `delivered`, `failed` counts
+  - `MCP_RECEIVE` — includes `session_id`, `count` (emitted only when inbox non-empty)
+- MCP `send_message` confirmation now includes `[id:<12-char-uuid>]` for ACK correlation
+
+## [0.6.0] - 2026-03-08
+
+### Added
+- MCP server (`BridgeMCPServer`) — exposes bridge functionality as Model Context
+  Protocol tools on port 7878 (streamable-HTTP transport); agents communicate
+  without screen relay hacks by using standard MCP tool calls:
+  - `send_message(to, message, screen=True)` — relay to a specific session
+  - `broadcast_message(message, sender_session_id)` — relay to all other sessions
+  - `receive_messages(session_id)` — drain MCP inbox queue for a session
+  - `list_sessions()` — enumerate all registered sessions with metadata
+- Config: `mcp_port` (default 7878, set to 0 to disable)
+- CLI: `--mcp-port` flag and `CLAUDE_XMPP_MCP_PORT` environment variable
+
+## [0.5.0] - 2026-03-08
+
+### Added
+- Socket `list` command — agents can discover all registered sessions with full
+  metadata (`session_id`, `project`, `backend`, `window`, `source`, `index`)
+- Relay `to_project` targeting — `relay` can target a session by project path prefix
+  (with `~` expansion), without knowing the session ID in advance
+- Heartbeat: background task runs `_cleanup_stale_sessions` every 60 s, removing
+  dead Screen/tmux windows automatically from the registry
+- OpenCode plugin: use `$WINDOW` env var directly instead of `screen -Q info`
+
+## [0.4.0] - 2026-03-08
+
+### Added
+- Socket `relay` command — send a message to a specific session by `session_id`,
+  `index`, or `to_project`; all inter-agent traffic is forwarded to the XMPP
+  observer so the human can monitor agent conversations
+- Socket `broadcast` command — send a message to all sessions except the sender
+- CLI: `claude-xmpp-client relay --to SESSION_ID MESSAGE`
+- CLI: `claude-xmpp-client broadcast --session-id SENDER MESSAGE`
+- Audit events: `RELAY_SENT`, `RELAY_FAILED`, `BROADCAST_SENT`
+- XMPP startup notification now includes bridge version
+
 ## [0.3.1] - 2026-03-06
 
 ### Fixed

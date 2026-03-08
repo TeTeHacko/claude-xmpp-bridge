@@ -31,7 +31,10 @@ claude-xmpp-notify "Hello from bridge!"
 - **Multi-tool support** — Claude Code and OpenCode can run simultaneously in the same project directory
 - **Session management** — register multiple sessions, switch between them with `/1`, `/2`, …
 - **Multiplexer support** — GNU Screen and tmux backends; reliable background-window delivery
-- **Permission requests** — approve/deny AI actions via XMPP
+- **Inter-agent communication** — agents relay messages to each other via socket commands (`relay`, `broadcast`) or MCP tools; all traffic is forwarded to the XMPP observer
+- **MCP server** — exposes bridge as Model Context Protocol tools on port 7878 so agents can send/receive messages without screen relay
+- **Agent state tracking** — agents report idle/running state; `/list` shows `⏸`/`▶` icons and plugin version
+- **Permission notifications** — receive informative XMPP alerts when AI requests permission to run commands
 - **Notifications** — receive task completions, errors, and other events with session icon + window ID prefix
 - **Configurable messages** — English default, easily translatable (Czech, German, Polish, Slovak included)
 - **SQLite persistence** — sessions survive bridge restarts; stable `/list` numbering across session restarts
@@ -162,7 +165,7 @@ Each record is one JSON object per line:
 {"ts": "2026-03-05T14:32:01.123456Z", "event": "XMPP_IN", "from_jid": "user@example.com", "allowed": true, "body": "hello", "body_len": 5, "routed_to": "session"}
 ```
 
-Audited events: `BRIDGE_START`, `BRIDGE_STOP`, `XMPP_IN`, `XMPP_REJECTED`, `TOKEN_REJECTED`, `SESSION_REGISTERED`, `SESSION_REPLACED`, `SESSION_LIMIT_HIT`, `SESSION_UNREGISTERED`, `TERMINAL_SEND`, `TERMINAL_SEND_FAILED`, `ASK_QUEUED`, `ASK_ANSWERED`, `ASK_TIMEOUT`, `SOCKET_CMD`.
+Audited events: `BRIDGE_START`, `BRIDGE_STOP`, `XMPP_IN`, `XMPP_REJECTED`, `TOKEN_REJECTED`, `SESSION_REGISTERED`, `SESSION_REPLACED`, `SESSION_LIMIT_HIT`, `SESSION_UNREGISTERED`, `SESSION_EXPIRED`, `SESSION_STATE`, `TERMINAL_SEND`, `TERMINAL_SEND_FAILED`, `ASK_QUEUED`, `ASK_ANSWERED`, `ASK_TIMEOUT`, `RELAY_SENT`, `RELAY_FAILED`, `BROADCAST_SENT`, `MCP_SEND`, `MCP_BROADCAST`, `MCP_RECEIVE`, `SOCKET_CMD`.
 
 ## Usage
 
@@ -184,7 +187,7 @@ Send these from your Jabber client to the bot:
 
 | Command | Description |
 |---------|-------------|
-| `/list` or `/l` | List active sessions |
+| `/list` or `/l` | List active sessions with state (`⏸` idle / `▶` running) and plugin version |
 | `/N message` | Send message to session #N |
 | `/help` | Show help |
 | _plain text_ | Send to last active session |
@@ -209,6 +212,11 @@ claude-xmpp-client send "Hello"
 claude-xmpp-client register '{"session_id":"abc","sty":"12345.pts-0","window":"0","project":"/home/user/project","backend":"screen"}'
 claude-xmpp-client unregister abc
 claude-xmpp-client notify '{"session_id":"abc","message":"Task completed"}'
+claude-xmpp-client ping                             # exit 0 if bridge is running, 1 otherwise
+claude-xmpp-client list                             # list all registered sessions as JSON
+claude-xmpp-client relay --to SESSION_ID "message"  # send message to a specific session
+claude-xmpp-client broadcast --session-id SELF_ID "message"  # send to all other sessions
+claude-xmpp-client state '{"session_id":"abc","state":"idle"}'  # report agent state
 ```
 
 ### systemd service
@@ -217,6 +225,51 @@ claude-xmpp-client notify '{"session_id":"abc","message":"Task completed"}'
 cp examples/systemd/claude-xmpp-bridge.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now claude-xmpp-bridge
+```
+
+## Inter-agent Communication
+
+Multiple AI agents running in different sessions can communicate with each other through the bridge. All inter-agent traffic is forwarded to the human observer's XMPP client.
+
+### Socket protocol
+
+```bash
+# Send a message to one specific session (by session_id, index, or project path prefix)
+claude-xmpp-client relay --to SESSION_ID "message"
+
+# Send a message to all other sessions
+claude-xmpp-client broadcast --session-id MY_SESSION_ID "message"
+
+# List all registered sessions (returns JSON)
+claude-xmpp-client list
+
+# Report agent state (idle / running)
+claude-xmpp-client state '{"session_id":"abc","state":"idle"}'
+```
+
+### MCP server (port 7878)
+
+The bridge also exposes an HTTP MCP server on port 7878 (streamable-HTTP transport). Agents with MCP tool access can use it without any shell commands:
+
+| Tool | Description |
+|------|-------------|
+| `send_message(to, message, screen=True)` | Deliver a message to a session; `screen=False` enqueues to inbox only |
+| `broadcast_message(message, sender_session_id)` | Deliver to all sessions except sender |
+| `receive_messages(session_id)` | Drain inbox — returns messages sent to this session |
+| `list_sessions()` | Enumerate all sessions with metadata, state, and plugin version |
+
+Configure the MCP port:
+
+```toml
+# config.toml
+mcp_port = 7878   # set to 0 to disable
+```
+
+Or via CLI / env:
+
+```bash
+claude-xmpp-bridge --mcp-port 7878
+CLAUDE_XMPP_MCP_PORT=7878 claude-xmpp-bridge
 ```
 
 ## Claude Code Integration
@@ -303,10 +356,12 @@ Each hook receives JSON on stdin. Here are the fields available per event:
 
 See [`examples/opencode/`](examples/opencode/) for an OpenCode plugin that provides the same functionality as the Claude Code hooks:
 
-- Renames the GNU Screen window to `🧠<project>` on startup
+- Renames the GNU Screen/tmux window to `🧠<project>` on startup
 - Registers/unregisters sessions automatically
 - Sends last assistant message via XMPP on `session.idle`
-- Blocking permission approval via XMPP (`permission.ask`)
+- Sends informative XMPP notification when AI requests permission (`permission.asked`) — approval still happens in the TUI
+- Reports agent state (`idle`/`running`) to the bridge for `/list` display
+- Polls MCP inbox on `session.idle` and every 30 s — injects pending inter-agent messages into the session
 
 ### Install
 
@@ -340,7 +395,7 @@ Claude Code and OpenCode sessions in the **same project directory coexist** — 
 
 ### Session registration payload
 
-The OpenCode plugin registers sessions with `source: "opencode"`:
+The OpenCode plugin registers sessions with `source: "opencode"` and reports its plugin version:
 
 ```json
 {
@@ -349,7 +404,8 @@ The OpenCode plugin registers sessions with `source: "opencode"`:
   "window": "0",
   "project": "/home/user/project",
   "backend": "screen",
-  "source": "opencode"
+  "source": "opencode",
+  "plugin_version": "0.7.4"
 }
 ```
 

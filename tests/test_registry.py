@@ -541,3 +541,173 @@ def test_reregister_new_sid_inherits_position(db_path):
         assert abs(info["registered_at"] - old_time) < 0.001
     finally:
         reg.close()
+
+
+# ---------------------------------------------------------------------------
+# 13. plugin_version field
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_version_stored_and_retrieved(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("pv-sess", "", "", "/proj", plugin_version="0.7.4")
+        info = reg.get("pv-sess")
+        assert info is not None
+        assert info["plugin_version"] == "0.7.4"
+    finally:
+        reg.close()
+
+
+def test_plugin_version_defaults_to_none(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("no-pv-sess", "", "", "/proj")
+        info = reg.get("no-pv-sess")
+        assert info is not None
+        assert info["plugin_version"] is None
+    finally:
+        reg.close()
+
+
+def test_plugin_version_persists_across_restart(db_path):
+    reg1 = SessionRegistry(db_path)
+    try:
+        reg1.register("pv-sess", "", "", "/proj", plugin_version="0.7.4")
+    finally:
+        reg1.close()
+
+    reg2 = SessionRegistry(db_path)
+    try:
+        info = reg2.get("pv-sess")
+        assert info is not None
+        assert info["plugin_version"] == "0.7.4"
+    finally:
+        reg2.close()
+
+
+def test_reregister_updates_plugin_version(db_path):
+    """Re-registering with a new plugin_version should update the field."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("pv-sess", "", "", "/proj", plugin_version="0.7.3")
+        reg.register("pv-sess", "", "", "/proj", plugin_version="0.7.4")
+        info = reg.get("pv-sess")
+        assert info is not None
+        assert info["plugin_version"] == "0.7.4"
+    finally:
+        reg.close()
+
+
+# ---------------------------------------------------------------------------
+# 14. agent_state / update_state
+# ---------------------------------------------------------------------------
+
+
+def test_agent_state_defaults_to_none(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("st-sess", "", "", "/proj")
+        info = reg.get("st-sess")
+        assert info is not None
+        assert info["agent_state"] is None
+    finally:
+        reg.close()
+
+
+def test_update_state_returns_true_for_existing(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("st-sess", "", "", "/proj")
+        result = reg.update_state("st-sess", "idle")
+        assert result is True
+    finally:
+        reg.close()
+
+
+def test_update_state_returns_false_for_missing(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        result = reg.update_state("nonexistent", "idle")
+        assert result is False
+    finally:
+        reg.close()
+
+
+def test_update_state_value_reflected_in_get(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("st-sess", "", "", "/proj")
+        reg.update_state("st-sess", "running")
+        info = reg.get("st-sess")
+        assert info is not None
+        assert info["agent_state"] == "running"
+    finally:
+        reg.close()
+
+
+def test_update_state_persists_across_restart(db_path):
+    reg1 = SessionRegistry(db_path)
+    try:
+        reg1.register("st-sess", "", "", "/proj")
+        reg1.update_state("st-sess", "idle")
+    finally:
+        reg1.close()
+
+    reg2 = SessionRegistry(db_path)
+    try:
+        info = reg2.get("st-sess")
+        assert info is not None
+        assert info["agent_state"] == "idle"
+    finally:
+        reg2.close()
+
+
+def test_reregister_preserves_agent_state(db_path):
+    """Re-registering must not reset agent_state — agent may be running."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("st-sess", "", "", "/proj")
+        reg.update_state("st-sess", "running")
+        reg.register("st-sess", "", "", "/proj")  # re-register
+        info = reg.get("st-sess")
+        assert info is not None
+        assert info["agent_state"] == "running"
+    finally:
+        reg.close()
+
+
+def test_schema_migration_adds_plugin_version_and_agent_state(db_path):
+    """Old DB without plugin_version/agent_state columns should be migrated."""
+    import sqlite3
+
+    # Create a DB that already has source but not the new columns
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE sessions ("
+        "  session_id TEXT PRIMARY KEY,"
+        "  sty TEXT, window TEXT, project TEXT, backend TEXT, source TEXT, registered_at REAL"
+        ")"
+    )
+    conn.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("legacy-sess", "", "", "/old/project", None, None, 1000.0),
+    )
+    conn.commit()
+    conn.close()
+
+    # Registry must migrate transparently
+    reg = SessionRegistry(db_path)
+    try:
+        info = reg.get("legacy-sess")
+        assert info is not None
+        assert info["plugin_version"] is None
+        assert info["agent_state"] is None
+
+        # New fields are writable after migration
+        reg.update_state("legacy-sess", "idle")
+        assert reg.get("legacy-sess")["agent_state"] == "idle"  # type: ignore[index]
+    finally:
+        reg.close()

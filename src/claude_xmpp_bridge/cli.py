@@ -138,6 +138,14 @@ def client_main() -> None:
     p_broadcast.add_argument("message", nargs="*", help="Message text (reads stdin if omitted)")
     p_broadcast.add_argument("--session-id", default=None, help="Sender session ID (excluded from delivery)")
 
+    # state
+    p_state = sub.add_parser(
+        "state",
+        help="Update agent state for a registered session",
+        epilog='JSON: {"session_id":"…","state":"idle|running"}',
+    )
+    p_state.add_argument("json_data", help="State JSON data")
+
     args = parser.parse_args()
 
     from .client import fallback_notify, send_to_bridge
@@ -273,6 +281,14 @@ def client_main() -> None:
         else:
             delivered = result.get("delivered", 0)
             print(f"broadcast delivered to {delivered} session(s)")
+
+    elif args.command == "state":
+        data = _parse_json_arg(args.json_data)
+        data["cmd"] = "state"
+        result = send_to_bridge(data, socket_path)
+        if result is not None and "error" in result:
+            print(f"Error: {result['error']}", file=sys.stderr)
+            sys.exit(1)
 
     else:
         parser.print_help()

@@ -7,9 +7,16 @@
  *  - session.created          → registrace nové top-level session (při /new)
  *  - session.deleted          → odhlásí session z bridge
  *  - session.idle             → titul 🧠❓projekt + XMPP notifikace s poslední odpovědí
+ *                               + okamžitý MCP inbox poll
  *  - session.status (running) → titul 🧠projekt
  *  - permission.asked         → informativní XMPP notifikace (co se chystá spustit); potvrzení přes TUI
  *  - server.instance.disposed → unregister + obnova původního screen titulu
+ *
+ * MCP inbox polling:
+ *   - Při session.idle: okamžitý poll
+ *   - Každých 30 s (IDLE_POLL_INTERVAL_MS): periodický poll, pouze pokud je agent idle.
+ *     Zajišťuje doručení zpráv bez nutnosti "probudit" agenta dalším dotazem.
+ *     Platí pouze pro screen sessions (STY musí být nastaveno).
  *
  * Zapínání/vypínání:
  *   touch ~/.config/xmpp-notify/notify-enabled   # notifikace (idle)
@@ -27,6 +34,8 @@ function shortPath(dir) {
 }
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
+  const PLUGIN_VERSION = "0.7.4"
+
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
     ? "screen"
@@ -55,6 +64,81 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
   // Mapa opencode_id → bridge_id pro session.deleted handler
   const ocToBridge = new Map()
+
+  // ---------------------------------------------------------------------------
+  // Idle polling state
+  // ---------------------------------------------------------------------------
+  const IDLE_POLL_INTERVAL_MS = 30_000
+  let isIdle = false
+  let pollTimer = null
+
+  // ---------------------------------------------------------------------------
+  // pollInbox(): zkontroluje MCP inbox a doručí čekající zprávy do terminálu.
+  // Volá se okamžitě při session.idle a periodicky každých 30s pokud isIdle.
+  // Funguje jen pro screen sessions (STY musí být nastaveno).
+  // ---------------------------------------------------------------------------
+  const dbg = (msg) => client.app.log({ body: { service: "xmpp-bridge", level: "info", message: msg } }).catch(() => {})
+
+  const pollInbox = async () => {
+    if (!registeredSessionID || !STY) return
+    try {
+      // Step 1: initialize — get mcp-session-id
+      const initRes = await fetch("http://127.0.0.1:7878/mcp", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1, method: "initialize",
+          params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "opencode-plugin", version: "1.0" } },
+        }),
+      }).catch((e) => { dbg("MCP init fetch error: " + e); return null })
+
+      const mcpSessionId = initRes?.headers?.get("mcp-session-id")
+      await dbg("MCP init status=" + initRes?.status + " mcp-session-id=" + mcpSessionId)
+      if (!mcpSessionId) throw new Error("no mcp-session-id")
+
+      // Step 2: tools/call with session header
+      const mcpRes = await fetch("http://127.0.0.1:7878/mcp", {
+        method:  "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "Mcp-Session-Id": mcpSessionId,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id:      2,
+          method:  "tools/call",
+          params:  {
+            name:      "receive_messages",
+            arguments: { session_id: registeredSessionID },
+          },
+        }),
+      }).catch((e) => { dbg("MCP tools/call fetch error: " + e); return null })
+
+      await dbg("MCP tools/call status=" + mcpRes?.status + " ok=" + mcpRes?.ok)
+      if (mcpRes && mcpRes.ok) {
+        const text = await mcpRes.text().catch(() => null)
+        const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
+        const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null
+        await dbg("MCP body contentItems=" + JSON.stringify(body?.result?.content))
+        // receive_messages returns each message as a separate content item (type=text)
+        const contentItems = body?.result?.content
+        if (Array.isArray(contentItems) && contentItems.length > 0) {
+          for (const item of contentItems) {
+            const msg = item?.text
+            if (msg) {
+              await dbg("relaying msg to " + registeredSessionID + ": " + msg.slice(0, 80))
+              // Inject into session via screen stuff (same mechanism as socket relay)
+              const relayRes = await $`claude-xmpp-client relay --to ${registeredSessionID} ${msg}`.nothrow()
+              await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
+            }
+          }
+        }
+      }
+    } catch (err) {
+      await dbg("MCP poll error: " + err)
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Pomocník pro nastavení titulu okna.
@@ -108,15 +192,26 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       ocToBridge.set(active.id, bid)
 
       const reg = JSON.stringify({
-        session_id: bid,
-        sty:        STY,
-        window:     WINDOW,
-        project:    active.directory,
-        backend:    BACKEND,
-        source:     "opencode",
+        session_id:     bid,
+        sty:            STY,
+        window:         WINDOW,
+        project:        active.directory,
+        backend:        BACKEND,
+        source:         "opencode",
+        plugin_version: PLUGIN_VERSION,
       })
       await $`claude-xmpp-client register ${reg}`.nothrow()
       await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${active.directory}`.nothrow()
+      // Report initial state (agent is idle at startup)
+      await $`claude-xmpp-client state ${JSON.stringify({session_id: bid, state: "idle"})}`.nothrow()
+
+      // Spustit periodický inbox polling po registraci
+      if (STY && !pollTimer) {
+        isIdle = true  // agent je při startu idle (čeká na vstup)
+        pollTimer = setInterval(async () => {
+          if (isIdle) await pollInbox()
+        }, IDLE_POLL_INTERVAL_MS)
+      }
     } catch (_) {
       // Bridge neběží nebo session list selhal — tiše přeskočit
     }
@@ -130,6 +225,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
       // --- SERVER INSTANCE DISPOSED: OpenCode se ukončuje ---
       if (event.type === "server.instance.disposed") {
+        isIdle = false
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
         if (registeredSessionID) {
           await $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow()
           await $`claude-xmpp-client unregister ${registeredSessionID}`.nothrow()
@@ -150,15 +247,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
         const bid = bridgeID(info.id)
         const reg = JSON.stringify({
-          session_id: bid,
-          sty:        STY,
-          window:     WINDOW,
-          project:    info.directory,
-          backend:    BACKEND,
-          source:     "opencode",
+          session_id:     bid,
+          sty:            STY,
+          window:         WINDOW,
+          project:        info.directory,
+          backend:        BACKEND,
+          source:         "opencode",
+          plugin_version: PLUGIN_VERSION,
         })
         await $`claude-xmpp-client register ${reg}`.nothrow()
         await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${info.directory}`.nothrow()
+        await $`claude-xmpp-client state ${JSON.stringify({session_id: bid, state: "idle"})}`.nothrow()
         registeredSessionID = bid
         ocToBridge.set(info.id, bid)
         return
@@ -179,15 +278,23 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       if (event.type === "session.status") {
         const status = event.properties.status
         if (status === "running") {
+          isIdle = false
           await setTitle("🧠" + projectName)
+          if (registeredSessionID) {
+            await $`claude-xmpp-client state ${JSON.stringify({session_id: registeredSessionID, state: "running"})}`.nothrow()
+          }
         }
         return
       }
 
       // --- SESSION IDLE: titul ⌨ + XMPP notifikace + MCP inbox poll ---
       if (event.type === "session.idle") {
+        isIdle = true
         // Titul: přepnout na 🧠❓ (čeká na vstup)
         await setTitle("🧠❓" + projectName)
+        if (registeredSessionID) {
+          await $`claude-xmpp-client state ${JSON.stringify({session_id: registeredSessionID, state: "idle"})}`.nothrow()
+        }
 
         const sessionID = event.properties.sessionID
 
@@ -195,69 +302,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         // Calls the xmpp-bridge MCP tool receive_messages() to drain any messages
         // that other agents sent via send_message() or broadcast_message().
         // Each pending message is injected into this session via screen relay.
-        // MCP streamable-http requires: 1) POST initialize → get mcp-session-id header
-        //                               2) POST tools/call with that header
-        const dbg = (msg) => client.app.log({ body: { service: "xmpp-bridge", level: "info", message: msg } }).catch(() => {})
         await dbg("session.idle fired — registeredSessionID=" + registeredSessionID + " STY=" + STY + " WINDOW=" + WINDOW)
-        if (registeredSessionID && STY) {
-          try {
-            // Step 1: initialize — get mcp-session-id
-            const initRes = await fetch("http://127.0.0.1:7878/mcp", {
-              method:  "POST",
-              headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
-              body: JSON.stringify({
-                jsonrpc: "2.0", id: 1, method: "initialize",
-                params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "opencode-plugin", version: "1.0" } },
-              }),
-            }).catch((e) => { dbg("MCP init fetch error: " + e); return null })
-
-            const mcpSessionId = initRes?.headers?.get("mcp-session-id")
-            await dbg("MCP init status=" + initRes?.status + " mcp-session-id=" + mcpSessionId)
-            if (!mcpSessionId) throw new Error("no mcp-session-id")
-
-            // Step 2: tools/call with session header
-            const mcpRes = await fetch("http://127.0.0.1:7878/mcp", {
-              method:  "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "Mcp-Session-Id": mcpSessionId,
-              },
-              body: JSON.stringify({
-                jsonrpc: "2.0",
-                id:      2,
-                method:  "tools/call",
-                params:  {
-                  name:      "receive_messages",
-                  arguments: { session_id: registeredSessionID },
-                },
-              }),
-            }).catch((e) => { dbg("MCP tools/call fetch error: " + e); return null })
-
-            await dbg("MCP tools/call status=" + mcpRes?.status + " ok=" + mcpRes?.ok)
-            if (mcpRes && mcpRes.ok) {
-              const text = await mcpRes.text().catch(() => null)
-              const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
-              const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null
-              await dbg("MCP body contentItems=" + JSON.stringify(body?.result?.content))
-              // receive_messages returns each message as a separate content item (type=text)
-              const contentItems = body?.result?.content
-              if (Array.isArray(contentItems) && contentItems.length > 0) {
-                for (const item of contentItems) {
-                  const msg = item?.text
-                  if (msg) {
-                    await dbg("relaying msg to " + registeredSessionID + ": " + msg.slice(0, 80))
-                     // Inject into session via screen stuff (same mechanism as socket relay)
-                     const relayRes = await $`claude-xmpp-client relay --to ${registeredSessionID} ${msg}`.nothrow()
-                     await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
-                  }
-                }
-              }
-            }
-          } catch (err) {
-            await dbg("MCP poll error: " + err)
-          }
-        }
+        await pollInbox()
 
         const notifyEnabled =
           await $`test -f ${process.env.HOME}/.config/xmpp-notify/notify-enabled`.nothrow()

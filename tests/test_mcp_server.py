@@ -26,6 +26,8 @@ def _make_session_info(
     sty: str = "12345.pts-0.host",
     window: str = "1",
     source: str = "opencode",
+    plugin_version: str | None = None,
+    agent_state: str | None = None,
 ) -> dict:
     return {
         "project": project,
@@ -34,6 +36,8 @@ def _make_session_info(
         "window": window,
         "source": source,
         "registered_at": 1_000_000.0,
+        "plugin_version": plugin_version,
+        "agent_state": agent_state,
     }
 
 
@@ -332,6 +336,32 @@ class TestListSessionsTool:
         server._bridge = _make_bridge(sessions=sessions)
         result = server._tool_list_sessions()
         assert result[0]["backend"] == "null"
+
+    def test_list_session_fields_includes_plugin_version(self, server: BridgeMCPServer):
+        sessions = {"ses_X": _make_session_info(plugin_version="0.7.4")}
+        server._bridge = _make_bridge(sessions=sessions)
+        result = server._tool_list_sessions()
+        assert "plugin_version" in result[0]
+        assert result[0]["plugin_version"] == "0.7.4"
+
+    def test_list_session_fields_includes_agent_state(self, server: BridgeMCPServer):
+        sessions = {"ses_X": _make_session_info(agent_state="idle")}
+        server._bridge = _make_bridge(sessions=sessions)
+        result = server._tool_list_sessions()
+        assert "agent_state" in result[0]
+        assert result[0]["agent_state"] == "idle"
+
+    def test_list_plugin_version_none_returns_empty_string(self, server: BridgeMCPServer):
+        sessions = {"ses_X": _make_session_info(plugin_version=None)}
+        server._bridge = _make_bridge(sessions=sessions)
+        result = server._tool_list_sessions()
+        assert result[0]["plugin_version"] == ""
+
+    def test_list_agent_state_none_returns_empty_string(self, server: BridgeMCPServer):
+        sessions = {"ses_X": _make_session_info(agent_state=None)}
+        server._bridge = _make_bridge(sessions=sessions)
+        result = server._tool_list_sessions()
+        assert result[0]["agent_state"] == ""
 
 
 # ---------------------------------------------------------------------------

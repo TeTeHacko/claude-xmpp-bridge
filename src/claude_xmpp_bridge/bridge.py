@@ -152,7 +152,15 @@ class XMPPBridge:
             else:
                 tag = f"[{icon}{self.messages.read_only_tag}]"
             project = info["project"]
-            lines.append(f"  /{i} {self._short_path(project)} {tag}{marker}")
+            state = info.get("agent_state") or ""
+            version = info.get("plugin_version") or ""
+            meta = ""
+            if state:
+                state_icon = "⏸" if state == "idle" else "▶" if state == "running" else state
+                meta += f" {state_icon}"
+            if version:
+                meta += f" v{version}"
+            lines.append(f"  /{i} {self._short_path(project)} {tag}{meta}{marker}")
         lines.append(f"\n{self.messages.active_marker}")
         self._xmpp_send("\n".join(lines))
 
@@ -457,6 +465,8 @@ class XMPPBridge:
             response = self._handle_register(req)
         elif cmd == "unregister":
             response = self._handle_unregister(req)
+        elif cmd == "state":
+            response = self._handle_state(req)
         elif cmd == "send":
             message = str(req.get("message", ""))
             if message:
@@ -528,6 +538,9 @@ class XMPPBridge:
             if source is not None and len(source) > MAX_SOURCE_LEN:
                 return {"error": f"source too long (max {MAX_SOURCE_LEN} chars)"}
 
+            plugin_version_raw = req.get("plugin_version")
+            plugin_version = str(plugin_version_raw) if plugin_version_raw is not None else None
+
             # Deduplicate: remove old sessions occupying the same multiplexer slot (sty+window
             # for screen, or sty/pane for tmux). This handles restarts inside the same terminal
             # window without accumulating ghost entries.
@@ -577,6 +590,7 @@ class XMPPBridge:
                 backend=backend,
                 source=source,
                 registered_at=inherited_registered_at,
+                plugin_version=plugin_version,
             )
             self.audit.log(
                 "SESSION_REGISTERED",
@@ -605,6 +619,25 @@ class XMPPBridge:
             session_id=sid_str,
             project=info["project"] if info else None,
         )
+        return {"ok": True}
+
+    def _handle_state(self, req: dict[str, object]) -> dict[str, object]:
+        """Update the agent_state for a registered session.
+
+        Protocol fields:
+          - ``session_id`` : session to update (required)
+          - ``state``      : new state string, e.g. "idle" or "running" (required)
+        """
+        sid = str(req.get("session_id", ""))
+        if not sid:
+            return {"error": "missing session_id"}
+        state = str(req.get("state", ""))
+        if not state:
+            return {"error": "missing state"}
+        updated = self.registry.update_state(sid, state)
+        if not updated:
+            return {"error": f"session not found: {sid}"}
+        self.audit.log("SESSION_STATE", session_id=sid, state=state)
         return {"ok": True}
 
     def _handle_response(self, req: dict[str, object]) -> dict[str, object]:
@@ -836,6 +869,8 @@ class XMPPBridge:
                     "window": info["window"],
                     "source": info.get("source"),
                     "registered_at": info["registered_at"],
+                    "plugin_version": info.get("plugin_version"),
+                    "agent_state": info.get("agent_state"),
                 }
             )
         return {"ok": True, "sessions": result}

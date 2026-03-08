@@ -26,6 +26,8 @@ class SessionInfo(TypedDict):
     backend: str | None
     source: str | None  # "opencode", None = Claude Code
     registered_at: float
+    plugin_version: str | None  # version string sent by plugin on register
+    agent_state: str | None  # last known state: "idle", "running", etc.
 
 
 def _validate_session_id(session_id: str) -> None:
@@ -67,26 +69,33 @@ class SessionRegistry:
             ")"
         )
         self._db.commit()
-        # Migration: add source column for existing databases that predate this field
+        # Migrations: add columns for existing databases that predate these fields
         cols = {row[1] for row in self._db.execute("PRAGMA table_info(sessions)")}
         if "source" not in cols:
             self._db.execute("ALTER TABLE sessions ADD COLUMN source TEXT")
-            self._db.commit()
+        if "plugin_version" not in cols:
+            self._db.execute("ALTER TABLE sessions ADD COLUMN plugin_version TEXT")
+        if "agent_state" not in cols:
+            self._db.execute("ALTER TABLE sessions ADD COLUMN agent_state TEXT")
+        self._db.commit()
         self._load_from_db()
 
     def _load_from_db(self) -> None:
         """Load sessions and state from SQLite on startup."""
         for row in self._db.execute(
-            "SELECT session_id, sty, window, project, backend, source, registered_at FROM sessions"
+            "SELECT session_id, sty, window, project, backend, source, registered_at,"
+            "       plugin_version, agent_state FROM sessions"
         ):
-            self.sessions[row[0]] = {
-                "sty": row[1],
-                "window": row[2],
-                "project": row[3],
-                "backend": row[4],
-                "source": row[5],
-                "registered_at": row[6],
-            }
+            self.sessions[row[0]] = SessionInfo(
+                sty=row[1] or "",
+                window=row[2] or "",
+                project=row[3] or "",
+                backend=row[4],
+                source=row[5],
+                registered_at=float(row[6]),
+                plugin_version=row[7],
+                agent_state=row[8],
+            )
         row = self._db.execute("SELECT value FROM state WHERE key = 'last_active'").fetchone()
         if row and row[0] in self.sessions:
             self.last_active = row[0]
@@ -95,8 +104,9 @@ class SessionRegistry:
     def _save_session(self, session_id: str) -> None:
         info = self.sessions[session_id]
         self._db.execute(
-            "INSERT OR REPLACE INTO sessions (session_id, sty, window, project, backend, source, registered_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO sessions"
+            " (session_id, sty, window, project, backend, source, registered_at, plugin_version, agent_state)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 info["sty"],
@@ -105,6 +115,8 @@ class SessionRegistry:
                 info["backend"],
                 info["source"],
                 info["registered_at"],
+                info.get("plugin_version"),
+                info.get("agent_state"),
             ),
         )
         self._save_last_active()
@@ -130,6 +142,7 @@ class SessionRegistry:
         backend: str | None = None,
         source: str | None = None,
         registered_at: float | None = None,
+        plugin_version: str | None = None,
     ) -> None:
         """Register a new session. Validates all inputs.
 
@@ -141,14 +154,18 @@ class SessionRegistry:
         _validate_window(window)
 
         is_reregister = session_id in self.sessions
-        self.sessions[session_id] = {
-            "sty": sty,
-            "window": window,
-            "project": project,
-            "backend": backend,
-            "source": source,
-            "registered_at": registered_at if registered_at is not None else time.time(),
-        }
+        # Preserve agent_state on re-register so a running agent doesn't lose its state.
+        prev_state = self.sessions[session_id].get("agent_state") if is_reregister else None
+        self.sessions[session_id] = SessionInfo(
+            sty=sty,
+            window=window,
+            project=project,
+            backend=backend,
+            source=source,
+            registered_at=registered_at if registered_at is not None else time.time(),
+            plugin_version=plugin_version,
+            agent_state=prev_state,
+        )
         # Don't flip last_active when the same session re-registers — it would
         # hijack plain-text routing away from whatever the user targeted last.
         if not is_reregister:
@@ -196,6 +213,23 @@ class SessionRegistry:
             self.last_active = session_id
             self._save_last_active()
             self._db.commit()
+
+    def update_state(self, session_id: str, state: str) -> bool:
+        """Update the agent_state field for a registered session.
+
+        Returns True if the session exists and was updated, False otherwise.
+        """
+        info = self.sessions.get(session_id)
+        if info is None:
+            return False
+        info["agent_state"] = state
+        self._db.execute(
+            "UPDATE sessions SET agent_state = ? WHERE session_id = ?",
+            (state, session_id),
+        )
+        self._db.commit()
+        log.debug("State update: %s → %s", session_id, state)
+        return True
 
     def get_active(self) -> tuple[str | None, SessionInfo | None]:
         """Get the active session."""
