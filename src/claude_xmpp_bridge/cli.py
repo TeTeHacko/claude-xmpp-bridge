@@ -116,6 +116,12 @@ def client_main() -> None:
     p_query = sub.add_parser("query", help="Query registered project for a session")
     p_query.add_argument("session_id", help="Session ID")
 
+    # list
+    sub.add_parser(
+        "list",
+        help="List all registered sessions as JSON",
+    )
+
     # ping
     sub.add_parser("ping", help="Check if bridge daemon is running (exit 0 = running)")
 
@@ -218,6 +224,16 @@ def client_main() -> None:
         if result and result.get("ok"):
             print(result["project"])
         else:
+            sys.exit(1)
+
+    elif args.command == "list":
+        result = send_to_bridge({"cmd": "list"}, socket_path)
+        if result and result.get("ok"):
+            import json as _json
+
+            print(_json.dumps(result["sessions"]))
+        else:
+            print("Error: bridge not running or list failed", file=sys.stderr)
             sys.exit(1)
 
     elif args.command == "ping":

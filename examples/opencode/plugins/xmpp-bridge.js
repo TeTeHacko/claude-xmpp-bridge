@@ -34,7 +34,7 @@ function shortPath(dir) {
 }
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.5"
+  const PLUGIN_VERSION = "0.7.6"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -210,7 +210,34 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       )[0]
       if (!active) return
 
-      const bid = bridgeID(active.id)
+      // ---------------------------------------------------------------------------
+      // Zjistit zda bridge již zná session pro toto sty+window.
+      // Pokud ano, přijmeme tu identitu místo abychom zaregistrovali duplicitu.
+      // Případ: dvě OpenCode instance ve stejném projektu sdílejí opencodeID —
+      // každá musí skončit pod svým _wN suffixem. Bridge je pravda o tom, který
+      // window má jaké session_id.
+      // ---------------------------------------------------------------------------
+      let bid = bridgeID(active.id)
+      if (STY) {
+        const listRes = await $`claude-xmpp-client list`.nothrow()
+        if (listRes.exitCode === 0 && listRes.stdout) {
+          try {
+            const sessions = JSON.parse(listRes.stdout)
+            const existing = sessions.find(
+              s => s.sty === STY && s.window === WINDOW
+            )
+            if (existing) {
+              // Bridge už zná session pro naše sty+window — přijmeme tu identitu.
+              // Tím se vyhneme přepsání správně registrované session jiným agentem.
+              bid = existing.session_id
+              await dbg(`reusing existing bridge session for w${WINDOW}: ${bid}`)
+            }
+          } catch (_) {
+            // JSON parse selhal — pokračovat se standardní registrací
+          }
+        }
+      }
+
       registeredSessionID = bid
       ocToBridge.set(active.id, bid)
 
