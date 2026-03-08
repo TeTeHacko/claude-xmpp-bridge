@@ -247,9 +247,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
                   const msg = item?.text
                   if (msg) {
                     await dbg("relaying msg to " + registeredSessionID + ": " + msg.slice(0, 80))
-                    // Inject into session via screen stuff (same mechanism as socket relay)
-                    const reg = JSON.stringify({ session_id: registeredSessionID, message: msg })
-                    await $`claude-xmpp-client relay ${reg}`.nothrow()
+                     // Inject into session via screen stuff (same mechanism as socket relay)
+                     const relayRes = await $`claude-xmpp-client relay --to ${registeredSessionID} ${msg}`.nothrow()
+                     await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
                   }
                 }
               }
