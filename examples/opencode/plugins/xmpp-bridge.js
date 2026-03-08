@@ -28,7 +28,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.11"
+  const PLUGIN_VERSION = "0.7.12"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -371,9 +371,11 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       }
 
       // --- SESSION STATUS: indikace stavu v titulu ---
+      // session.status.type je objekt: { type: "busy" } nebo { type: "idle" }
+      // "busy" = model generuje výstup; "idle" je pokryto session.idle eventem
       if (event.type === "session.status") {
-        const status = event.properties.status
-        if (status === "running") {
+        const statusType = event.properties.status?.type
+        if (statusType === "busy") {
           isIdle = false
           await setTitle("🧠🔵" + projectName)
           if (registeredSessionID) {
