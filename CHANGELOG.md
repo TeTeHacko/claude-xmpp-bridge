@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.13] - 2026-03-08
+
+### Fixed
+- OpenCode plugin: `permission.asked` handler now correctly checks
+  `ask-enabled` switch instead of `notify-enabled`
+
+### Changed
+- OpenCode plugin: window title uses traffic-light emoji for consistent
+  visual width (all fullwidth emoji, no layout shift):
+  - `🧠🟢 project` — idle (was `🧠⏸`)
+  - `🧠🔵 project` — running (was `🧠▶`)
+  - `🧠🔴 project` — requires interaction / permission dialog (was `🧠❓`)
+- Plugin header comment updated with traffic-light legend and correct
+  switch file names (`notify-enabled` / `ask-enabled`)
+
+## [0.7.12] - 2026-03-08
+
+### Changed
+- OpenCode plugin: window title uses two-icon scheme to distinguish states:
+  - `🧠⏸ project` — idle
+  - `🧠▶ project` — running
+  - `🧠❓ project` — requires interaction (permission dialog)
+  Previously `🧠❓` was used for both idle and permission states.
+
+## [0.7.11] - 2026-03-08
+
+### Fixed
+- `rawRelay()`: add `--` separator before message argument so messages
+  starting with `-` are not parsed as CLI flags by `claude-xmpp-client`
+- `rawRelay()`: change `stdout:"pipe"` to `stdout:"ignore"` to prevent
+  pipe-buffer deadlock if the subprocess emits large stdout output
+
+### Added
+- `tests/test_multiplexer.py`: 9 unit tests for `_screen_stuff_escape()`
+
+## [0.7.10] - 2026-03-08
+
+### Fixed
+- OpenCode plugin: read `$WINDOW` from `/proc/${process.ppid}/environ`
+  instead of `process.env.WINDOW`; the latter can be inherited from a
+  wrong context when multiple OpenCode instances share a Screen session
+- OpenCode plugin: export `BRIDGE_SESSION_ID`, `BRIDGE_WINDOW`, `WINDOW`
+  to `process.env` after registration so agent bash tools can discover
+  their own identity without querying the bridge
+- OpenCode plugin: replace bun shell template `$\`claude-xmpp-client relay…\``
+  with `Bun.spawn()` in `rawRelay()` — bun shell was interpreting `|`,
+  `'`, `>` in message content as shell metacharacters, corrupting messages
+- Multiplexer: add `_screen_stuff_escape()` — escapes `$` → `\$` and
+  `\` → `\\` so GNU Screen's `stuff` command does not expand environment
+  variables in message text
+- Bridge: `_handle_list()` now includes `sty` field in each session entry
+  (was missing; plugin compared `s.sty === STY` but `s.sty` was always `undefined`)
+- OpenCode plugin: add `polling` guard flag to prevent concurrent `pollInbox()`
+  execution (race between `session.idle` handler and `setInterval` callback)
+
+### Removed
+- OpenCode plugin: dead function `shortPath()` (unused since v0.7.0)
+
+## [0.7.9] - 2026-03-08
+
+### Fixed
+- OpenCode plugin: resolve window identity by querying bridge at startup
+  instead of relying solely on `process.env.WINDOW`
+
+## [0.7.8] - 2026-03-08
+
+### Changed
+- Bridge + MCP server: unified inter-agent XMPP notification format —
+  robot icon prefix `🤖 sender ──mode──▶ target\n  msg`
+
+## [0.7.7] - 2026-03-08
+
+### Added
+- Nudge pattern for inter-agent messaging: `send_message(nudge=true)` enqueues
+  the message to the MCP inbox and sends only a bare CR to the terminal,
+  avoiding race conditions where a screen inject arrives while the agent
+  is busy processing tool calls
+
+## [0.7.6] - 2026-03-08
+
+### Added
+- MCP inbox persistence: inbox migrated from in-memory `asyncio.Queue` to
+  SQLite `inbox` table in `bridge.db`; messages survive bridge restarts and
+  session re-registration
+
+### Fixed
+- CLI: added `claude-xmpp-client list` subcommand — outputs all registered
+  sessions as JSON to stdout
+
+## [0.7.5] - 2026-03-08
+
+### Fixed
+- OpenCode plugin: add 1.5 s delay before `pollInbox()` in `session.idle`
+  handler to prevent "assistant message prefill" API error (model was not
+  yet fully in awaiting-input state when inject arrived)
+- MCP/Bridge: `broadcast_message` and `send_message` with `screen=True` no
+  longer double-enqueue into the MCP inbox after a successful screen relay
+  (caused messages to be re-delivered on the next `session.idle` poll)
+
 ## [0.7.4] - 2026-03-08
 
 ### Added

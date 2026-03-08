@@ -2,30 +2,33 @@
  * OpenCode XMPP Bridge Plugin
  *
  * Integrace OpenCode s claude-xmpp-bridge:
- *  - při startu pluginu       → přejmenuje okno na 🧠projekt (ANSI escape)
- *                               + zaregistruje aktivní session (odloženě, po server startu)
+ *  - při startu pluginu       → přejmenuje okno + zaregistruje aktivní session
  *  - session.created          → registrace nové top-level session (při /new)
  *  - session.deleted          → odhlásí session z bridge
- *  - session.idle             → titul 🧠❓projekt + XMPP notifikace s poslední odpovědí
- *                               + okamžitý MCP inbox poll
- *  - session.status (running) → titul 🧠projekt
+ *  - session.idle             → XMPP notifikace s poslední odpovědí + MCP inbox poll
+ *  - session.status (running) → aktualizace titulu
  *  - permission.asked         → informativní XMPP notifikace (co se chystá spustit); potvrzení přes TUI
- *  - server.instance.disposed → unregister + obnova původního screen titulu
+ *  - permission.replied       → aktualizace titulu
+ *  - server.instance.disposed → unregister + reset titulu
+ *
+ * Titulky oken (traffic light stav):
+ *   🧠🟢 projekt  — idle (čeká na vstup, nic nechce)
+ *   🧠🔵 projekt  — running (model generuje výstup nebo pokračuje po permission)
+ *   🧠🔴 projekt  — vyžaduje interakci (permission dialog otevřen v TUI)
  *
  * MCP inbox polling:
  *   - Při session.idle: okamžitý poll
  *   - Každých 30 s (IDLE_POLL_INTERVAL_MS): periodický poll, pouze pokud je agent idle.
- *     Zajišťuje doručení zpráv bez nutnosti "probudit" agenta dalším dotazem.
- *     Platí pouze pro screen sessions (STY musí být nastaveno).
  *
  * Zapínání/vypínání:
- *   touch ~/.config/xmpp-notify/notify-enabled   # notifikace (idle)
+ *   touch ~/.config/xmpp-notify/notify-enabled   # XMPP notifikace při session.idle
+ *   touch ~/.config/xmpp-notify/ask-enabled      # XMPP notifikace při permission.asked
  *
  * Vyžaduje: claude-xmpp-bridge démon + claude-xmpp-client v $PATH
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.10"
+  const PLUGIN_VERSION = "0.7.11"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -218,13 +221,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   // ---------------------------------------------------------------------------
-  // 1. Přejmenovat okno na 🧠⏸projekt při startu (idle — čeká na vstup).
-  //    Stav se mění dle událostí:
-  //      🧠⏸ = idle (session.idle, startup, permission.replied)
-  //      🧠▶ = running (session.status: running)
-  //      🧠❓ = vyžaduje interakci (permission.asked)
+  // 1. Přejmenovat okno při startu — traffic light stav:
+  //      🧠🟢 = idle (startup, session.idle, session.created)
+  //      🧠🔵 = running (session.status: running, permission.replied)
+  //      🧠🔴 = vyžaduje interakci (permission.asked — dialog v TUI)
   // ---------------------------------------------------------------------------
-  await setTitle("🧠⏸" + projectName)
+  await setTitle("🧠🟢" + projectName)
 
   // ---------------------------------------------------------------------------
   // 2. Registrace aktivní session do bridge — ODLOŽENA přes setImmediate()
@@ -336,7 +338,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (info.parentID) return
 
         const name = info.directory.split("/").pop() || info.directory
-        await setTitle("🧠⏸" + name)
+        await setTitle("🧠🟢" + name)
 
         const bid = bridgeID(info.id)
         const reg = JSON.stringify({
@@ -373,7 +375,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const status = event.properties.status
         if (status === "running") {
           isIdle = false
-          await setTitle("🧠▶" + projectName)
+          await setTitle("🧠🔵" + projectName)
           if (registeredSessionID) {
             await $`claude-xmpp-client state ${JSON.stringify({session_id: registeredSessionID, state: "running"})}`.nothrow()
           }
@@ -381,11 +383,11 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- SESSION IDLE: titul 🧠⏸ + XMPP notifikace + MCP inbox poll ---
+      // --- SESSION IDLE: titul 🧠🟢 + XMPP notifikace + MCP inbox poll ---
       if (event.type === "session.idle") {
         isIdle = true
-        // Titul: přepnout na 🧠⏸ (čeká na vstup, bez potřeby interakce)
-        await setTitle("🧠⏸" + projectName)
+        // Titul: přepnout na 🧠🟢 (idle — čeká na vstup, nic nechce)
+        await setTitle("🧠🟢" + projectName)
         if (registeredSessionID) {
           await $`claude-xmpp-client state ${JSON.stringify({session_id: registeredSessionID, state: "idle"})}`.nothrow()
         }
@@ -433,17 +435,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- PERMISSION ASKED: titul 🧠❓ + informativní XMPP notifikace ---
+      // --- PERMISSION ASKED: titul 🧠🔴 + informativní XMPP notifikace ---
       // OpenCode nečeká na výsledek event handlerů — TUI dialog nelze zavřít
       // z pluginu přes permission.asked event. Posíláme tedy jen notifikaci
       // co se chystá spustit; potvrzení musí jít přes TUI.
       if (event.type === "permission.asked") {
-        // Titul: přepnout na 🧠❓ (vyžaduje interakci uživatele — potvrzení v TUI)
-        await setTitle("🧠❓" + projectName)
+        // Titul: přepnout na 🧠🔴 (vyžaduje interakci uživatele — potvrzení v TUI)
+        await setTitle("🧠🔴" + projectName)
 
-        const notifyEnabled =
-          await $`test -f ${process.env.HOME}/.config/xmpp-notify/notify-enabled`.nothrow()
-        if (notifyEnabled.exitCode !== 0) return
+        const askEnabled =
+          await $`test -f ${process.env.HOME}/.config/xmpp-notify/ask-enabled`.nothrow()
+        if (askEnabled.exitCode !== 0) return
 
         const perm = event.properties
         const meta    = perm.metadata ?? {}
@@ -484,9 +486,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- PERMISSION REPLIED: obnovit titul 🧠▶ (dialog uzavřen, model pokračuje) ---
+      // --- PERMISSION REPLIED: obnovit titul 🧠🔵 (dialog uzavřen, model pokračuje) ---
       if (event.type === "permission.replied") {
-        await setTitle("🧠▶" + projectName)
+        await setTitle("🧠🔵" + projectName)
         return
       }
     },

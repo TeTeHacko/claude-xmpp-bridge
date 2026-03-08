@@ -253,10 +253,10 @@ The bridge also exposes an HTTP MCP server on port 7878 (streamable-HTTP transpo
 
 | Tool | Description |
 |------|-------------|
-| `send_message(to, message, screen=True)` | Deliver a message to a session; `screen=False` enqueues to inbox only |
+| `send_message(to, message, screen=True, nudge=False)` | Deliver a message to a session; `screen=False` enqueues to inbox only; `nudge=True` sends only a CR to wake the agent (message stored in inbox, delivered on next `session.idle`) |
 | `broadcast_message(message, sender_session_id)` | Deliver to all sessions except sender |
 | `receive_messages(session_id)` | Drain inbox — returns messages sent to this session |
-| `list_sessions()` | Enumerate all sessions with metadata, state, and plugin version |
+| `list_sessions()` | Enumerate all sessions with metadata, state, plugin version, sty, and window |
 
 Configure the MCP port:
 
@@ -356,12 +356,20 @@ Each hook receives JSON on stdin. Here are the fields available per event:
 
 See [`examples/opencode/`](examples/opencode/) for an OpenCode plugin that provides the same functionality as the Claude Code hooks:
 
-- Renames the GNU Screen/tmux window to `🧠<project>` on startup
+- Renames the GNU Screen/tmux window with traffic-light state indicator on startup
 - Registers/unregisters sessions automatically
-- Sends last assistant message via XMPP on `session.idle`
-- Sends informative XMPP notification when AI requests permission (`permission.asked`) — approval still happens in the TUI
+- Sends last assistant message via XMPP on `session.idle` (switch: `notify-enabled`)
+- Sends informative XMPP notification when AI requests permission (`permission.asked`) — approval still happens in the TUI (switch: `ask-enabled`)
 - Reports agent state (`idle`/`running`) to the bridge for `/list` display
 - Polls MCP inbox on `session.idle` and every 30 s — injects pending inter-agent messages into the session
+
+Window title traffic-light states:
+
+| Title | Meaning |
+|-------|---------|
+| `🧠🟢 project` | idle — waiting for input |
+| `🧠🔵 project` | running — model generating output |
+| `🧠🔴 project` | requires interaction — permission dialog open in TUI |
 
 ### Install
 
@@ -399,15 +407,27 @@ The OpenCode plugin registers sessions with `source: "opencode"` and reports its
 
 ```json
 {
-  "session_id": "abc123",
-  "sty": "12345.pts-0",
-  "window": "0",
+  "session_id": "ses_abc123_w4",
+  "sty": "12345.pts-0.hostname",
+  "window": "4",
   "project": "/home/user/project",
   "backend": "screen",
   "source": "opencode",
-  "plugin_version": "0.7.4"
+  "plugin_version": "0.7.11"
 }
 ```
+
+### Agent identity environment variables
+
+After registration, the plugin exports the following variables to `process.env`, which are inherited by all bash tools the agent spawns:
+
+| Variable | Example value | Description |
+|----------|--------------|-------------|
+| `BRIDGE_SESSION_ID` | `ses_abc123_w4` | Full bridge session ID (with `_wN` suffix) |
+| `BRIDGE_WINDOW` | `4` | Screen window number (reliable, read from `/proc/ppid/environ`) |
+| `WINDOW` | `4` | Corrected `$WINDOW` (overrides any wrong inherited value) |
+
+Agents can use `env | grep BRIDGE_SESSION` in a bash tool to discover their own identity.
 
 ## Security Sandbox (Optional)
 

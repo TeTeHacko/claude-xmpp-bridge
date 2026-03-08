@@ -6,7 +6,7 @@ This plugin integrates `claude-xmpp-bridge` with [OpenCode](https://opencode.ai)
 
 ## What it does
 
-- On startup: renames the GNU Screen/tmux window to `🧠<project>` and registers the active session with the bridge
+- On startup: renames the GNU Screen/tmux window to `🧠🟢<project>` and registers the active session with the bridge
 - `session.created` (e.g. `/new`): registers the new session
 - `session.deleted`: unregisters the session from the bridge
 - `session.idle`:
@@ -14,7 +14,7 @@ This plugin integrates `claude-xmpp-bridge` with [OpenCode](https://opencode.ai)
   - polls MCP inbox for pending inter-agent messages and injects them into the session
   - reports agent state `idle` to the bridge
 - `permission.asked`: sends an informative XMPP notification showing what the AI wants to run — the actual approval/denial still happens in the OpenCode TUI (switch: `ask-enabled`)
-- `permission.replied`: restores the window title after a permission dialog
+- `permission.replied`: sets title to `🧠🔵` (model continues after permission)
 - Reports agent state `running` when the model starts generating output
 
 ## Setup
@@ -64,6 +64,16 @@ The same switch files as Claude Code hooks:
 Enable: `touch ~/.config/xmpp-notify/<file>`
 Disable: `rm ~/.config/xmpp-notify/<file>`
 
+## Window Title — Traffic Light State
+
+The plugin sets the GNU Screen/tmux window title to reflect the agent's current state:
+
+| Title | State | When |
+|-------|-------|------|
+| `🧠🟢 project` | idle | startup, `session.idle`, `/new` |
+| `🧠🔵 project` | running | model generating output, after permission confirmed |
+| `🧠🔴 project` | requires interaction | permission dialog open in TUI — needs your input |
+
 ## Agent State and Plugin Version
 
 The plugin reports its version (`plugin_version`) in the registration payload and keeps the bridge informed of agent state:
@@ -71,7 +81,7 @@ The plugin reports its version (`plugin_version`) in the registration payload an
 - `idle` — after registration and after each `session.idle` event
 - `running` — when the model starts generating output
 
-This information appears in `/list` output as `⏸`/`▶` icons and a `v0.7.4` tag.
+This information appears in `/list` output as `⏸`/`▶` icons and a `v0.7.11` tag.
 
 ## MCP Inbox Polling
 
