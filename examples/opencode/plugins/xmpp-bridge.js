@@ -212,12 +212,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
               const text = await mcpRes.text().catch(() => null)
               const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
               const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null
-              const msgs = body?.result?.content?.[0]?.text
-              if (msgs) {
-                let pending
-                try { pending = JSON.parse(msgs) } catch { pending = null }
-                if (Array.isArray(pending) && pending.length > 0) {
-                  for (const msg of pending) {
+              // receive_messages returns each message as a separate content item (type=text)
+              const contentItems = body?.result?.content
+              if (Array.isArray(contentItems) && contentItems.length > 0) {
+                for (const item of contentItems) {
+                  const msg = item?.text
+                  if (msg) {
                     // Inject into session via screen stuff (same mechanism as socket relay)
                     const reg = JSON.stringify({ session_id: registeredSessionID, message: msg })
                     await $`claude-xmpp-client relay ${reg}`.nothrow()
