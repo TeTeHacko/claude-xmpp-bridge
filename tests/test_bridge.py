@@ -3331,7 +3331,7 @@ class TestRelay:
         # Observer should get an XMPP notification
         conn.send.assert_called_once()
         sent = conn.send.call_args[0][1]
-        assert "↔" in sent
+        assert "🤖" in sent
         assert "agent" in sent.lower() or "project" in sent.lower()
         assert "yo agent-b" in sent
         bridge.registry.close()
@@ -3566,7 +3566,7 @@ class TestBroadcast:
 
         assert conn.send.call_count == 1
         sent = conn.send.call_args[0][1]
-        assert "📢" in sent
+        assert "🤖" in sent
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")

@@ -264,7 +264,8 @@ class BridgeMCPServer:
 
             ok = await bridge._nudge_session(to, target_info, message)
             bridge._xmpp_send(
-                f"[MCP:{message_id}] (nudge) → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
+                f"🤖 MCP:{message_id} ──nudge──▶ {target_prefix}\n  {message[:200]}"
+                + ("…" if len(message) > 200 else "")
             )
             bridge.audit.log(
                 "MCP_SEND",
@@ -299,7 +300,8 @@ class BridgeMCPServer:
                 # screen=True delivers immediately to terminal — no inbox queuing needed.
                 # Inbox is reserved for nudge/screen=False (async, idle-handler pickup).
                 bridge._xmpp_send(
-                    f"[MCP:{message_id}] → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
+                    f"🤖 MCP:{message_id} ──screen──▶ {target_prefix}\n  {message[:200]}"
+                    + ("…" if len(message) > 200 else "")
                 )
                 bridge.audit.log(
                     "MCP_SEND",
@@ -325,7 +327,7 @@ class BridgeMCPServer:
             # screen=False: only enqueue in MCP inbox, no terminal relay
             self.enqueue(to, message)
             bridge._xmpp_send(
-                f"[MCP:{message_id}] 📥 {target_prefix} (inbox only): {message[:200]}"
+                f"🤖 MCP:{message_id} ──inbox──▶ {target_prefix}\n  {message[:200]}"
                 + ("…" if len(message) > 200 else "")
             )
             bridge.audit.log(
@@ -382,9 +384,9 @@ class BridgeMCPServer:
 
         sender_info = bridge.registry.get(sender_session_id) if sender_session_id else None
         sender_prefix = bridge._session_prefix(sender_info) if sender_info else (sender_session_id or "MCP")
-        nudge_tag = " (nudge)" if nudge else ""
+        mode = "nudge" if nudge else "screen"
         bridge._xmpp_send(
-            f"[MCP]{nudge_tag} 📢 {sender_prefix} → {delivered} session(s): {message[:200]}"
+            f"🤖 {sender_prefix} ──{mode}──▶▶ {delivered} session(s)\n  {message[:200]}"
             + ("…" if len(message) > 200 else "")
         )
         bridge.audit.log(

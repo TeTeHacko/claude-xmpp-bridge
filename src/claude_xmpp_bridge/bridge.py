@@ -798,10 +798,8 @@ class XMPPBridge:
 
         if nudge:
             ok = await self._nudge_session(target_id, target_info, message)
-            xmpp_arrow = "↔ (nudge)"
         else:
             ok = await self._stuff_to_session(target_id, target_info, message)
-            xmpp_arrow = "↔"
 
         self.audit.log(
             "RELAY_SENT" if ok else "RELAY_FAILED",
@@ -811,10 +809,12 @@ class XMPPBridge:
             message_len=len(message),
         )
 
+        mode = "nudge" if nudge else "screen"
         if ok:
             # Notify observer so they can see inter-agent traffic
             self._xmpp_send(
-                f"{xmpp_arrow} {sender_prefix} → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
+                f"🤖 {sender_prefix} ──{mode}──▶ {target_prefix}\n  {message[:200]}"
+                + ("…" if len(message) > 200 else "")
             )
             return {"ok": True}
         else:
@@ -887,10 +887,10 @@ class XMPPBridge:
         )
 
         # Single XMPP summary for the observer
-        recipients = ", ".join(delivered) if delivered else "—"
-        nudge_tag = " (nudge)" if nudge else ""
+        mode = "nudge" if nudge else "screen"
         self._xmpp_send(
-            f"📢{nudge_tag} {sender_prefix} → {recipients}: {message[:200]}" + ("…" if len(message) > 200 else "")
+            f"🤖 {sender_prefix} ──{mode}──▶▶ {len(delivered)} session(s)\n  {message[:200]}"
+            + ("…" if len(message) > 200 else "")
         )
 
         return {"ok": True, "delivered": len(delivered), "failed": len(failed)}
