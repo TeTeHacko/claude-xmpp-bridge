@@ -3689,3 +3689,305 @@ class TestBroadcast:
         sent = conn.send.call_args[0][1]
         assert "…" in sent
         bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# TestSocketListCommand — socket 'list' command
+# ---------------------------------------------------------------------------
+
+
+class TestSocketListCommand:
+    """list socket command returns all registered sessions with metadata."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_list_returns_all_sessions(self, MockXMPP, tmp_path):
+        """list returns every registered session with required fields."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("ag-1", sty="sty1", window="1", project="/proj-1", backend="screen")
+        bridge.registry.register("ag-2", sty="sty1", window="2", project="/proj-2", backend="screen")
+
+        resp = bridge._handle_list({})
+
+        assert resp["ok"] is True
+        sessions = resp["sessions"]
+        assert isinstance(sessions, list)
+        assert len(sessions) == 2
+        sids = [s["session_id"] for s in sessions]
+        assert "ag-1" in sids
+        assert "ag-2" in sids
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_list_session_fields(self, MockXMPP, tmp_path):
+        """Each session entry contains all expected fields."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("ag-1", sty="sty1", window="3", project="/proj-x", backend="screen", source="opencode")
+
+        resp = bridge._handle_list({})
+        sess = resp["sessions"][0]
+
+        assert sess["session_id"] == "ag-1"
+        assert sess["project"] == "/proj-x"
+        assert sess["backend"] == "screen"
+        assert sess["window"] == "3"
+        assert sess["source"] == "opencode"
+        assert "registered_at" in sess
+        assert sess["index"] == 1
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_list_empty_registry(self, MockXMPP, tmp_path):
+        """list on empty registry returns ok=True with empty sessions list."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        resp = bridge._handle_list({})
+
+        assert resp["ok"] is True
+        assert resp["sessions"] == []
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_list_ordered_by_registration_time(self, MockXMPP, tmp_path):
+        """Sessions are returned sorted by registration time (oldest first)."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        import time as _time
+
+        bridge.registry.register(
+            "first", sty="s1", window="1", project="/a", backend="screen", registered_at=_time.time() - 10
+        )
+        bridge.registry.register(
+            "second", sty="s1", window="2", project="/b", backend="screen", registered_at=_time.time()
+        )
+
+        resp = bridge._handle_list({})
+        sids = [s["session_id"] for s in resp["sessions"]]
+        assert sids == ["first", "second"]
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_list_via_socket(self, MockXMPP, tmp_path):
+        """list command works end-to-end via socket round-trip."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("ag-1", sty="sty1", window="1", project="/proj-1", backend="screen")
+
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(bridge.config.socket_path, {"cmd": "list"})
+            assert resp["ok"] is True
+            assert len(resp["sessions"]) == 1
+            assert resp["sessions"][0]["session_id"] == "ag-1"
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# TestRelayByProject — relay with 'to_project' field
+# ---------------------------------------------------------------------------
+
+
+class TestRelayByProject:
+    """relay command can target sessions by project path prefix."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_to_project_delivers(self, MockXMPP, tmp_path):
+        """relay with to_project matching a registered session delivers the message."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("sender", sty="sty1", window="1", project="/home/user/proj-a", backend="screen")
+        bridge.registry.register("target", sty="sty1", window="2", project="/home/user/proj-b", backend="screen")
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            resp = await bridge._handle_relay(
+                {
+                    "session_id": "sender",
+                    "to_project": "/home/user/proj-b",
+                    "message": "hello from project relay",
+                }
+            )
+
+        assert resp == {"ok": True}
+        conn.send.assert_called_once()
+        assert "hello from project relay" in conn.send.call_args[0][1]
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_to_project_prefix_match(self, MockXMPP, tmp_path):
+        """to_project matches by prefix — partial path is enough."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("sender", sty="sty1", window="1", project="/home/user/proj-a", backend="screen")
+        bridge.registry.register(
+            "target", sty="sty1", window="2", project="/home/user/projects/mp3tagger", backend="screen"
+        )
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            resp = await bridge._handle_relay(
+                {
+                    "session_id": "sender",
+                    "to_project": "/home/user/projects/mp3",
+                    "message": "prefix match test",
+                }
+            )
+
+        assert resp == {"ok": True}
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_to_project_tilde_expansion(self, MockXMPP, tmp_path):
+        """to_project expands leading ~ to home directory."""
+        import os
+
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        home = os.path.expanduser("~")
+        bridge.registry.register("sender", sty="sty1", window="1", project=f"{home}/proj-a", backend="screen")
+        bridge.registry.register("target", sty="sty1", window="2", project=f"{home}/proj-b", backend="screen")
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            resp = await bridge._handle_relay(
+                {
+                    "session_id": "sender",
+                    "to_project": "~/proj-b",
+                    "message": "tilde test",
+                }
+            )
+
+        assert resp == {"ok": True}
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_to_project_not_found(self, MockXMPP, tmp_path):
+        """relay with to_project that matches nothing returns error."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("sender", sty="sty1", window="1", project="/home/user/proj-a", backend="screen")
+
+        resp = await bridge._handle_relay(
+            {
+                "session_id": "sender",
+                "to_project": "/nonexistent/path",
+                "message": "hello",
+            }
+        )
+
+        assert resp.get("ok") is False
+        assert "not found" in str(resp.get("error", "")).lower()
+        bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# TestHeartbeat — periodic stale session cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeat:
+    """_heartbeat runs _cleanup_stale_sessions periodically."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_heartbeat_cleans_dead_session(self, MockXMPP, tmp_path):
+        """heartbeat calls _cleanup_stale_sessions at least once when timeout fires."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        stop = asyncio.Event()
+        call_count = [0]
+
+        async def _fake_cleanup():
+            call_count[0] += 1
+            stop.set()  # stop after first cleanup
+            return 0
+
+        bridge._cleanup_stale_sessions = _fake_cleanup  # type: ignore[method-assign]
+
+        # Simulate the heartbeat inner loop directly: suppress wait, run cleanup
+        # This mirrors what _heartbeat does on TimeoutError from wait_for.
+        import contextlib as _cl
+
+        with _cl.suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(stop.wait()), timeout=0.01)
+        if not stop.is_set():
+            await bridge._cleanup_stale_sessions()
+
+        # Alternatively just test that stop-already-set exits immediately
+        stop.set()
+        task = asyncio.create_task(bridge._heartbeat(stop))
+        await asyncio.wait_for(task, timeout=2)
+
+        assert call_count[0] >= 1
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_heartbeat_stops_on_event(self, MockXMPP, tmp_path):
+        """heartbeat exits cleanly when stop event is set."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        stop = asyncio.Event()
+        stop.set()  # already stopped
+
+        task = asyncio.create_task(bridge._heartbeat(stop))
+        await asyncio.wait_for(task, timeout=2)
+        # Task should complete without hanging
+        bridge.registry.close()

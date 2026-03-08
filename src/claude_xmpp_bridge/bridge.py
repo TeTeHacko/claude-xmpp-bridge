@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 import os
@@ -468,6 +469,8 @@ class XMPPBridge:
             response = await self._handle_broadcast(req)
         elif cmd == "query":
             response = self._handle_query(req)
+        elif cmd == "list":
+            response = self._handle_list(req)
         elif cmd == "ping":
             response = {"ok": True}
         else:
@@ -641,6 +644,23 @@ class XMPPBridge:
         self._xmpp_send(full_msg)
         return {"ok": True}
 
+    def _find_session_by_project(self, project: str) -> tuple[str | None, SessionInfo | None]:
+        """Find a session whose project path starts with the given prefix.
+
+        Expands a leading ``~`` to the home directory before matching.
+        Returns the first match sorted by registration time, or (None, None)
+        if no session matches.
+        """
+        home = str(Path.home())
+        needle = project.replace("~", home, 1) if project.startswith("~") else project
+        sessions = self.registry.list_sessions()
+        sorted_ids = sorted(sessions, key=lambda s: sessions[s]["registered_at"])
+        for sid in sorted_ids:
+            info = sessions[sid]
+            if info["project"].startswith(needle):
+                return sid, info
+        return None, None
+
     async def _handle_relay(self, req: dict[str, object]) -> dict[str, object]:
         """Deliver a message from one agent to another via the terminal multiplexer.
 
@@ -654,6 +674,7 @@ class XMPPBridge:
           - ``message``    : text to send to the target agent (required)
           - ``to``         : target session_id string           (mutually exclusive)
           - ``to_index``   : target session index (1-based int) (mutually exclusive)
+          - ``to_project`` : target project path prefix         (mutually exclusive)
           - ``session_id`` : sender session_id for labelling    (optional)
         """
         message = str(req.get("message", ""))
@@ -663,6 +684,7 @@ class XMPPBridge:
         # Resolve target session
         to_raw = req.get("to")
         to_index_raw = req.get("to_index")
+        to_project_raw = req.get("to_project")
         if to_raw is not None:
             target_id = str(to_raw)
             target_info = self.registry.get(target_id)
@@ -672,6 +694,8 @@ class XMPPBridge:
             except (ValueError, TypeError):
                 return {"ok": False, "error": "to_index must be an integer"}
             target_id, target_info = self.registry.get_by_index(to_index)  # type: ignore[assignment]
+        elif to_project_raw is not None:
+            target_id, target_info = self._find_session_by_project(str(to_project_raw))  # type: ignore[assignment]
         else:
             return {"ok": False, "error": self.messages.relay_no_target}
 
@@ -775,6 +799,37 @@ class XMPPBridge:
             return {"error": "session not found"}
         return {"ok": True, "project": info["project"]}
 
+    def _handle_list(self, req: dict[str, object]) -> dict[str, object]:
+        """Return all registered sessions as a list.
+
+        Useful for agents that need to discover other sessions without
+        knowing their session_id in advance.  Each entry includes the
+        session_id, project path, backend, window and source fields so
+        callers can pick the right target for a subsequent relay.
+
+        Protocol response fields:
+          - ``ok``       : True
+          - ``sessions`` : list of dicts with session_id, project, backend,
+                           window, source, registered_at
+        """
+        sessions = self.registry.list_sessions()
+        sorted_ids = sorted(sessions, key=lambda s: sessions[s]["registered_at"])
+        result = []
+        for i, sid in enumerate(sorted_ids, 1):
+            info = sessions[sid]
+            result.append(
+                {
+                    "index": i,
+                    "session_id": sid,
+                    "project": info["project"],
+                    "backend": info["backend"],
+                    "window": info["window"],
+                    "source": info.get("source"),
+                    "registered_at": info["registered_at"],
+                }
+            )
+        return {"ok": True, "sessions": result}
+
     # --- Lifecycle ---
 
     async def run(self) -> None:
@@ -798,8 +853,27 @@ class XMPPBridge:
         self._xmpp_send(f"{self.messages.bridge_started} (v{__version__})")
         log.info("Bridge running. Press Ctrl+C to stop.")
 
+        heartbeat_task = asyncio.create_task(self._heartbeat(stop))
         await stop.wait()
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
         await self.shutdown()
+
+    async def _heartbeat(self, stop: asyncio.Event) -> None:
+        """Periodically check registered sessions and remove stale ones.
+
+        Runs every 60 seconds. A session is considered stale when its Screen
+        window no longer exists (the screen -Q select command exits non-zero).
+        tmux sessions are checked via ``tmux has-session``.  Sessions with no
+        backend are always kept (read-only observer sessions).
+        """
+        while not stop.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(stop.wait()), timeout=60)
+            if stop.is_set():
+                break
+            await self._cleanup_stale_sessions()
 
     async def shutdown(self) -> None:
         """Gracefully shut down all components."""
