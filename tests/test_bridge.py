@@ -3485,6 +3485,25 @@ class TestRelay:
         assert "anonymous relay" in sent
         bridge.registry.close()
 
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_does_not_enqueue_mcp_inbox(self, MockXMPP, tmp_path):
+        """Socket relay must NOT populate the MCP inbox of the target session.
+
+        Enqueueing screen-delivered messages would cause the idle-handler to
+        re-inject them on the next session.idle event, creating an infinite
+        feedback loop (Bug #1 fix).
+        """
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        assert bridge.mcp_server is not None
+        bridge.mcp_server.enqueue = MagicMock()
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": "hi"})
+
+        assert resp == {"ok": True}
+        bridge.mcp_server.enqueue.assert_not_called()
+        bridge.registry.close()
+
 
 # ---------------------------------------------------------------------------
 # TestBroadcast — one-to-all messaging

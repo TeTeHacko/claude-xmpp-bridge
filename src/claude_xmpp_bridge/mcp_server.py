@@ -254,7 +254,8 @@ class BridgeMCPServer:
             ok = await bridge._stuff_to_session(to, target_info, message)
 
             if ok:
-                self.enqueue(to, message)
+                # screen=True delivers immediately to terminal — no inbox queuing needed.
+                # Inbox is reserved for screen=False (async, idle-handler pickup).
                 bridge._xmpp_send(
                     f"[MCP:{message_id}] → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
                 )

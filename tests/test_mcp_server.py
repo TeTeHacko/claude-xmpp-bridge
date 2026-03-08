@@ -168,10 +168,16 @@ class TestSendMessageTool:
         assert "delivered" in result.lower() or "alpha" in result.lower()
         started_server._bridge._stuff_to_session.assert_awaited_once()
 
-    async def test_send_enqueues_for_mcp(self, started_server: BridgeMCPServer):
+    async def test_send_screen_true_does_not_enqueue(self, started_server: BridgeMCPServer):
+        """screen=True delivers via terminal only — MCP inbox must stay empty.
+
+        Enqueueing screen-delivered messages would cause the idle-handler to
+        re-inject them into the terminal on the next session.idle event,
+        creating an infinite feedback loop (Bug #2 fix).
+        """
         await started_server._tool_send_message(to="ses_AAA", message="ping")
         msgs = started_server._tool_receive_messages(session_id="ses_AAA")
-        assert msgs == ["ping"]
+        assert msgs == []
 
     async def test_send_missing_to(self, started_server: BridgeMCPServer):
         result = await started_server._tool_send_message(to="", message="hello")

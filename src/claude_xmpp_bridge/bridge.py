@@ -736,8 +736,8 @@ class XMPPBridge:
             self._xmpp_send(
                 f"↔ {sender_prefix} → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
             )
-            # Also queue into MCP inbox so target can receive via receive_messages()
-            self._enqueue_for_mcp(target_id, message)
+            # Socket relay delivers immediately to terminal — MCP inbox not needed.
+            # (inbox-only delivery is the job of send_message(screen=False))
             return {"ok": True}
         else:
             return {
