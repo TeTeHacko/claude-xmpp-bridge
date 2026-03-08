@@ -46,6 +46,7 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     bridge._stuff_to_session = AsyncMock(return_value=True)
     bridge._xmpp_send = MagicMock(return_value=True)
     bridge._session_prefix = MagicMock(side_effect=lambda info: f"[{info['project'].split('/')[-1]}]")
+    bridge.audit = MagicMock()
     bridge.messages = MagicMock()
     bridge.messages.mcp_send_missing_to = "send_message requires 'to' (session_id)"
     bridge.messages.mcp_send_missing_message = "send_message requires 'message'"
@@ -143,6 +144,18 @@ class TestEnqueueAndReceive:
         # No bridge needed — _tool_receive_messages works independently
         assert server._tool_receive_messages(session_id="ses_X") == []
 
+    def test_receive_logs_audit_when_messages_present(self, started_server: BridgeMCPServer):
+        started_server.enqueue("ses_AAA", "hello")
+        started_server._tool_receive_messages(session_id="ses_AAA")
+        started_server._bridge.audit.log.assert_called()
+        event_arg = started_server._bridge.audit.log.call_args[0][0]
+        assert event_arg == "MCP_RECEIVE"
+
+    def test_receive_no_audit_when_empty(self, started_server: BridgeMCPServer):
+        # No messages — audit should NOT be called
+        started_server._tool_receive_messages(session_id="ses_AAA")
+        started_server._bridge.audit.log.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # send_message tool
@@ -191,7 +204,39 @@ class TestSendMessageTool:
         await started_server._tool_send_message(to="ses_AAA", message="ping")
         started_server._bridge._xmpp_send.assert_called_once()
         call_arg = started_server._bridge._xmpp_send.call_args[0][0]
-        assert "[MCP]" in call_arg
+        assert "[MCP:" in call_arg
+
+    async def test_send_returns_message_id(self, started_server: BridgeMCPServer):
+        result = await started_server._tool_send_message(to="ses_AAA", message="ping")
+        assert "[id:" in result
+
+    async def test_send_screen_false_skips_relay(self, started_server: BridgeMCPServer):
+        result = await started_server._tool_send_message(to="ses_AAA", message="ping", screen=False)
+        started_server._bridge._stuff_to_session.assert_not_awaited()
+        assert "inbox only" in result
+
+    async def test_send_screen_false_enqueues(self, started_server: BridgeMCPServer):
+        await started_server._tool_send_message(to="ses_AAA", message="ping", screen=False)
+        msgs = started_server._tool_receive_messages(session_id="ses_AAA")
+        assert msgs == ["ping"]
+
+    async def test_send_screen_false_no_backend_ok(self, started_server: BridgeMCPServer):
+        """screen=False should succeed even for sessions without a backend."""
+        started_server._bridge.registry.sessions["ses_NOBACK"] = _make_session_info(
+            project="/home/user/noback", backend=None
+        )
+        started_server._bridge.registry.get = MagicMock(
+            side_effect=lambda sid: started_server._bridge.registry.sessions.get(sid)
+        )
+        result = await started_server._tool_send_message(to="ses_NOBACK", message="ping", screen=False)
+        assert "inbox only" in result
+        started_server._bridge._stuff_to_session.assert_not_awaited()
+
+    async def test_send_logs_audit(self, started_server: BridgeMCPServer):
+        await started_server._tool_send_message(to="ses_AAA", message="ping")
+        started_server._bridge.audit.log.assert_called()
+        event_arg = started_server._bridge.audit.log.call_args[0][0]
+        assert event_arg == "MCP_SEND"
 
     async def test_bridge_not_set_returns_error(self, server: BridgeMCPServer):
         result = await server._tool_send_message(to="ses_AAA", message="hello")
@@ -234,6 +279,12 @@ class TestBroadcastMessageTool:
         started_server._bridge._xmpp_send.assert_called_once()
         call_arg = started_server._bridge._xmpp_send.call_args[0][0]
         assert "[MCP]" in call_arg
+
+    async def test_broadcast_logs_audit(self, started_server: BridgeMCPServer):
+        await started_server._tool_broadcast_message(message="hi", sender_session_id="")
+        started_server._bridge.audit.log.assert_called()
+        event_arg = started_server._bridge.audit.log.call_args[0][0]
+        assert event_arg == "MCP_BROADCAST"
 
     async def test_bridge_not_set_returns_error(self, server: BridgeMCPServer):
         result = await server._tool_broadcast_message(message="hi", sender_session_id="")

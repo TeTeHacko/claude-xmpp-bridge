@@ -5,10 +5,10 @@ SessionRegistry and message-delivery logic.  It listens on localhost:7878 by
 default using the streamable-http transport (a single /mcp endpoint).
 
 Tools:
-  send_message(to, message)         — deliver a message to a specific agent session
-  broadcast_message(message)        — deliver a message to all registered sessions
-  receive_messages(session_id)      — drain the inbox queue for a session
-  list_sessions()                   — list all registered sessions
+  send_message(to, message, screen)  — deliver a message to a specific agent session
+  broadcast_message(message)         — deliver a message to all registered sessions
+  receive_messages(session_id)       — drain the inbox queue for a session
+  list_sessions()                    — list all registered sessions
 
 The ``send_message`` and ``broadcast_message`` tools use the same screen relay
 mechanism as the existing socket relay/broadcast commands.  Received messages
@@ -21,6 +21,14 @@ OpenCode plugin integration:
 
 Configuration:
   Port is set via Config.mcp_port (default 7878).  Set to 0 to disable.
+
+Audit log:
+  All MCP tool invocations are recorded via AuditLogger with event types:
+    MCP_SEND        — send_message called (success or failure)
+    MCP_BROADCAST   — broadcast_message called
+    MCP_RECEIVE     — receive_messages drained inbox
+  Each send event generates a unique message_id (UUID4 short hex) returned
+  in the confirmation string so senders can correlate ACK replies.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import uuid
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
@@ -113,21 +122,29 @@ class BridgeMCPServer:
         server = self
 
         @mcp.tool()
-        async def send_message(to: str, message: str) -> str:
+        async def send_message(to: str, message: str, screen: bool = True) -> str:
             """Send a message to a specific agent session identified by session_id.
 
-            The message is delivered via the terminal multiplexer (screen/tmux)
-            exactly as the socket ``relay`` command does.  The bridge also sends
-            an XMPP notification to the human observer.
+            By default the message is delivered via the terminal multiplexer (screen/tmux)
+            exactly as the socket ``relay`` command does, AND queued in the MCP inbox.
+            Set ``screen=False`` to skip terminal delivery and only queue in the MCP inbox
+            (useful for testing polling without screen relay, or for sessions without a
+            terminal multiplexer).
+
+            The bridge also sends an XMPP notification to the human observer.
+            The returned confirmation string includes a unique ``message_id`` that the
+            recipient can reference in an ACK reply (``ack:<message_id>``).
 
             Args:
                 to: Target session_id (as shown by list_sessions).
                 message: Text to deliver to the target agent.
+                screen: If True (default), deliver via screen/tmux relay.
+                        If False, only enqueue in MCP inbox (no screen relay).
 
             Returns:
-                A confirmation string on success, or an error description.
+                A confirmation string with message_id on success, or an error description.
             """
-            return await server._tool_send_message(to=to, message=message)
+            return await server._tool_send_message(to=to, message=message, screen=screen)
 
         @mcp.tool()
         async def broadcast_message(message: str, sender_session_id: str = "") -> str:
@@ -203,7 +220,7 @@ class BridgeMCPServer:
         home = os.path.expanduser("~")
         return path.replace(home, "~") if path.startswith(home) else path
 
-    async def _tool_send_message(self, *, to: str, message: str) -> str:
+    async def _tool_send_message(self, *, to: str, message: str, screen: bool = True) -> str:
         """Implementation of the send_message tool."""
         bridge = self._bridge
         if bridge is None:
@@ -216,19 +233,67 @@ class BridgeMCPServer:
         target_info = bridge.registry.get(to)
         if not target_info:
             return bridge.messages.mcp_send_target_not_found.format(to=to)
-        if not target_info["backend"]:
-            return bridge.messages.mcp_send_no_backend.format(project=self._short_path(target_info["project"]))
-
-        ok = await bridge._stuff_to_session(to, target_info, message)
 
         target_prefix = bridge._session_prefix(target_info)
-        if ok:
-            # Also queue the message so the target can receive it via MCP
-            self.enqueue(to, message)
-            bridge._xmpp_send(f"[MCP] → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else ""))
-            return bridge.messages.mcp_send_ok.format(target_prefix=target_prefix)
+        message_id = uuid.uuid4().hex[:12]
+
+        if screen:
+            # screen=True: require a backend and deliver via terminal multiplexer
+            if not target_info["backend"]:
+                bridge.audit.log(
+                    "MCP_SEND",
+                    message_id=message_id,
+                    to_session_id=to,
+                    screen=screen,
+                    ok=False,
+                    reason="no_backend",
+                    message=message[:100],
+                )
+                return bridge.messages.mcp_send_no_backend.format(project=self._short_path(target_info["project"]))
+
+            ok = await bridge._stuff_to_session(to, target_info, message)
+
+            if ok:
+                self.enqueue(to, message)
+                bridge._xmpp_send(
+                    f"[MCP:{message_id}] → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
+                )
+                bridge.audit.log(
+                    "MCP_SEND",
+                    message_id=message_id,
+                    to_session_id=to,
+                    screen=screen,
+                    ok=True,
+                    message=message[:100],
+                )
+                return bridge.messages.mcp_send_ok.format(target_prefix=target_prefix) + f" [id:{message_id}]"
+            else:
+                bridge.audit.log(
+                    "MCP_SEND",
+                    message_id=message_id,
+                    to_session_id=to,
+                    screen=screen,
+                    ok=False,
+                    reason="delivery_failed",
+                    message=message[:100],
+                )
+                return bridge.messages.mcp_send_failed.format(project=self._short_path(target_info["project"]))
         else:
-            return bridge.messages.mcp_send_failed.format(project=self._short_path(target_info["project"]))
+            # screen=False: only enqueue in MCP inbox, no terminal relay
+            self.enqueue(to, message)
+            bridge._xmpp_send(
+                f"[MCP:{message_id}] 📥 {target_prefix} (inbox only): {message[:200]}"
+                + ("…" if len(message) > 200 else "")
+            )
+            bridge.audit.log(
+                "MCP_SEND",
+                message_id=message_id,
+                to_session_id=to,
+                screen=screen,
+                ok=True,
+                message=message[:100],
+            )
+            return bridge.messages.mcp_send_ok.format(target_prefix=target_prefix) + f" [id:{message_id}] (inbox only)"
 
     async def _tool_broadcast_message(self, *, message: str, sender_session_id: str) -> str:
         """Implementation of the broadcast_message tool."""
@@ -245,6 +310,13 @@ class BridgeMCPServer:
         }
 
         if not targets:
+            bridge.audit.log(
+                "MCP_BROADCAST",
+                from_session_id=sender_session_id or None,
+                delivered=0,
+                failed=0,
+                message=message[:100],
+            )
             return bridge.messages.broadcast_sent.format(count=0)
 
         results = await asyncio.gather(
@@ -262,6 +334,13 @@ class BridgeMCPServer:
         bridge._xmpp_send(
             f"[MCP] 📢 {sender_prefix} → {delivered} session(s): {message[:200]}" + ("…" if len(message) > 200 else "")
         )
+        bridge.audit.log(
+            "MCP_BROADCAST",
+            from_session_id=sender_session_id or None,
+            delivered=delivered,
+            failed=len(targets) - delivered,
+            message=message[:100],
+        )
         return bridge.messages.broadcast_sent.format(count=delivered)
 
     def _tool_receive_messages(self, *, session_id: str) -> list[str]:
@@ -275,6 +354,13 @@ class BridgeMCPServer:
                 messages.append(q.get_nowait())
             except asyncio.QueueEmpty:
                 break
+        bridge = self._bridge
+        if bridge is not None and messages:
+            bridge.audit.log(
+                "MCP_RECEIVE",
+                session_id=session_id,
+                count=len(messages),
+            )
         return messages
 
     def _tool_list_sessions(self) -> list[dict[str, Any]]:
