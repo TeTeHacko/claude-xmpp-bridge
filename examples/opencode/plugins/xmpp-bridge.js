@@ -189,7 +189,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
             }).catch(() => null)
 
             if (mcpRes && mcpRes.ok) {
-              const body = await mcpRes.json().catch(() => null)
+              const text = await mcpRes.text().catch(() => null)
+              const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
+              const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null
               const msgs = body?.result?.content?.[0]?.text
               if (msgs) {
                 let pending
