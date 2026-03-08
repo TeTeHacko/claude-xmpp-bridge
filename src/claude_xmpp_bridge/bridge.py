@@ -16,6 +16,7 @@ import slixmpp
 from . import __version__
 from .audit import AuditLogger
 from .config import DEFAULT_SOURCE_ICONS, MAX_SOURCE_LEN, Config
+from .mcp_server import BridgeMCPServer
 from .messages import Messages, load_messages
 from .multiplexer import get_multiplexer
 from .registry import SessionInfo, SessionRegistry
@@ -65,6 +66,7 @@ class XMPPBridge:
             audit_logger=self.audit,
         )
         self._ask_queue: list[_PendingAsk] = []
+        self.mcp_server: BridgeMCPServer | None = BridgeMCPServer(config.mcp_port) if config.mcp_port else None
 
     # --- XMPP message handling ---
 
@@ -226,6 +228,11 @@ class XMPPBridge:
 
     def _xmpp_send(self, text: str) -> bool:
         return self.xmpp.send(self.config.recipient, text)
+
+    def _enqueue_for_mcp(self, session_id: str, message: str) -> None:
+        """Queue *message* into the MCP inbox for *session_id* (no-op if MCP disabled)."""
+        if self.mcp_server is not None:
+            self.mcp_server.enqueue(session_id, message)
 
     @staticmethod
     def _short_path(path: str) -> str:
@@ -729,6 +736,8 @@ class XMPPBridge:
             self._xmpp_send(
                 f"↔ {sender_prefix} → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
             )
+            # Also queue into MCP inbox so target can receive via receive_messages()
+            self._enqueue_for_mcp(target_id, message)
             return {"ok": True}
         else:
             return {
@@ -772,6 +781,7 @@ class XMPPBridge:
         for (_sid, info), ok in zip(targets.items(), results, strict=True):
             if ok:
                 delivered.append(self._session_prefix(info))
+                self._enqueue_for_mcp(_sid, message)
             else:
                 failed.append(self._session_prefix(info))
 
@@ -838,6 +848,9 @@ class XMPPBridge:
         self.xmpp.start()
         await self.socket_server.start()
 
+        if self.mcp_server is not None:
+            await self.mcp_server.start(self)
+
         stop = asyncio.Event()
 
         def _signal_handler() -> None:
@@ -850,7 +863,10 @@ class XMPPBridge:
 
         await self.xmpp.connected.wait()
         self.audit.log("BRIDGE_START", jid=self.config.jid, recipient=self.config.recipient)
-        self._xmpp_send(f"{self.messages.bridge_started} (v{__version__})")
+        startup_msg = f"{self.messages.bridge_started} (v{__version__})"
+        if self.mcp_server is not None:
+            startup_msg += f" {self.messages.mcp_started.format(port=self.mcp_server.port)}"
+        self._xmpp_send(startup_msg)
         log.info("Bridge running. Press Ctrl+C to stop.")
 
         heartbeat_task = asyncio.create_task(self._heartbeat(stop))
@@ -879,6 +895,8 @@ class XMPPBridge:
         """Gracefully shut down all components."""
         self.audit.log("BRIDGE_STOP", jid=self.config.jid)
         log.info("Shutting down...")
+        if self.mcp_server is not None:
+            await self.mcp_server.stop()
         await self.socket_server.stop()
         self._xmpp_send(self.messages.bridge_stopped)
         await asyncio.sleep(1)

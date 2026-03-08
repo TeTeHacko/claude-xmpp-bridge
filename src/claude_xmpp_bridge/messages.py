@@ -41,6 +41,14 @@ class Messages:
     relay_failed: str = "Relay to [{project}] failed"
     broadcast_no_message: str = "broadcast requires 'message'"
     broadcast_sent: str = "broadcast → {count} session(s)"
+    mcp_started: str = "MCP server listening on http://127.0.0.1:{port}/mcp"
+    mcp_stopped: str = "MCP server stopped"
+    mcp_send_missing_to: str = "send_message requires 'to' (session_id)"
+    mcp_send_missing_message: str = "send_message requires 'message'"
+    mcp_send_target_not_found: str = "Target session not found: {to}"
+    mcp_send_no_backend: str = "Target session [{project}] has no multiplexer"
+    mcp_send_failed: str = "Delivery to [{project}] failed"
+    mcp_send_ok: str = "Message delivered to {target_prefix}"
 
 
 def load_messages(path: Path | None = None) -> Messages:

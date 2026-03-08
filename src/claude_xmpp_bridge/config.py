@@ -17,6 +17,7 @@ CONFIG_FILE = CONFIG_DIR / "config.toml"
 LEGACY_CREDENTIALS_FILE = Path.home() / ".config" / "xmpp-notify" / "credentials"
 DEFAULT_SOCKET_PATH = Path.home() / ".claude" / "bridge.sock"
 DEFAULT_DB_PATH = Path.home() / ".claude" / "bridge.db"
+DEFAULT_MCP_PORT = 7878
 
 
 # Default icons per source value. None key = fallback for unknown/unset source.
@@ -42,6 +43,7 @@ class Config:
     socket_token: str | None = None  # shared secret for socket auth (None = disabled)
     force_starttls: bool = True  # require TLS on XMPP connection
     audit_log: str = "journald"  # "journald" or path to a rotating JSON Lines file
+    mcp_port: int = DEFAULT_MCP_PORT  # port for MCP HTTP server (0 = disabled)
     # Per-source icons: keys are source strings (or None for default/unknown).
     # Loaded from [source_icons] TOML section; missing keys fall back to DEFAULT_SOURCE_ICONS.
     source_icons: dict[str | None, str] = field(default_factory=dict)
@@ -53,6 +55,7 @@ class Config:
             f"socket_path={self.socket_path!r}, db_path={self.db_path!r}, "
             f"messages_file={self.messages_file!r}, socket_token={token_repr}, "
             f"force_starttls={self.force_starttls!r}, audit_log={self.audit_log!r}, "
+            f"mcp_port={self.mcp_port!r}, "
             f"source_icons={self.source_icons!r})"
         )
 
@@ -136,6 +139,7 @@ def load_config(
     cli_socket_path: str | None = None,
     cli_db_path: str | None = None,
     cli_messages: str | None = None,
+    cli_mcp_port: int | None = None,
 ) -> Config:
     """Load full bridge config with layered precedence: CLI > env > TOML > defaults."""
     toml = _read_toml(CONFIG_FILE)
@@ -196,6 +200,18 @@ def load_config(
     # Audit log destination: "journald" (default) or path to a file
     audit_log = os.environ.get("CLAUDE_XMPP_AUDIT_LOG") or _toml_str(toml, "audit_log") or "journald"
 
+    # MCP server port (0 = disabled)
+    mcp_port_env = os.environ.get("CLAUDE_XMPP_MCP_PORT")
+    mcp_port_toml = toml.get("mcp_port")
+    if cli_mcp_port is not None:
+        mcp_port = cli_mcp_port
+    elif mcp_port_env:
+        mcp_port = int(mcp_port_env)
+    elif mcp_port_toml is not None:
+        mcp_port = int(str(mcp_port_toml))
+    else:
+        mcp_port = DEFAULT_MCP_PORT
+
     # Source icons: loaded from [source_icons] TOML section.
     # Keys are source strings; special key "default" maps to None (unknown/unset source).
     # Example:
@@ -221,6 +237,7 @@ def load_config(
         socket_token=socket_token,
         force_starttls=force_starttls,
         audit_log=audit_log,
+        mcp_port=mcp_port,
         source_icons=source_icons,
     )
 

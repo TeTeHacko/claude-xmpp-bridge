@@ -48,6 +48,7 @@ def bridge_main() -> None:
     parser.add_argument("--socket-path", help="Unix socket path")
     parser.add_argument("--db-path", help="SQLite database path")
     parser.add_argument("--messages", help="Path to messages TOML file")
+    parser.add_argument("--mcp-port", type=int, help="MCP HTTP server port (default 7878, 0 = disabled)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     parser.add_argument("--quiet", "-q", action="store_true", help="Only warnings/errors")
     args = parser.parse_args()
@@ -63,6 +64,7 @@ def bridge_main() -> None:
         cli_socket_path=args.socket_path,
         cli_db_path=args.db_path,
         cli_messages=args.messages,
+        cli_mcp_port=args.mcp_port,
     )
     validate_config(config)
 

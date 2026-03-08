@@ -161,16 +161,56 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- SESSION IDLE: titul ⌨ + XMPP notifikace ---
+      // --- SESSION IDLE: titul ⌨ + XMPP notifikace + MCP inbox poll ---
       if (event.type === "session.idle") {
         // Titul: přepnout na 🧠❓ (čeká na vstup)
         await setTitle("🧠❓" + projectName)
 
+        const sessionID = event.properties.sessionID
+
+        // --- MCP inbox poll: check for pending inter-agent messages ---
+        // Calls the xmpp-bridge MCP tool receive_messages() to drain any messages
+        // that other agents sent via send_message() or broadcast_message().
+        // Each pending message is injected into this session via screen relay.
+        if (registeredSessionID && STY) {
+          try {
+            const mcpRes = await fetch("http://127.0.0.1:7878/mcp", {
+              method:  "POST",
+              headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id:      1,
+                method:  "tools/call",
+                params:  {
+                  name:      "receive_messages",
+                  arguments: { session_id: registeredSessionID },
+                },
+              }),
+            }).catch(() => null)
+
+            if (mcpRes && mcpRes.ok) {
+              const body = await mcpRes.json().catch(() => null)
+              const msgs = body?.result?.content?.[0]?.text
+              if (msgs) {
+                let pending
+                try { pending = JSON.parse(msgs) } catch { pending = null }
+                if (Array.isArray(pending) && pending.length > 0) {
+                  for (const msg of pending) {
+                    // Inject into session via screen stuff (same mechanism as socket relay)
+                    const reg = JSON.stringify({ session_id: registeredSessionID, message: msg })
+                    await $`claude-xmpp-client relay ${reg}`.nothrow()
+                  }
+                }
+              }
+            }
+          } catch (_) {
+            // MCP server not running or unreachable — silently skip
+          }
+        }
+
         const notifyEnabled =
           await $`test -f ${process.env.HOME}/.config/xmpp-notify/notify-enabled`.nothrow()
         if (notifyEnabled.exitCode !== 0) return
-
-        const sessionID = event.properties.sessionID
 
         const res = await client.session.messages({
           path:  { id: sessionID },
