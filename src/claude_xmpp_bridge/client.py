@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import DEFAULT_SOCKET_PATH
+from .config import DEFAULT_SOCKET_PATH, _check_permissions
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ def _get_socket_token() -> str | None:
     if env_token:
         return env_token
     if _TOKEN_FILE.is_file():
+        _check_permissions(_TOKEN_FILE)
         token = _TOKEN_FILE.read_text().strip()
         return token if token else None
     return None
@@ -54,7 +55,14 @@ def send_to_bridge(
             sock.connect(str(socket_path))
             sock.sendall(json.dumps(request).encode() + b"\n")
             sock.shutdown(socket.SHUT_WR)
-            data = sock.recv(65536)
+            # Read until newline — a single recv() may not deliver the full response
+            # (TCP/Unix stream does not guarantee message boundaries).
+            data = b""
+            while b"\n" not in data:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
             if data:
                 parsed = json.loads(data.decode())
                 if isinstance(parsed, dict):

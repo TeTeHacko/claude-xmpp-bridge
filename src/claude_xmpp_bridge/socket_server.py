@@ -122,6 +122,9 @@ class SocketServer:
             log.warning("Client read timeout")
         except Exception as e:
             log.error("Client handler error: %s", e)
+            with contextlib.suppress(OSError):
+                writer.write(json.dumps({"error": "internal error"}).encode() + b"\n")
+                await writer.drain()
         finally:
             writer.close()
             with contextlib.suppress(OSError):

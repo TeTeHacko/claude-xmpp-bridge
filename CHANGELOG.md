@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.16] - 2026-03-08
+
+### Fixed
+- `client.py` `send_to_bridge`: replaced single `sock.recv(65536)` with a
+  loop that reads until `\n`, preventing truncated responses for large
+  payloads (e.g. `list_sessions` with many agents).
+- `client.py` `_get_socket_token`: added `_check_permissions()` check on
+  `socket_token` file — aborts with a clear error if the file has
+  group/other-readable permissions (should be `0600`).
+- `socket_server.py` `_handle_client`: unexpected exceptions in the request
+  handler now send `{"error": "internal error"}` to the client instead of
+  silently closing the connection, preventing the client from blocking on
+  timeout.
+
 ## [0.7.15] - 2026-03-08
 
 ### Added
