@@ -291,13 +291,14 @@ _set_title() {
     printf '\033]2;%s\007' "$title" > /dev/tty 2>/dev/null || true
 }
 
-_detect_icon() {
-    # Detect icon from the command being sandboxed
+_detect_prefix() {
+    # Return a short ASCII state prefix for the window title.
+    # We can't know idle/busy/ask at sandbox level — that's the plugin's job.
+    # Just mark it as an AI session so the window is visually distinct.
     local cmd="${1:-}"
     case "$cmd" in
-        *opencode*) printf '🧠' ;;
-        *claude*)   printf '⚡' ;;
-        *)          printf '⚡' ;;
+        *opencode*|*claude*) printf 'AI. ' ;;
+        *)                   printf 'AI. ' ;;
     esac
 }
 
@@ -308,11 +309,11 @@ trap _restore_title EXIT
 
 # Set title now — detect from -c cmd or first positional arg
 if [[ -n "$BASH_C_MODE" ]]; then
-    _icon=$(_detect_icon "$BASH_C_CMD")
+    _prefix=$(_detect_prefix "$BASH_C_CMD")
 else
-    _icon=$(_detect_icon "${1:-}")
+    _prefix=$(_detect_prefix "${1:-}")
 fi
-_set_title "${_icon}${PROJECT_NAME}"
+_set_title "${_prefix}${PROJECT_NAME}"
 
 # Build the inner command
 if [[ ${#SSH_KEYS[@]} -gt 0 ]]; then

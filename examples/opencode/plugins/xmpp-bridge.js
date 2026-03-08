@@ -28,7 +28,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.16"
+  const PLUGIN_VERSION = "0.7.17"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -206,18 +206,41 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   // ---------------------------------------------------------------------------
-  // Pomocník pro nastavení titulu okna.
-  // Mimo sandbox: screen -X title (přímý přístup k socket démonovi).
-  // Uvnitř sandboxu nebo bez STY: ANSI escape na /dev/tty.
+  // screenTitleWorks: cache výsledku `screen -X title`.
+  // null = neznámo (ještě nezkoušeno), true = funguje, false = selhal (sandbox).
+  // Zabrání opakovanému volání selžou-li příkazu při každém setTitle().
   // ---------------------------------------------------------------------------
-  const setTitle = async (title) => {
-    if (STY) {
-      const res = await $`screen -S ${STY} -p ${WINDOW} -X title ${title}`.nothrow()
-      if (res.exitCode === 0) return
+  let screenTitleWorks = STY ? null : false
+
+  // ---------------------------------------------------------------------------
+  // Pomocník pro nastavení titulu okna.
+  // emojiTitle — použit přes `screen -X title` (mimo sandbox, plná podpora UTF-8)
+  // asciiTitle  — fallback: zapsán přímo na stdout (fd 1, zděděný Screen pty fd).
+  //
+  // Proč stdout místo /dev/tty:
+  //   bwrap --new-session volá setsid() → proces nemá kontrolující terminál →
+  //   open("/dev/tty") vrátí ENXIO i přes bind-mount. Stdout (fd 1) je však
+  //   zděděný file descriptor stále napojený na Screen pseudo-tty; Screen
+  //   zachytí ESC k ... ESC \ a nastaví název okna bez nutnosti socket přístupu.
+  //
+  // Proč ne $`printf '\x1bk...'`:
+  //   Bun's $ template zachycuje stdout subprocesu do bufferu (jako shell $(...)).
+  //   printf zapíše escape sekvenci do pipe, ne do terminálu — Screen ji nikdy nevidí.
+  // ---------------------------------------------------------------------------
+  const setTitle = async (emojiTitle, asciiTitle) => {
+    if (STY && screenTitleWorks !== false) {
+      const res = await $`screen -S ${STY} -p ${WINDOW} -X title ${emojiTitle}`.nothrow()
+      if (res.exitCode === 0) { screenTitleWorks = true; return }
+      screenTitleWorks = false
     }
-    // Fallback: ANSI escape na /dev/tty (funguje v sandboxu i v tmux)
-    await $`printf '\x1bk%s\x1b\\' ${title}`.nothrow()
-    await $`printf '\x1b]2;%s\x07' ${title}`.nothrow()
+    if (STY) {
+      // Fallback: zápis přímo na stdout → Screen pty → Screen nastaví window title.
+      // Funguje i uvnitř bwrap --new-session (zděděný fd, ne /dev/tty).
+      process.stdout.write('\x1bk' + asciiTitle + '\x1b\\')
+      return
+    }
+    // tmux nebo bez multiplexeru: OSC 0 (xterm title)
+    process.stdout.write('\x1b]0;' + emojiTitle + '\x07')
   }
 
   // ---------------------------------------------------------------------------
@@ -225,8 +248,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   //      🧠🟢 = idle (startup, session.idle, session.created)
   //      🧠🔵 = running (session.status: running, permission.replied)
   //      🧠🔴 = vyžaduje interakci (permission.asked — dialog v TUI)
-  // ---------------------------------------------------------------------------
-  await setTitle("🧠🟢" + projectName)
+   // ---------------------------------------------------------------------------
+  await setTitle("🧠🟢" + projectName, "AI. " + projectName)
 
   // ---------------------------------------------------------------------------
   // 2. Registrace aktivní session do bridge — ODLOŽENA přes setImmediate()
@@ -327,7 +350,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           await $`claude-xmpp-client unregister ${registeredSessionID}`.nothrow()
         }
         // Resetovat titul okna
-        await setTitle("")
+        await setTitle("", projectName)
         return
       }
 
@@ -338,7 +361,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (info.parentID) return
 
         const name = info.directory.split("/").pop() || info.directory
-        await setTitle("🧠🟢" + name)
+        await setTitle("🧠🟢" + name, "AI. " + name)
 
         const bid = bridgeID(info.id)
         const reg = JSON.stringify({
@@ -377,7 +400,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const statusType = event.properties.status?.type
         if (statusType === "busy") {
           isIdle = false
-          await setTitle("🧠🔵" + projectName)
+          await setTitle("🧠🔵" + projectName, "AI* " + projectName)
           if (registeredSessionID) {
             await $`claude-xmpp-client state ${JSON.stringify({session_id: registeredSessionID, state: "running"})}`.nothrow()
           }
@@ -389,7 +412,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       if (event.type === "session.idle") {
         isIdle = true
         // Titul: přepnout na 🧠🟢 (idle — čeká na vstup, nic nechce)
-        await setTitle("🧠🟢" + projectName)
+        await setTitle("🧠🟢" + projectName, "AI. " + projectName)
         if (registeredSessionID) {
           await $`claude-xmpp-client state ${JSON.stringify({session_id: registeredSessionID, state: "idle"})}`.nothrow()
         }
@@ -443,7 +466,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // co se chystá spustit; potvrzení musí jít přes TUI.
       if (event.type === "permission.asked") {
         // Titul: přepnout na 🧠🔴 (vyžaduje interakci uživatele — potvrzení v TUI)
-        await setTitle("🧠🔴" + projectName)
+        await setTitle("🧠🔴" + projectName, "AI! " + projectName)
 
         const askEnabled =
           await $`test -f ${process.env.HOME}/.config/xmpp-notify/ask-enabled`.nothrow()
@@ -490,7 +513,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
       // --- PERMISSION REPLIED: obnovit titul 🧠🔵 (dialog uzavřen, model pokračuje) ---
       if (event.type === "permission.replied") {
-        await setTitle("🧠🔵" + projectName)
+        await setTitle("🧠🔵" + projectName, "AI* " + projectName)
         return
       }
     },

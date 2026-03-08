@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.17] - 2026-03-08
+
+### Fixed
+- `examples/opencode/plugins/xmpp-bridge.js`: fixed `setTitle()` so the
+  Screen window-name escape sequence is written directly to `process.stdout`
+  instead of via `$\`printf\`` (which captured stdout into a buffer and never
+  reached the terminal).  The function now accepts two arguments —
+  `emojiTitle` and `asciiTitle` — and falls back to `process.stdout.write()`
+  when `screen -X title` fails (e.g. inside a bwrap sandbox).
+- `examples/sandbox/sandbox`: replaced emoji prefix (`🧠`) produced by the
+  removed `_detect_icon()` with a short ASCII prefix (`AI. `) from the new
+  `_detect_prefix()` function, fixing the corrupted title display in Screen's
+  hardstatus bar (Screen counts UTF-8 bytes instead of display columns for
+  wide characters).
+
 ## [0.7.16] - 2026-03-08
 
 ### Fixed
