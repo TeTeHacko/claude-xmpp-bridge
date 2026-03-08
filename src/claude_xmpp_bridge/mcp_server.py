@@ -12,7 +12,8 @@ Tools:
 
 The ``send_message`` and ``broadcast_message`` tools use the same screen relay
 mechanism as the existing socket relay/broadcast commands.  Received messages
-are queued in-memory; ``receive_messages`` drains and returns them.
+are persisted in SQLite (bridge.db inbox table); ``receive_messages`` drains
+and returns them atomically.  Messages survive bridge restarts.
 
 OpenCode plugin integration:
   - On ``session.idle`` the plugin calls ``receive_messages`` and injects any
@@ -37,7 +38,6 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import FastMCP
@@ -46,9 +46,6 @@ if TYPE_CHECKING:
     from .bridge import XMPPBridge
 
 log = logging.getLogger(__name__)
-
-# Maximum number of queued messages per session before oldest are dropped.
-MAX_QUEUE_SIZE = 100
 
 
 class BridgeMCPServer:
@@ -62,13 +59,16 @@ class BridgeMCPServer:
     The ``bridge`` reference is passed to ``start()`` rather than ``__init__``
     to avoid a circular import at module level (bridge imports mcp_server, mcp_server
     would import bridge).
+
+    Inbox persistence:
+      Messages are stored in the SQLite ``inbox`` table (registry.db) rather than
+      in-memory asyncio queues.  This means messages survive bridge restarts and
+      are not lost if the bridge process is killed.
     """
 
     def __init__(self, port: int) -> None:
         self.port = port
         self._bridge: XMPPBridge | None = None
-        # Per-session inbox queues.  Keys are session_id strings.
-        self._queues: dict[str, asyncio.Queue[str]] = defaultdict(lambda: asyncio.Queue(maxsize=MAX_QUEUE_SIZE))
         self._task: asyncio.Task[None] | None = None
         self._mcp: FastMCP | None = None
 
@@ -77,18 +77,16 @@ class BridgeMCPServer:
     # ------------------------------------------------------------------
 
     def enqueue(self, session_id: str, message: str) -> None:
-        """Put a message into the inbox queue for *session_id*.
+        """Put a message into the SQLite inbox for *session_id*.
 
         Called from bridge relay/broadcast handlers so that MCP clients
         can also receive inter-agent messages via ``receive_messages``.
-        If the queue is full the oldest message is dropped to make room.
+        If the inbox is full the oldest message is dropped to make room.
         """
-        q = self._queues[session_id]
-        if q.full():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                q.get_nowait()  # drop oldest
-        with contextlib.suppress(asyncio.QueueFull):
-            q.put_nowait(message)
+        if self._bridge is None:
+            log.warning("enqueue called before bridge initialised — dropping message for %s", session_id)
+            return
+        self._bridge.registry.inbox_put(session_id, message)
 
     async def start(self, bridge: XMPPBridge) -> None:
         """Initialise the FastMCP server and launch it as a background task."""
@@ -353,18 +351,12 @@ class BridgeMCPServer:
         return bridge.messages.broadcast_sent.format(count=delivered)
 
     def _tool_receive_messages(self, *, session_id: str) -> list[str]:
-        """Implementation of the receive_messages tool — drains the inbox queue."""
-        q = self._queues.get(session_id)
-        if q is None:
-            return []
-        messages: list[str] = []
-        while True:
-            try:
-                messages.append(q.get_nowait())
-            except asyncio.QueueEmpty:
-                break
+        """Implementation of the receive_messages tool — drains the SQLite inbox."""
         bridge = self._bridge
-        if bridge is not None and messages:
+        if bridge is None:
+            return []
+        messages = bridge.registry.inbox_drain(session_id)
+        if messages:
             bridge.audit.log(
                 "MCP_RECEIVE",
                 session_id=session_id,

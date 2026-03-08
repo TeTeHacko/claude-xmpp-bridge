@@ -711,3 +711,127 @@ def test_schema_migration_adds_plugin_version_and_agent_state(db_path):
         assert reg.get("legacy-sess")["agent_state"] == "idle"  # type: ignore[index]
     finally:
         reg.close()
+
+
+# ---------------------------------------------------------------------------
+# 15. inbox_put / inbox_drain / inbox_count
+# ---------------------------------------------------------------------------
+
+
+def test_inbox_drain_empty(db_path):
+    """Draining an empty inbox returns an empty list without error."""
+    reg = SessionRegistry(db_path)
+    try:
+        assert reg.inbox_drain("no-such-session") == []
+    finally:
+        reg.close()
+
+
+def test_inbox_count_empty(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        assert reg.inbox_count("no-such-session") == 0
+    finally:
+        reg.close()
+
+
+def test_inbox_put_and_drain(db_path):
+    """Messages put into the inbox are returned by drain in insertion order."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put("sess-a", "hello")
+        reg.inbox_put("sess-a", "world")
+        messages = reg.inbox_drain("sess-a")
+        assert messages == ["hello", "world"]
+    finally:
+        reg.close()
+
+
+def test_inbox_drain_is_destructive(db_path):
+    """After draining, the inbox is empty."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put("sess-a", "msg1")
+        reg.inbox_drain("sess-a")
+        assert reg.inbox_drain("sess-a") == []
+        assert reg.inbox_count("sess-a") == 0
+    finally:
+        reg.close()
+
+
+def test_inbox_count_reflects_put(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put("sess-a", "m1")
+        reg.inbox_put("sess-a", "m2")
+        reg.inbox_put("sess-a", "m3")
+        assert reg.inbox_count("sess-a") == 3
+    finally:
+        reg.close()
+
+
+def test_inbox_isolated_per_session(db_path):
+    """Messages for session A are not visible to session B."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put("sess-a", "for-a")
+        reg.inbox_put("sess-b", "for-b")
+        assert reg.inbox_drain("sess-a") == ["for-a"]
+        assert reg.inbox_drain("sess-b") == ["for-b"]
+    finally:
+        reg.close()
+
+
+def test_inbox_put_drops_oldest_when_full(db_path):
+    """When inbox exceeds MAX_INBOX_SIZE, the oldest message is dropped."""
+    from claude_xmpp_bridge.registry import MAX_INBOX_SIZE
+
+    reg = SessionRegistry(db_path)
+    try:
+        for i in range(MAX_INBOX_SIZE):
+            reg.inbox_put("sess-a", f"msg-{i}")
+        assert reg.inbox_count("sess-a") == MAX_INBOX_SIZE
+
+        # One more — should drop msg-0
+        reg.inbox_put("sess-a", "overflow")
+        assert reg.inbox_count("sess-a") == MAX_INBOX_SIZE
+
+        messages = reg.inbox_drain("sess-a")
+        assert messages[0] == "msg-1"  # msg-0 was dropped
+        assert messages[-1] == "overflow"
+    finally:
+        reg.close()
+
+
+def test_inbox_persists_across_restart(db_path):
+    """Messages survive registry close/reopen (SQLite persistence)."""
+    reg1 = SessionRegistry(db_path)
+    try:
+        reg1.inbox_put("sess-a", "persistent-msg")
+    finally:
+        reg1.close()
+
+    reg2 = SessionRegistry(db_path)
+    try:
+        messages = reg2.inbox_drain("sess-a")
+        assert messages == ["persistent-msg"]
+    finally:
+        reg2.close()
+
+
+def test_inbox_from_session_stored(db_path):
+    """from_session metadata is stored in the inbox row (verified via DB)."""
+    import sqlite3
+
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put("sess-b", "hi there", from_session="sess-a")
+    finally:
+        reg.close()
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT from_session, message FROM inbox WHERE to_session = 'sess-b'").fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "sess-a"
+    assert row[1] == "hi there"

@@ -9,6 +9,9 @@ import time
 from pathlib import Path
 from typing import TypedDict
 
+# Maximum number of queued inbox messages per session before the oldest are dropped.
+MAX_INBOX_SIZE = 100
+
 log = logging.getLogger(__name__)
 
 # Validation patterns
@@ -68,6 +71,16 @@ class SessionRegistry:
             "  registered_at REAL"
             ")"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS inbox ("
+            "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  to_session   TEXT    NOT NULL,"
+            "  from_session TEXT,"
+            "  message      TEXT    NOT NULL,"
+            "  created_at   REAL    NOT NULL"
+            ")"
+        )
+        self._db.execute("CREATE INDEX IF NOT EXISTS inbox_to_session ON inbox (to_session, id)")
         self._db.commit()
         # Migrations: add columns for existing databases that predate these fields
         cols = {row[1] for row in self._db.execute("PRAGMA table_info(sessions)")}
@@ -236,6 +249,52 @@ class SessionRegistry:
         if self.last_active and self.last_active in self.sessions:
             return self.last_active, self.sessions[self.last_active]
         return None, None
+
+    def inbox_put(self, to_session: str, message: str, from_session: str | None = None) -> None:
+        """Persistently enqueue a message in the inbox for *to_session*.
+
+        If the inbox already contains MAX_INBOX_SIZE messages for this session,
+        the oldest one is dropped to make room (same policy as the previous
+        in-memory asyncio.Queue with maxsize=100).
+        """
+        with self._db:
+            count: int = self._db.execute("SELECT COUNT(*) FROM inbox WHERE to_session = ?", (to_session,)).fetchone()[
+                0
+            ]
+            if count >= MAX_INBOX_SIZE:
+                # Drop the oldest message for this session.
+                self._db.execute(
+                    "DELETE FROM inbox WHERE to_session = ? AND id = (SELECT MIN(id) FROM inbox WHERE to_session = ?)",
+                    (to_session, to_session),
+                )
+            self._db.execute(
+                "INSERT INTO inbox (to_session, from_session, message, created_at) VALUES (?, ?, ?, ?)",
+                (to_session, from_session, message, time.time()),
+            )
+
+    def inbox_drain(self, session_id: str) -> list[str]:
+        """Atomically drain and return all pending messages for *session_id*.
+
+        Messages are returned in insertion order (oldest first).  The rows are
+        deleted in the same transaction so concurrent callers cannot receive
+        the same message twice.
+        """
+        with self._db:
+            rows = self._db.execute(
+                "SELECT id, message FROM inbox WHERE to_session = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+            if rows:
+                ids = [r[0] for r in rows]
+                self._db.execute(
+                    f"DELETE FROM inbox WHERE id IN ({','.join('?' * len(ids))})",  # noqa: S608
+                    ids,
+                )
+        return [r[1] for r in rows]
+
+    def inbox_count(self, session_id: str) -> int:
+        """Return the number of pending messages for *session_id*."""
+        return int(self._db.execute("SELECT COUNT(*) FROM inbox WHERE to_session = ?", (session_id,)).fetchone()[0])
 
     def close(self) -> None:
         """Close the database connection."""
