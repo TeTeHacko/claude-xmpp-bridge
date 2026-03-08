@@ -28,6 +28,7 @@ def _make_session_info(
     source: str = "opencode",
     plugin_version: str | None = None,
     agent_state: str | None = None,
+    agent_mode: str | None = None,
 ) -> dict:
     return {
         "project": project,
@@ -38,6 +39,7 @@ def _make_session_info(
         "registered_at": 1_000_000.0,
         "plugin_version": plugin_version,
         "agent_state": agent_state,
+        "agent_mode": agent_mode,
     }
 
 

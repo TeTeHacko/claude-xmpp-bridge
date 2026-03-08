@@ -215,7 +215,8 @@ class TestListCommand:
         conn.send.assert_called_once()
         sent_text = conn.send.call_args[0][1]
         assert "Sessions:" in sent_text
-        assert "[⚡screen #0]" in sent_text  # window label included
+        assert "[screen #0]" in sent_text  # window label included
+        assert "⚡" in sent_text  # default source icon present
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_empty(self, MockXMPP, tmp_path):
@@ -269,7 +270,8 @@ class TestListCommand:
             await captured["cb"](fake_msg)
 
         sent_text = conn.send.call_args[0][1]
-        assert "[⚡tmux :tmux-session]" in sent_text
+        assert "[tmux :tmux-session]" in sent_text
+        assert "⚡" in sent_text
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -289,12 +291,13 @@ class TestListCommand:
         await captured["cb"](fake_msg)
 
         sent_text = conn.send.call_args[0][1]
-        assert "[⚡read-only]" in sent_text
+        assert "[read-only]" in sent_text
+        assert "⚡" in sent_text
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_shows_opencode_read_only_tag(self, MockXMPP, tmp_path):
-        """OpenCode session with no backend should show [🧠read-only]."""
+        """OpenCode session with no backend should show 🧠 icon + [read-only]."""
         conn, captured = _make_mock_conn(MockXMPP)
         config = _make_config(tmp_path)
         bridge = XMPPBridge(config)
@@ -311,7 +314,8 @@ class TestListCommand:
         await captured["cb"](fake_msg)
 
         sent_text = conn.send.call_args[0][1]
-        assert "[🧠read-only]" in sent_text
+        assert "[read-only]" in sent_text
+        assert "🧠" in sent_text
         bridge.registry.close()
 
 
@@ -893,7 +897,9 @@ class TestOpenCodeSourceTag:
 
         conn.send.assert_called_once()
         sent_text = conn.send.call_args[0][1]
-        assert "[🧠screen #0]" in sent_text
+        # New format: icons BEFORE bracket — "🧠  [screen #0]"
+        assert "🧠" in sent_text
+        assert "[screen #0]" in sent_text
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -917,7 +923,8 @@ class TestOpenCodeSourceTag:
 
         conn.send.assert_called_once()
         sent_text = conn.send.call_args[0][1]
-        assert "[⚡screen #0]" in sent_text
+        # New format: "⚡  [screen #0]" — no 🧠
+        assert "[screen #0]" in sent_text
         assert "🧠" not in sent_text
         bridge.registry.close()
 
@@ -1769,7 +1776,8 @@ class TestListIcons:
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        assert "[⚡screen #0]" in text  # window label appended
+        assert "⚡" in text  # lightning icon present (before bracket)
+        assert "[screen #0]" in text  # window label in bracket
         assert "🧠" not in text
         bridge.registry.close()
 
@@ -1788,7 +1796,8 @@ class TestListIcons:
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        assert "[⚡tmux :session]" in text  # pane label in tmux style
+        assert "⚡" in text  # lightning icon present (before bracket)
+        assert "[tmux :session]" in text  # pane label in tmux style, in bracket
         assert "🧠" not in text
         bridge.registry.close()
 
@@ -1806,7 +1815,8 @@ class TestListIcons:
         )
         await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        assert "[⚡read-only]" in text
+        assert "⚡" in text  # lightning icon present (before bracket)
+        assert "[read-only]" in text
         assert "🧠" not in text
         bridge.registry.close()
 
@@ -1826,7 +1836,8 @@ class TestListIcons:
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        assert "[🧠screen #0]" in text  # window label appended
+        assert "🧠" in text  # brain icon present (before bracket)
+        assert "[screen #0]" in text  # window label in bracket
         assert "⚡" not in text
         bridge.registry.close()
 
@@ -1853,8 +1864,52 @@ class TestListIcons:
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        assert "[⚡screen #0]" in text
-        assert "[🧠screen #0]" in text
+        assert "⚡" in text  # lightning for Claude Code session
+        assert "🧠" in text  # brain for OpenCode session
+        assert text.count("[screen #0]") == 2  # both sessions have bracket label
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_list_shows_mode_icon_when_agent_mode_set(self, MockXMPP, tmp_path):
+        """When agent_mode is 'code', the ✏️ mode icon appears in /list output."""
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register(
+            session_id="oc-mode",
+            sty="400.pts-0",
+            window="0",
+            project="/home/u/proj",
+            backend="screen",
+            source="opencode",
+        )
+        bridge.registry.update_state("oc-mode", "running", mode="code")
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
+        text = conn.send.call_args[0][1]
+        assert "🧠" in text  # source icon
+        assert "✏️" in text  # mode icon for "code"
+        assert "[screen #0]" in text
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_list_no_mode_icon_when_agent_mode_none(self, MockXMPP, tmp_path):
+        """When agent_mode is None, no mode icon appears in /list output."""
+        conn, captured = _make_mock_conn(MockXMPP)
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register(
+            session_id="oc-nomode",
+            sty="500.pts-0",
+            window="0",
+            project="/home/u/proj",
+            backend="screen",
+            source="opencode",
+        )
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
+        text = conn.send.call_args[0][1]
+        assert "✏️" not in text
+        assert "⚙️" not in text
+        assert "📋" not in text
         bridge.registry.close()
 
 
@@ -4181,6 +4236,43 @@ class TestStateCommand:
         result = bridge._handle_state({"session_id": "s1", "state": "running"})
         assert result == {"ok": True}
         assert bridge.registry.get("s1")["agent_state"] == "running"  # type: ignore[index]
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_state_with_mode_updates_agent_mode(self, MockXMPP, tmp_path):
+        """_handle_state with mode field updates both agent_state and agent_mode."""
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "", "", "/proj", backend=None)
+
+        result = bridge._handle_state({"session_id": "s1", "state": "running", "mode": "code"})
+        assert result == {"ok": True}
+        info = bridge.registry.get("s1")
+        assert info is not None
+        assert info["agent_state"] == "running"
+        assert info["agent_mode"] == "code"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_state_without_mode_leaves_agent_mode_unchanged(self, MockXMPP, tmp_path):
+        """_handle_state without mode field does not reset agent_mode."""
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "", "", "/proj", backend=None)
+        bridge.registry.update_state("s1", "running", mode="build")
+
+        result = bridge._handle_state({"session_id": "s1", "state": "idle"})
+        assert result == {"ok": True}
+        info = bridge.registry.get("s1")
+        assert info is not None
+        assert info["agent_state"] == "idle"
+        assert info["agent_mode"] == "build"  # preserved
         bridge.registry.close()
 
 

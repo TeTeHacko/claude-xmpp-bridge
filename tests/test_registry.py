@@ -677,6 +677,75 @@ def test_reregister_preserves_agent_state(db_path):
         reg.close()
 
 
+def test_agent_mode_defaults_to_none(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("mode-sess", "", "", "/proj")
+        info = reg.get("mode-sess")
+        assert info is not None
+        assert info["agent_mode"] is None
+    finally:
+        reg.close()
+
+
+def test_update_state_with_mode_sets_agent_mode(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("mode-sess", "", "", "/proj")
+        reg.update_state("mode-sess", "running", mode="code")
+        info = reg.get("mode-sess")
+        assert info is not None
+        assert info["agent_state"] == "running"
+        assert info["agent_mode"] == "code"
+    finally:
+        reg.close()
+
+
+def test_update_state_without_mode_leaves_agent_mode_unchanged(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("mode-sess", "", "", "/proj")
+        reg.update_state("mode-sess", "running", mode="build")
+        reg.update_state("mode-sess", "idle")  # no mode arg
+        info = reg.get("mode-sess")
+        assert info is not None
+        assert info["agent_state"] == "idle"
+        assert info["agent_mode"] == "build"  # preserved
+    finally:
+        reg.close()
+
+
+def test_agent_mode_persists_across_restart(db_path):
+    reg1 = SessionRegistry(db_path)
+    try:
+        reg1.register("mode-sess", "", "", "/proj")
+        reg1.update_state("mode-sess", "idle", mode="planning")
+    finally:
+        reg1.close()
+
+    reg2 = SessionRegistry(db_path)
+    try:
+        info = reg2.get("mode-sess")
+        assert info is not None
+        assert info["agent_mode"] == "planning"
+    finally:
+        reg2.close()
+
+
+def test_reregister_preserves_agent_mode(db_path):
+    """Re-registering must not reset agent_mode."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("mode-sess", "", "", "/proj")
+        reg.update_state("mode-sess", "running", mode="code")
+        reg.register("mode-sess", "", "", "/proj")  # re-register
+        info = reg.get("mode-sess")
+        assert info is not None
+        assert info["agent_mode"] == "code"
+    finally:
+        reg.close()
+
+
 def test_schema_migration_adds_plugin_version_and_agent_state(db_path):
     """Old DB without plugin_version/agent_state columns should be migrated."""
     import sqlite3
@@ -709,6 +778,42 @@ def test_schema_migration_adds_plugin_version_and_agent_state(db_path):
         # New fields are writable after migration
         reg.update_state("legacy-sess", "idle")
         assert reg.get("legacy-sess")["agent_state"] == "idle"  # type: ignore[index]
+    finally:
+        reg.close()
+
+
+def test_schema_migration_adds_agent_mode(db_path):
+    """Old DB with plugin_version/agent_state but without agent_mode should be migrated."""
+    import sqlite3
+
+    # Create a DB that has source, plugin_version, agent_state but NOT agent_mode
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE sessions ("
+        "  session_id TEXT PRIMARY KEY,"
+        "  sty TEXT, window TEXT, project TEXT, backend TEXT, source TEXT, registered_at REAL,"
+        "  plugin_version TEXT, agent_state TEXT"
+        ")"
+    )
+    conn.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("legacy-sess", "", "", "/old/project", None, None, 1000.0, None, None),
+    )
+    conn.commit()
+    conn.close()
+
+    # Registry must migrate transparently
+    reg = SessionRegistry(db_path)
+    try:
+        info = reg.get("legacy-sess")
+        assert info is not None
+        assert info["agent_mode"] is None  # defaulted to NULL after migration
+
+        # agent_mode is writable after migration
+        reg.update_state("legacy-sess", "idle", mode="planning")
+        assert reg.get("legacy-sess")["agent_mode"] == "planning"  # type: ignore[index]
     finally:
         reg.close()
 

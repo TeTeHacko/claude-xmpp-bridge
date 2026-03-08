@@ -144,24 +144,38 @@ class XMPPBridge:
             marker = " *" if sid == active_id else ""
             backend = info["backend"]
             source = info.get("source")
-            icon = self._source_icon(source)
+            source_icon = self._source_icon(source)
             window_label = self._window_label(info)
-            if backend == "screen":
-                tag = f"[{icon}screen{window_label}]"
-            elif backend == "tmux":
-                tag = f"[{icon}tmux{window_label}]"
-            else:
-                tag = f"[{icon}{self.messages.read_only_tag}]"
-            project = info["project"]
             state = info.get("agent_state") or ""
+            mode = info.get("agent_mode") or ""
             version = info.get("plugin_version") or ""
-            meta = ""
-            if state:
-                state_icon = "⏸" if state == "idle" else "▶" if state == "running" else state
-                meta += f" {state_icon}"
-            if version:
-                meta += f" v{version}"
-            lines.append(f"  /{i} {self._short_path(project)} {tag}{meta}{marker}")
+            project = info["project"]
+
+            # Mode icon (only if mode known)
+            mode_icons = {"planning": "📋", "code": "✏️", "build": "⚙️"}
+            mode_icon = mode_icons.get(mode, "")
+
+            # State icon
+            if state == "idle":
+                state_icon = "⏸"
+            elif state == "running":
+                state_icon = "▶"
+            else:
+                state_icon = state  # raw value fallback
+
+            # Icons prefix: source + mode + state
+            icons = source_icon + mode_icon + (state_icon if state else "")
+
+            # Backend bracket (no icons inside)
+            if backend == "screen":
+                tag = f"[screen{window_label}]"
+            elif backend == "tmux":
+                tag = f"[tmux{window_label}]"
+            else:
+                tag = f"[{self.messages.read_only_tag}]"
+
+            meta = f" v{version}" if version else ""
+            lines.append(f"  /{i}  {icons}  {tag}{meta}  {self._short_path(project)}{marker}")
         lines.append(f"\n{self.messages.active_marker}")
         self._xmpp_send("\n".join(lines))
 
@@ -687,11 +701,12 @@ class XMPPBridge:
         return {"ok": True}
 
     def _handle_state(self, req: dict[str, object]) -> dict[str, object]:
-        """Update the agent_state for a registered session.
+        """Update the agent_state (and optionally agent_mode) for a registered session.
 
         Protocol fields:
           - ``session_id`` : session to update (required)
           - ``state``      : new state string, e.g. "idle" or "running" (required)
+          - ``mode``       : new mode string, e.g. "planning", "code", "build" (optional)
         """
         sid = str(req.get("session_id", ""))
         if not sid:
@@ -699,10 +714,12 @@ class XMPPBridge:
         state = str(req.get("state", ""))
         if not state:
             return {"error": "missing state"}
-        updated = self.registry.update_state(sid, state)
+        mode_raw = req.get("mode")
+        mode = str(mode_raw) if mode_raw is not None else None
+        updated = self.registry.update_state(sid, state, mode=mode)
         if not updated:
             return {"error": f"session not found: {sid}"}
-        self.audit.log("SESSION_STATE", session_id=sid, state=state)
+        self.audit.log("SESSION_STATE", session_id=sid, state=state, mode=mode)
         return {"ok": True}
 
     def _handle_response(self, req: dict[str, object]) -> dict[str, object]:
@@ -960,6 +977,7 @@ class XMPPBridge:
                     "registered_at": info["registered_at"],
                     "plugin_version": info.get("plugin_version"),
                     "agent_state": info.get("agent_state"),
+                    "agent_mode": info.get("agent_mode"),
                 }
             )
         return {"ok": True, "sessions": result}

@@ -6,15 +6,30 @@
  *  - session.created          → registrace nové top-level session (při /new)
  *  - session.deleted          → odhlásí session z bridge
  *  - session.idle             → XMPP notifikace s poslední odpovědí + MCP inbox poll
- *  - session.status (running) → aktualizace titulu
+ *  - session.status (busy)    → mód = "planning" (model začal myslet, čeká na první tool)
+ *  - tool.execute.before      → detekce módu dle tool typu + okamžitý update titulku
  *  - permission.asked         → informativní XMPP notifikace (co se chystá spustit); potvrzení přes TUI
  *  - permission.replied       → aktualizace titulu
  *  - server.instance.disposed → unregister + reset titulu
  *
- * Titulky oken (traffic light stav):
- *   🧠🟢 projekt  — idle (čeká na vstup, nic nechce)
- *   🧠🔵 projekt  — running (model generuje výstup nebo pokračuje po permission)
- *   🧠🔴 projekt  — vyžaduje interakci (permission dialog otevřen v TUI)
+ * Titulky oken — semafor: {módIkona}{stavKruh} projekt
+ *
+ *   Mód (levý symbol — co agent právě dělá):
+ *     BRIDGE_MODE_PLANNING (výchozí 📋) — model přemýšlí / čte soubory
+ *     BRIDGE_MODE_CODE     (výchozí ✏️)  — edituje soubory (edit/write/multiedit)
+ *     BRIDGE_MODE_BUILD    (výchozí ⚙️)  — spouští příkazy (bash)
+ *
+ *   Stav (pravý kruh — lifecycle agenta):
+ *     🟢 idle        — čeká na vstup
+ *     🔵 running     — model generuje výstup nebo pokračuje po permission
+ *     🔴 interaction — permission dialog otevřen v TUI
+ *
+ *   Příklady: 📋🟢 projekt  |  ✏️🔵 projekt  |  ⚙️🔵 projekt  |  📋🔴 projekt
+ *
+ * Konfigurace mód ikon přes env proměnné:
+ *   export BRIDGE_MODE_PLANNING=📋   # nebo jiný emoji dle vkusu
+ *   export BRIDGE_MODE_CODE=✏️
+ *   export BRIDGE_MODE_BUILD=⚙️
  *
  * MCP inbox polling:
  *   - Při session.idle: okamžitý poll
@@ -28,7 +43,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.17"
+  const PLUGIN_VERSION = "0.7.18"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -96,6 +111,41 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // kdy druhá zpráva dorazí dřív než model zpracuje první (→ "assistant prefill" chyba).
   // ---------------------------------------------------------------------------
   let messageBuffer = []
+
+  // ---------------------------------------------------------------------------
+  // Mód agenta — co právě dělá (detekován z tool callů).
+  //   "planning" — model přemýšlí / čte soubory (výchozí při startu + busy)
+  //   "code"     — edituje soubory (tool: edit / write / multiedit)
+  //   "build"    — spouští příkazy (tool: bash)
+  //
+  // Ikony lze přizpůsobit přes env proměnné BRIDGE_MODE_PLANNING/CODE/BUILD.
+  // ---------------------------------------------------------------------------
+  const modeIcons = {
+    planning: process.env.BRIDGE_MODE_PLANNING ?? "📋",
+    code:     process.env.BRIDGE_MODE_CODE     ?? "✏️",
+    build:    process.env.BRIDGE_MODE_BUILD    ?? "⚙️",
+  }
+
+  // Mód → tool name mapping (vše co není bash/edit/write/multiedit = planning)
+  const TOOL_MODES = {
+    bash:      "build",
+    edit:      "code",
+    write:     "code",
+    multiedit: "code",
+  }
+
+  // Aktuální mód — mění se při tool.execute.before a při session.status: busy
+  let currentMode = "planning"
+
+  // Sestaví emoji titulek okna z aktuálního módu + stavového kruhu.
+  // Volitelný parametr name přepíše projectName (použití při session.created).
+  const buildTitle = (stateCircle, name) =>
+    `${modeIcons[currentMode] ?? modeIcons.planning}${stateCircle} ${name ?? projectName}`
+
+  // Sestaví ASCII fallback titulek (bez emoji) — jen stavový prefix + název.
+  // Mód se v ASCII nevyjadřuje (je to záložní cesta pro bwrap sandbox).
+  const buildAscii = (statePrefix, name) =>
+    `${statePrefix} ${name ?? projectName}`
 
   // ---------------------------------------------------------------------------
   // pollInbox(): zkontroluje MCP inbox a doručí čekající zprávy do terminálu.
@@ -244,12 +294,20 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   // ---------------------------------------------------------------------------
-  // 1. Přejmenovat okno při startu — traffic light stav:
-  //      🧠🟢 = idle (startup, session.idle, session.created)
-  //      🧠🔵 = running (session.status: running, permission.replied)
-  //      🧠🔴 = vyžaduje interakci (permission.asked — dialog v TUI)
-   // ---------------------------------------------------------------------------
-  await setTitle("🧠🟢" + projectName, "AI. " + projectName)
+  // Hlásí stav do bridge s aktuálním módem.
+  // ---------------------------------------------------------------------------
+  const reportState = async (state) => {
+    if (!registeredSessionID) return
+    const payload = JSON.stringify({ session_id: registeredSessionID, state, mode: currentMode })
+    await $`claude-xmpp-client state ${payload}`.nothrow()
+  }
+
+  // ---------------------------------------------------------------------------
+  // 1. Přejmenovat okno při startu.
+  //    Výchozí mód = "planning" (agent čeká na vstup, ještě nic neudělal).
+  //    Stavový kruh = 🟢 (idle).
+  // ---------------------------------------------------------------------------
+  await setTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
 
   // ---------------------------------------------------------------------------
   // 2. Registrace aktivní session do bridge — ODLOŽENA přes setImmediate()
@@ -319,8 +377,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       })
       await $`claude-xmpp-client register ${reg}`.nothrow()
       await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${active.directory}`.nothrow()
-      // Report initial state (agent is idle at startup)
-      await $`claude-xmpp-client state ${JSON.stringify({session_id: bid, state: "idle"})}`.nothrow()
+      // Report initial state (agent is idle at startup, mode = planning)
+      await reportState("idle")
 
       // Spustit periodický inbox polling po registraci
       if (STY && !pollTimer) {
@@ -335,6 +393,27 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   })
 
   return {
+    // -------------------------------------------------------------------------
+    // tool.execute.before: detekce módu agenta dle právě spouštěného tool.
+    // Volá se před každým tool callem — okamžitě aktualizuje mód i titulek.
+    //
+    // Mapování:
+    //   bash → "build"    (spouštění příkazů, testy, kompilace)
+    //   edit / write / multiedit → "code"  (editace souborů)
+    //   vše ostatní (read, glob, grep, task, ...) → "planning"  (čtení, analýza)
+    // -------------------------------------------------------------------------
+    "tool.execute.before": async (input, _output) => {
+      const newMode = TOOL_MODES[input.tool] ?? "planning"
+      if (newMode !== currentMode) {
+        currentMode = newMode
+        await dbg("mode → " + currentMode + " (tool: " + input.tool + ")")
+      }
+      // Vždy aktualizovat titulek — agent je zaneprázdněn (🔵)
+      await setTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
+      // Průběžně hlásit mód do bridge
+      await reportState("running")
+    },
+
     // -------------------------------------------------------------------------
     // Události session + lifecycle
     // -------------------------------------------------------------------------
@@ -361,7 +440,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (info.parentID) return
 
         const name = info.directory.split("/").pop() || info.directory
-        await setTitle("🧠🟢" + name, "AI. " + name)
+        // Reset módu na "planning" — nová session začíná bez history
+        currentMode = "planning"
+        await setTitle(buildTitle("🟢", name), buildAscii("AI.", name))
 
         const bid = bridgeID(info.id)
         const reg = JSON.stringify({
@@ -375,10 +456,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         })
         await $`claude-xmpp-client register ${reg}`.nothrow()
         await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${info.directory}`.nothrow()
-        await $`claude-xmpp-client state ${JSON.stringify({session_id: bid, state: "idle"})}`.nothrow()
         registeredSessionID = bid
         ocToBridge.set(info.id, bid)
         process.env.BRIDGE_SESSION_ID = bid
+        await reportState("idle")
         return
       }
 
@@ -395,27 +476,25 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
       // --- SESSION STATUS: indikace stavu v titulu ---
       // session.status.type je objekt: { type: "busy" } nebo { type: "idle" }
-      // "busy" = model generuje výstup; "idle" je pokryto session.idle eventem
+      // "busy" = model začal generovat — mód resetujeme na "planning" (čeká na první tool).
+      // Tool.execute.before přijde záhy a upřesní mód dle skutečného tool callu.
       if (event.type === "session.status") {
         const statusType = event.properties.status?.type
         if (statusType === "busy") {
           isIdle = false
-          await setTitle("🧠🔵" + projectName, "AI* " + projectName)
-          if (registeredSessionID) {
-            await $`claude-xmpp-client state ${JSON.stringify({session_id: registeredSessionID, state: "running"})}`.nothrow()
-          }
+          currentMode = "planning"  // výchozí mód na začátku každé odpovědi
+          await setTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
+          await reportState("running")
         }
         return
       }
 
-      // --- SESSION IDLE: titul 🧠🟢 + XMPP notifikace + MCP inbox poll ---
+      // --- SESSION IDLE: semafor 🟢 + XMPP notifikace + MCP inbox poll ---
       if (event.type === "session.idle") {
         isIdle = true
-        // Titul: přepnout na 🧠🟢 (idle — čeká na vstup, nic nechce)
-        await setTitle("🧠🟢" + projectName, "AI. " + projectName)
-        if (registeredSessionID) {
-          await $`claude-xmpp-client state ${JSON.stringify({session_id: registeredSessionID, state: "idle"})}`.nothrow()
-        }
+        // Titulek: zachovat aktuální mód (ukazuje co agent naposledy dělal) + 🟢
+        await setTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
+        await reportState("idle")
 
         const sessionID = event.properties.sessionID
 
@@ -460,13 +539,13 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- PERMISSION ASKED: titul 🧠🔴 + informativní XMPP notifikace ---
+      // --- PERMISSION ASKED: semafor 🔴 + informativní XMPP notifikace ---
       // OpenCode nečeká na výsledek event handlerů — TUI dialog nelze zavřít
       // z pluginu přes permission.asked event. Posíláme tedy jen notifikaci
       // co se chystá spustit; potvrzení musí jít přes TUI.
       if (event.type === "permission.asked") {
-        // Titul: přepnout na 🧠🔴 (vyžaduje interakci uživatele — potvrzení v TUI)
-        await setTitle("🧠🔴" + projectName, "AI! " + projectName)
+        // Titulek: zachovat mód (již detekovaný z tool.execute.before), přepnout na 🔴
+        await setTitle(buildTitle("🔴"), buildAscii("AI!", projectName))
 
         const askEnabled =
           await $`test -f ${process.env.HOME}/.config/xmpp-notify/ask-enabled`.nothrow()
@@ -511,9 +590,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- PERMISSION REPLIED: obnovit titul 🧠🔵 (dialog uzavřen, model pokračuje) ---
+      // --- PERMISSION REPLIED: obnovit 🔵 (dialog uzavřen, model pokračuje) ---
       if (event.type === "permission.replied") {
-        await setTitle("🧠🔵" + projectName, "AI* " + projectName)
+        await setTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
         return
       }
     },

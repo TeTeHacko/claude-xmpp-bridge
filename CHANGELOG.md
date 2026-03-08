@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.18] - 2026-03-08
+
+### Added
+- Agent mode indicator ("semafor") for the OpenCode plugin: the window title
+  now shows a mode icon to the left of the state circle — `📋` planning
+  (default, read-only tools), `✏️` code (edit/write/multiedit), `⚙️` build
+  (bash).  Mode icons are configurable via env vars `BRIDGE_MODE_PLANNING`,
+  `BRIDGE_MODE_CODE`, `BRIDGE_MODE_BUILD`.
+- New `"tool.execute.before"` hook in
+  `examples/opencode/plugins/xmpp-bridge.js`: detects the tool being executed
+  and updates `currentMode` immediately before each tool call.  Starting a new
+  response (`session.status: busy`) resets mode to `"planning"`.
+- `agent_mode` column in the sessions DB table (auto-migrated from older
+  schemas).  `SessionRegistry.update_state()` now accepts an optional `mode`
+  keyword argument that persists the new mode alongside `agent_state`.
+- `/list` XMPP output now uses a new format: source icon + mode icon (if
+  known) + state icon appear **before** the backend bracket, not inside it.
+  Example: `  /1  🧠✏️▶  [screen #2]  v0.7.18  ~/projects/my-app  *`
+- Bridge `_handle_state()` extracts an optional `mode` field from the socket
+  payload and forwards it to `update_state()`.
+- `list_sessions` MCP tool response now includes `agent_mode` per session.
+
 ## [0.7.17] - 2026-03-08
 
 ### Fixed

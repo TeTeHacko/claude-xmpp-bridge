@@ -6,7 +6,7 @@ This plugin integrates `claude-xmpp-bridge` with [OpenCode](https://opencode.ai)
 
 ## What it does
 
-- On startup: renames the GNU Screen/tmux window to `🧠🟢<project>` and registers the active session with the bridge
+- On startup: renames the GNU Screen/tmux window to `🧠📋🟢<project>` and registers the active session with the bridge
 - `session.created` (e.g. `/new`): registers the new session
 - `session.deleted`: unregisters the session from the bridge
 - `session.idle`:
@@ -16,6 +16,7 @@ This plugin integrates `claude-xmpp-bridge` with [OpenCode](https://opencode.ai)
 - `permission.asked`: sends an informative XMPP notification showing what the AI wants to run — the actual approval/denial still happens in the OpenCode TUI (switch: `ask-enabled`)
 - `permission.replied`: sets title to `🧠🔵` (model continues after permission)
 - Reports agent state `running` when the model starts generating output
+- `tool.execute.before`: detects the tool being executed and updates the mode icon in the window title immediately
 
 ## Setup
 
@@ -64,24 +65,55 @@ The same switch files as Claude Code hooks:
 Enable: `touch ~/.config/xmpp-notify/<file>`
 Disable: `rm ~/.config/xmpp-notify/<file>`
 
-## Window Title — Traffic Light State
+## Window Title — Mode + State
 
-The plugin sets the GNU Screen/tmux window title to reflect the agent's current state:
+The plugin sets the GNU Screen/tmux window title with two icons: a **mode icon** (what the agent is doing) and a **state circle** (whether it is active):
 
-| Title | State | When |
-|-------|-------|------|
-| `🧠🟢 project` | idle | startup, `session.idle`, `/new` |
-| `🧠🔵 project` | running | model generating output, after permission confirmed |
-| `🧠🔴 project` | requires interaction | permission dialog open in TUI — needs your input |
+### Mode icons
 
-## Agent State and Plugin Version
+| Icon | Mode | When |
+|------|------|------|
+| `📋` | planning | default — reading files, searching, thinking |
+| `✏️` | code | editing files (`edit`, `write`, `multiedit` tools) |
+| `⚙️` | build | running commands (`bash` tool) |
 
-The plugin reports its version (`plugin_version`) in the registration payload and keeps the bridge informed of agent state:
+Mode resets to `📋` at the start of each new response (`session.status: busy`).
 
-- `idle` — after registration and after each `session.idle` event
-- `running` — when the model starts generating output
+Mode icons are configurable via environment variables: `BRIDGE_MODE_PLANNING`, `BRIDGE_MODE_CODE`, `BRIDGE_MODE_BUILD`.
 
-This information appears in `/list` output as `⏸`/`▶` icons and a version tag.
+### State circles
+
+| Icon | State | When |
+|------|-------|------|
+| `🟢` | idle | startup, `session.idle`, `/new` |
+| `🔵` | running | model generating output, after permission confirmed |
+| `🔴` | requires interaction | permission dialog open in TUI — needs your input |
+
+### Example titles
+
+```
+🧠📋🟢 my-project    ← idle, planning mode (just started or finished)
+🧠✏️🔵 my-project    ← running, editing files
+🧠⚙️🔵 my-project    ← running, executing bash command
+🧠⚙️🔴 my-project    ← permission required for bash
+```
+
+## Agent State, Mode, and Plugin Version
+
+The plugin reports its version (`plugin_version`) in the registration payload and keeps the bridge informed of agent state and mode:
+
+- **State**: `idle` — after registration and `session.idle`; `running` — when generating output
+- **Mode**: `planning` / `code` / `build` — updated before each tool call
+
+This information appears in `/list` XMPP output as icons before the backend bracket and a version tag:
+
+```
+Sessions:
+  /1  🧠📋⏸  [screen #2]  v0.7.18  ~/projects/my-app  *
+  /2  🧠✏️▶  [screen #4]  v0.7.18  ~/projects/other
+
+* = active session
+```
 
 ## MCP Inbox Polling
 
@@ -96,12 +128,13 @@ Received messages are injected into the terminal via `claude-xmpp-client relay`.
 
 Claude Code and OpenCode sessions in the **same project directory coexist** — the bridge tracks them separately by `source`. Neither tool's session evicts the other's.
 
-In `/list` output, OpenCode sessions are distinguished by the `🧠` prefix:
+In `/list` output, OpenCode sessions are distinguished by the `🧠` prefix (Claude Code uses `⚡`):
 
 ```
 Sessions:
-  /1 ~/projects/my-app [screen] *       ← Claude Code
-  /2 ~/projects/my-app [🧠screen]       ← OpenCode
+  /1  ⚡⏸   [screen #0]  ~/projects/my-app  *    ← Claude Code
+  /2  🧠📋⏸  [screen #2]  ~/projects/my-app       ← OpenCode
+
 * = active session
 ```
 
@@ -110,3 +143,4 @@ Sessions:
 - `claude-xmpp-bridge` — must be running (via systemd or manually)
 - `claude-xmpp-client` — socket client for bridge communication (relay, state, register, unregister, notify)
 - GNU Screen or tmux
+
