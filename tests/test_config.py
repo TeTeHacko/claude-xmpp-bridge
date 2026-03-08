@@ -865,3 +865,98 @@ class TestValidateConfig:
                 validate_config(cfg)
         finally:
             locked_dir.chmod(0o755)
+
+
+# ---------------------------------------------------------------------------
+# 14. SMTP email relay configuration
+# ---------------------------------------------------------------------------
+
+
+class TestSMTPConfig:
+    """SMTP relay fields load correctly with layered precedence."""
+
+    def test_smtp_defaults_when_not_configured(self, monkeypatch, credentials_file, tmp_path):
+        monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
+        monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
+        monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+
+        assert cfg.smtp_host == ""  # disabled by default
+        assert cfg.smtp_port == 25
+        assert cfg.email_threshold == 500
+
+    def test_smtp_host_from_toml(self, monkeypatch, credentials_file, tmp_path):
+        toml_file = _write_toml(
+            tmp_path / "config.toml",
+            'jid = "bot@example.com"\nrecipient = "rcpt@example.com"\nsmtp_host = "192.168.33.200"\n',
+        )
+        monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+
+        assert cfg.smtp_host == "192.168.33.200"
+
+    def test_smtp_port_from_toml(self, monkeypatch, credentials_file, tmp_path):
+        toml_file = _write_toml(
+            tmp_path / "config.toml",
+            'jid = "bot@example.com"\nrecipient = "rcpt@example.com"\nsmtp_port = 587\n',
+        )
+        monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+
+        assert cfg.smtp_port == 587
+
+    def test_email_threshold_from_toml(self, monkeypatch, credentials_file, tmp_path):
+        toml_file = _write_toml(
+            tmp_path / "config.toml",
+            'jid = "bot@example.com"\nrecipient = "rcpt@example.com"\nemail_threshold = 1000\n',
+        )
+        monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+
+        assert cfg.email_threshold == 1000
+
+    def test_smtp_host_from_env(self, monkeypatch, credentials_file, tmp_path):
+        monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
+        monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
+        monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
+        monkeypatch.setenv("CLAUDE_XMPP_SMTP_HOST", "mail.example.com")
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+
+        assert cfg.smtp_host == "mail.example.com"
+
+    def test_smtp_port_from_env(self, monkeypatch, credentials_file, tmp_path):
+        monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
+        monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
+        monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
+        monkeypatch.setenv("CLAUDE_XMPP_SMTP_PORT", "2525")
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+
+        assert cfg.smtp_port == 2525
+
+    def test_email_threshold_from_env(self, monkeypatch, credentials_file, tmp_path):
+        monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
+        monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
+        monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
+        monkeypatch.setenv("CLAUDE_XMPP_EMAIL_THRESHOLD", "250")
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+
+        assert cfg.email_threshold == 250
+
+    def test_env_smtp_overrides_toml(self, monkeypatch, credentials_file, tmp_path):
+        toml_file = _write_toml(
+            tmp_path / "config.toml",
+            'jid = "bot@example.com"\nrecipient = "rcpt@example.com"\nsmtp_host = "toml-host"\n',
+        )
+        monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
+        monkeypatch.setenv("CLAUDE_XMPP_SMTP_HOST", "env-host")
+
+        cfg = load_config(cli_credentials=str(credentials_file))
+
+        assert cfg.smtp_host == "env-host"

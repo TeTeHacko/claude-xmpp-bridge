@@ -18,6 +18,8 @@ LEGACY_CREDENTIALS_FILE = Path.home() / ".config" / "xmpp-notify" / "credentials
 DEFAULT_SOCKET_PATH = Path.home() / ".claude" / "bridge.sock"
 DEFAULT_DB_PATH = Path.home() / ".claude" / "bridge.db"
 DEFAULT_MCP_PORT = 7878
+DEFAULT_SMTP_PORT = 25
+EMAIL_THRESHOLD_DEFAULT = 500
 
 
 # Default icons per source value. None key = fallback for unknown/unset source.
@@ -44,6 +46,12 @@ class Config:
     force_starttls: bool = True  # require TLS on XMPP connection
     audit_log: str = "journald"  # "journald" or path to a rotating JSON Lines file
     mcp_port: int = DEFAULT_MCP_PORT  # port for MCP HTTP server (0 = disabled)
+    # Email relay: when a notification exceeds email_threshold chars, the bridge
+    # sends the full text via SMTP and truncates the XMPP message to a snippet.
+    # Set smtp_host = "" (default) to disable email relay entirely.
+    smtp_host: str = ""  # SMTP relay host; empty string = disabled
+    smtp_port: int = DEFAULT_SMTP_PORT
+    email_threshold: int = EMAIL_THRESHOLD_DEFAULT  # chars; 0 = always email
     # Per-source icons: keys are source strings (or None for default/unknown).
     # Loaded from [source_icons] TOML section; missing keys fall back to DEFAULT_SOURCE_ICONS.
     source_icons: dict[str | None, str] = field(default_factory=dict)
@@ -56,6 +64,8 @@ class Config:
             f"messages_file={self.messages_file!r}, socket_token={token_repr}, "
             f"force_starttls={self.force_starttls!r}, audit_log={self.audit_log!r}, "
             f"mcp_port={self.mcp_port!r}, "
+            f"smtp_host={self.smtp_host!r}, smtp_port={self.smtp_port!r}, "
+            f"email_threshold={self.email_threshold!r}, "
             f"source_icons={self.source_icons!r})"
         )
 
@@ -212,6 +222,25 @@ def load_config(
     else:
         mcp_port = DEFAULT_MCP_PORT
 
+    # SMTP email relay (optional — empty smtp_host disables email)
+    smtp_host = os.environ.get("CLAUDE_XMPP_SMTP_HOST") or _toml_str(toml, "smtp_host") or ""
+    smtp_port_env = os.environ.get("CLAUDE_XMPP_SMTP_PORT")
+    smtp_port_toml = toml.get("smtp_port")
+    if smtp_port_env:
+        smtp_port = int(smtp_port_env)
+    elif smtp_port_toml is not None:
+        smtp_port = int(str(smtp_port_toml))
+    else:
+        smtp_port = DEFAULT_SMTP_PORT
+    email_threshold_env = os.environ.get("CLAUDE_XMPP_EMAIL_THRESHOLD")
+    email_threshold_toml = toml.get("email_threshold")
+    if email_threshold_env:
+        email_threshold = int(email_threshold_env)
+    elif email_threshold_toml is not None:
+        email_threshold = int(str(email_threshold_toml))
+    else:
+        email_threshold = EMAIL_THRESHOLD_DEFAULT
+
     # Source icons: loaded from [source_icons] TOML section.
     # Keys are source strings; special key "default" maps to None (unknown/unset source).
     # Example:
@@ -238,6 +267,9 @@ def load_config(
         force_starttls=force_starttls,
         audit_log=audit_log,
         mcp_port=mcp_port,
+        smtp_host=smtp_host,
+        smtp_port=smtp_port,
+        email_threshold=email_threshold,
         source_icons=source_icons,
     )
 

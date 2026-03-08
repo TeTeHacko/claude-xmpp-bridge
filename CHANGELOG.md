@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.15] - 2026-03-08
+
+### Added
+- Email relay for long XMPP notifications: when a notification exceeds
+  `email_threshold` characters (default 500), the bridge sends the full
+  text via SMTP and truncates the XMPP message to a snippet with a note
+  that the full content was sent by email.
+- New `email_notify` module with async `send_email()` helper (SMTP,
+  no authentication, configurable timeout).
+- Three new `Config` fields with layered env/TOML precedence:
+  - `smtp_host` (env `CLAUDE_XMPP_SMTP_HOST`, TOML `smtp_host`) — empty
+    string disables email relay (default: disabled)
+  - `smtp_port` (env `CLAUDE_XMPP_SMTP_PORT`, TOML `smtp_port`) — default 25
+  - `email_threshold` (env `CLAUDE_XMPP_EMAIL_THRESHOLD`, TOML
+    `email_threshold`) — default 500 characters
+
 ## [0.7.14] - 2026-03-08
 
 ### Fixed

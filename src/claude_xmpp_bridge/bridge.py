@@ -16,6 +16,7 @@ import slixmpp
 from . import __version__
 from .audit import AuditLogger
 from .config import DEFAULT_SOURCE_ICONS, MAX_SOURCE_LEN, Config
+from .email_notify import send_email
 from .mcp_server import BridgeMCPServer
 from .messages import Messages, load_messages
 from .multiplexer import get_multiplexer
@@ -274,7 +275,32 @@ class XMPPBridge:
         return ok
 
     def _xmpp_send(self, text: str) -> bool:
-        return self.xmpp.send(self.config.recipient, text)
+        """Send *text* to the recipient via XMPP.
+
+        If SMTP relay is configured and *text* exceeds *email_threshold*
+        characters, the full message is also delivered by email.  The XMPP
+        notification is replaced by a truncated snippet with a note that the
+        full content was sent by email.
+        """
+        cfg = self.config
+        if cfg.smtp_host and len(text) > cfg.email_threshold:
+            snippet = text[: cfg.email_threshold]
+            # Ensure we don't cut in the middle of a multi-byte sequence
+            xmpp_body = f"{snippet}\n\n[… {len(text)} chars total — full message sent by email]"
+            # Fire-and-forget email delivery (non-blocking)
+            asyncio.ensure_future(
+                send_email(
+                    smtp_host=cfg.smtp_host,
+                    smtp_port=cfg.smtp_port,
+                    sender=cfg.recipient,
+                    recipient=cfg.recipient,
+                    subject=f"[bridge] {text[:80].splitlines()[0]}",
+                    body=text,
+                )
+            )
+        else:
+            xmpp_body = text
+        return self.xmpp.send(cfg.recipient, xmpp_body)
 
     def _enqueue_for_mcp(self, session_id: str, message: str) -> None:
         """Queue *message* into the MCP inbox for *session_id* (no-op if MCP disabled)."""

@@ -4424,3 +4424,128 @@ class TestNudgePattern:
         finally:
             await bridge.socket_server.stop()
             bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# Email relay via _xmpp_send
+# ---------------------------------------------------------------------------
+
+
+def _make_config_smtp(tmp_path: Path, smtp_host: str = "192.168.33.200", threshold: int = 500) -> Config:
+    return Config(
+        jid="bot@example.com",
+        password="secret",
+        recipient="user@example.com",
+        socket_path=tmp_path / "test.sock",
+        db_path=tmp_path / "test.db",
+        messages_file=None,
+        smtp_host=smtp_host,
+        smtp_port=25,
+        email_threshold=threshold,
+    )
+
+
+class TestXmppSendEmailRelay:
+    """_xmpp_send truncates XMPP and fires email for long messages."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_short_message_no_email(self, MockXMPP, tmp_path):
+        """Messages shorter than threshold are sent via XMPP only."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config_smtp(tmp_path, threshold=500))
+
+        with patch("asyncio.ensure_future") as mock_future:
+            bridge._xmpp_send("short message")
+
+        mock_future.assert_not_called()
+        conn.send.assert_called_once_with("user@example.com", "short message")
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_long_message_triggers_email(self, MockXMPP, tmp_path):
+        """Messages longer than threshold trigger email relay."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config_smtp(tmp_path, threshold=10))
+        long_msg = "A" * 600
+
+        def close_coro(coro):
+            coro.close()  # prevent RuntimeWarning: coroutine never awaited
+
+        with patch("asyncio.ensure_future", side_effect=close_coro) as mock_future:
+            bridge._xmpp_send(long_msg)
+
+        mock_future.assert_called_once()
+        # XMPP body must be truncated (not the full message)
+        xmpp_body = conn.send.call_args[0][1]
+        assert len(xmpp_body) < len(long_msg)
+        assert "email" in xmpp_body.lower()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_xmpp_snippet_starts_with_message_prefix(self, MockXMPP, tmp_path):
+        """XMPP snippet starts with the first *threshold* chars of the message."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config_smtp(tmp_path, threshold=10))
+        long_msg = "Hello World " + "X" * 100
+
+        with patch("asyncio.ensure_future", side_effect=lambda c: c.close()):
+            bridge._xmpp_send(long_msg)
+
+        xmpp_body = conn.send.call_args[0][1]
+        assert xmpp_body.startswith("Hello Worl")  # first 10 chars
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_no_email_when_smtp_host_empty(self, MockXMPP, tmp_path):
+        """Email relay is disabled when smtp_host is empty string."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        # smtp_host="" disables email
+        bridge = XMPPBridge(_make_config_smtp(tmp_path, smtp_host="", threshold=10))
+        long_msg = "A" * 600
+
+        with patch("asyncio.ensure_future") as mock_future:
+            bridge._xmpp_send(long_msg)
+
+        mock_future.assert_not_called()
+        # Full message sent via XMPP unchanged
+        conn.send.assert_called_once_with("user@example.com", long_msg)
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_exactly_threshold_length_no_email(self, MockXMPP, tmp_path):
+        """Message of exactly threshold length is NOT emailed (strictly greater than)."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config_smtp(tmp_path, threshold=10))
+        exact_msg = "A" * 10  # len == threshold, not > threshold
+
+        with patch("asyncio.ensure_future") as mock_future:
+            bridge._xmpp_send(exact_msg)
+
+        mock_future.assert_not_called()
+        conn.send.assert_called_once_with("user@example.com", exact_msg)
+        bridge.registry.close()
