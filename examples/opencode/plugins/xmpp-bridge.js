@@ -47,7 +47,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Příklad: "ses_abc123" → "ses_abc123:w4" (v okně 4 screen session)
   // ---------------------------------------------------------------------------
   const bridgeID = (opencodeID) =>
-    (STY && opencodeID) ? `${opencodeID}:w${WINDOW}` : (opencodeID ?? "")
+    (STY && opencodeID) ? `${opencodeID}_w${WINDOW}` : (opencodeID ?? "")
 
   // Sledovaná session ID — nastavena při registraci, použita při ukončení.
   // Ukládáme bridge ID (s :wWINDOW suffixem), ne raw OpenCode ID.
@@ -197,6 +197,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         // Each pending message is injected into this session via screen relay.
         // MCP streamable-http requires: 1) POST initialize → get mcp-session-id header
         //                               2) POST tools/call with that header
+        const dbg = (msg) => client.app.log({ body: { service: "xmpp-bridge", level: "info", message: msg } }).catch(() => {})
+        await dbg("session.idle fired — registeredSessionID=" + registeredSessionID + " STY=" + STY + " WINDOW=" + WINDOW)
         if (registeredSessionID && STY) {
           try {
             // Step 1: initialize — get mcp-session-id
@@ -207,9 +209,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
                 jsonrpc: "2.0", id: 1, method: "initialize",
                 params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "opencode-plugin", version: "1.0" } },
               }),
-            }).catch(() => null)
+            }).catch((e) => { dbg("MCP init fetch error: " + e); return null })
 
             const mcpSessionId = initRes?.headers?.get("mcp-session-id")
+            await dbg("MCP init status=" + initRes?.status + " mcp-session-id=" + mcpSessionId)
             if (!mcpSessionId) throw new Error("no mcp-session-id")
 
             // Step 2: tools/call with session header
@@ -229,18 +232,21 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
                   arguments: { session_id: registeredSessionID },
                 },
               }),
-            }).catch(() => null)
+            }).catch((e) => { dbg("MCP tools/call fetch error: " + e); return null })
 
+            await dbg("MCP tools/call status=" + mcpRes?.status + " ok=" + mcpRes?.ok)
             if (mcpRes && mcpRes.ok) {
               const text = await mcpRes.text().catch(() => null)
               const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
               const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null
+              await dbg("MCP body contentItems=" + JSON.stringify(body?.result?.content))
               // receive_messages returns each message as a separate content item (type=text)
               const contentItems = body?.result?.content
               if (Array.isArray(contentItems) && contentItems.length > 0) {
                 for (const item of contentItems) {
                   const msg = item?.text
                   if (msg) {
+                    await dbg("relaying msg to " + registeredSessionID + ": " + msg.slice(0, 80))
                     // Inject into session via screen stuff (same mechanism as socket relay)
                     const reg = JSON.stringify({ session_id: registeredSessionID, message: msg })
                     await $`claude-xmpp-client relay ${reg}`.nothrow()
@@ -248,8 +254,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
                 }
               }
             }
-          } catch (_) {
-            // MCP server not running or unreachable — silently skip
+          } catch (err) {
+            await dbg("MCP poll error: " + err)
           }
         }
 
