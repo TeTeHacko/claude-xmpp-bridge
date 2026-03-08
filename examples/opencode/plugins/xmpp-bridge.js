@@ -40,8 +40,21 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
   const projectName = directory.split("/").pop() || directory
 
-  // Sledovaná session ID — nastavena při registraci, použita při ukončení
+  // ---------------------------------------------------------------------------
+  // bridgeID(): přidá ":wWINDOW" suffix pro screen backend.
+  // Důvod: OpenCode sessions jsou sdílené přes instance — dvě okna ve stejném
+  // projektu vidí stejné session ID. Suffix zaručuje unikátnost per screen okno.
+  // Příklad: "ses_abc123" → "ses_abc123:w4" (v okně 4 screen session)
+  // ---------------------------------------------------------------------------
+  const bridgeID = (opencodeID) =>
+    (STY && opencodeID) ? `${opencodeID}:w${WINDOW}` : (opencodeID ?? "")
+
+  // Sledovaná session ID — nastavena při registraci, použita při ukončení.
+  // Ukládáme bridge ID (s :wWINDOW suffixem), ne raw OpenCode ID.
   let registeredSessionID = null
+
+  // Mapa opencode_id → bridge_id pro session.deleted handler
+  const ocToBridge = new Map()
 
   // ---------------------------------------------------------------------------
   // Pomocník pro nastavení titulu okna.
@@ -78,18 +91,24 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       const sessionsRes = await client.session.list()
       if (!sessionsRes.data || sessionsRes.data.length === 0) return
 
-      // Seřadit podle time.updated — nejnovější = aktivní
-      const sorted = [...sessionsRes.data].sort(
-        (a, b) => b.time.updated - a.time.updated
+      // Filtrovat: jen top-level session (bez parentID) v tomto adresáři.
+      // Každý OpenCode proces má svůj directory — filtrujeme přesně ten náš,
+      // aby dvě instance ve stejném projektu nezaregistrovaly totéž session_id.
+      const topLevel = sessionsRes.data.filter(
+        s => !s.parentID && s.directory === directory
       )
-      // Zaregistrovat jen top-level session (bez parentID) — ne subagenty
-      const active = sorted.find(s => !s.parentID)
+      // Z kandidátů vzít nejnovější (dle time.updated)
+      const active = topLevel.sort(
+        (a, b) => b.time.updated - a.time.updated
+      )[0]
       if (!active) return
 
-      registeredSessionID = active.id
+      const bid = bridgeID(active.id)
+      registeredSessionID = bid
+      ocToBridge.set(active.id, bid)
 
       const reg = JSON.stringify({
-        session_id: active.id,
+        session_id: bid,
         sty:        STY,
         window:     WINDOW,
         project:    active.directory,
@@ -97,7 +116,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         source:     "opencode",
       })
       await $`claude-xmpp-client register ${reg}`.nothrow()
-      await $`${process.env.HOME}/claude-home/agent-notify.sh start ${active.id} ${active.directory}`.nothrow()
+      await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${active.directory}`.nothrow()
     } catch (_) {
       // Bridge neběží nebo session list selhal — tiše přeskočit
     }
@@ -129,8 +148,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const name = info.directory.split("/").pop() || info.directory
         await setTitle("🧠" + name)
 
+        const bid = bridgeID(info.id)
         const reg = JSON.stringify({
-          session_id: info.id,
+          session_id: bid,
           sty:        STY,
           window:     WINDOW,
           project:    info.directory,
@@ -138,8 +158,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           source:     "opencode",
         })
         await $`claude-xmpp-client register ${reg}`.nothrow()
-        await $`${process.env.HOME}/claude-home/agent-notify.sh start ${info.id} ${info.directory}`.nothrow()
-        registeredSessionID = info.id
+        await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${info.directory}`.nothrow()
+        registeredSessionID = bid
+        ocToBridge.set(info.id, bid)
         return
       }
 
@@ -147,8 +168,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       if (event.type === "session.deleted") {
         const info = event.properties.info
         if (info.parentID) return
-        await $`${process.env.HOME}/claude-home/agent-notify.sh end ${info.id} ${info.directory}`.nothrow()
-        await $`claude-xmpp-client unregister ${info.id}`.nothrow()
+        const bid = ocToBridge.get(info.id) ?? bridgeID(info.id)
+        await $`${process.env.HOME}/claude-home/agent-notify.sh end ${bid} ${info.directory}`.nothrow()
+        await $`claude-xmpp-client unregister ${bid}`.nothrow()
+        ocToBridge.delete(info.id)
         return
       }
 
