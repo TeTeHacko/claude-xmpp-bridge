@@ -1871,7 +1871,7 @@ class TestListIcons:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_shows_mode_icon_when_agent_mode_set(self, MockXMPP, tmp_path):
-        """When agent_mode is 'code', the ✏️ mode icon appears in /list output."""
+        """When agent_mode is an emoji (e.g. 🟠), it appears in /list output."""
         conn, captured = _make_mock_conn(MockXMPP)
         bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
@@ -1882,18 +1882,19 @@ class TestListIcons:
             backend="screen",
             source="opencode",
         )
-        bridge.registry.update_state("oc-mode", "running", mode="code")
+        # Plugin now sends emoji directly as agent_mode (e.g. 🟠 for coder agent)
+        bridge.registry.update_state("oc-mode", "running", mode="🟠")
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
         assert "🧠" in text  # source icon
-        assert "✏️" in text  # mode icon for "code"
+        assert "🟠" in text  # agent icon (coder = orange circle)
         assert "[screen #0]" in text
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_list_no_mode_icon_when_agent_mode_none(self, MockXMPP, tmp_path):
-        """When agent_mode is None, no mode icon appears in /list output."""
+        """When agent_mode is None, no agent icon appears in /list output."""
         conn, captured = _make_mock_conn(MockXMPP)
         bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register(
@@ -1907,9 +1908,10 @@ class TestListIcons:
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        assert "✏️" not in text
-        assert "⚙️" not in text
-        assert "📋" not in text
+        # No agent-specific circles should appear (only source 🧠 and state ⏸/▶)
+        assert "🟠" not in text
+        assert "🟣" not in text
+        assert "🩵" not in text
         bridge.registry.close()
 
 
@@ -4240,7 +4242,7 @@ class TestStateCommand:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     def test_handle_state_with_mode_updates_agent_mode(self, MockXMPP, tmp_path):
-        """_handle_state with mode field updates both agent_state and agent_mode."""
+        """_handle_state with mode field (emoji) updates both agent_state and agent_mode."""
         conn = MagicMock()
         conn.on_message.side_effect = lambda cb: None
         MockXMPP.return_value = conn
@@ -4248,12 +4250,13 @@ class TestStateCommand:
         bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register("s1", "", "", "/proj", backend=None)
 
-        result = bridge._handle_state({"session_id": "s1", "state": "running", "mode": "code"})
+        # Plugin sends emoji directly as mode (e.g. 🟠 for coder agent)
+        result = bridge._handle_state({"session_id": "s1", "state": "running", "mode": "🟠"})
         assert result == {"ok": True}
         info = bridge.registry.get("s1")
         assert info is not None
         assert info["agent_state"] == "running"
-        assert info["agent_mode"] == "code"
+        assert info["agent_mode"] == "🟠"
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -4265,14 +4268,14 @@ class TestStateCommand:
 
         bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register("s1", "", "", "/proj", backend=None)
-        bridge.registry.update_state("s1", "running", mode="build")
+        bridge.registry.update_state("s1", "running", mode="🔵")
 
         result = bridge._handle_state({"session_id": "s1", "state": "idle"})
         assert result == {"ok": True}
         info = bridge.registry.get("s1")
         assert info is not None
         assert info["agent_state"] == "idle"
-        assert info["agent_mode"] == "build"  # preserved
+        assert info["agent_mode"] == "🔵"  # preserved
         bridge.registry.close()
 
 

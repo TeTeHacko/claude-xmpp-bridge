@@ -6,17 +6,18 @@ This plugin integrates `claude-xmpp-bridge` with [OpenCode](https://opencode.ai)
 
 ## What it does
 
-- On startup: renames the GNU Screen/tmux window to `🧠📋🟢<project>` and registers the active session with the bridge
-- `session.created` (e.g. `/new`): registers the new session
+- On startup: renames the GNU Screen/tmux window to `⚪🟢<project>` and registers the active session with the bridge
+- `session.created` (e.g. `/new`): registers the new session, resets agent icon to ⚪
 - `session.deleted`: unregisters the session from the bridge
 - `session.idle`:
   - sends the last assistant message via XMPP (switch: `notify-enabled`)
   - polls MCP inbox for pending inter-agent messages and injects them into the session
   - reports agent state `idle` to the bridge
+- `message.updated`: detects the active agent from `info.agent` field and updates the agent circle icon in the window title
 - `permission.asked`: sends an informative XMPP notification showing what the AI wants to run — the actual approval/denial still happens in the OpenCode TUI (switch: `ask-enabled`)
-- `permission.replied`: sets title to `🧠🔵` (model continues after permission)
+- `permission.replied`: sets title to `{agent}🔵` (model continues after permission)
 - Reports agent state `running` when the model starts generating output
-- `tool.execute.before`: detects the tool being executed and updates the mode icon in the window title immediately
+- `tool.execute.before`: updates the state circle to 🔵 immediately before each tool call
 
 ## Setup
 
@@ -65,21 +66,31 @@ The same switch files as Claude Code hooks:
 Enable: `touch ~/.config/xmpp-notify/<file>`
 Disable: `rm ~/.config/xmpp-notify/<file>`
 
-## Window Title — Mode + State
+## Window Title — Agent + State
 
-The plugin sets the GNU Screen/tmux window title with two icons: a **mode icon** (what the agent is doing) and a **state circle** (whether it is active):
+The plugin sets the GNU Screen/tmux window title with two icons: an **agent circle** (which agent is active) and a **state circle** (whether it is running):
 
-### Mode icons
+### Agent circles
 
-| Icon | Mode | When |
-|------|------|------|
-| `📋` | planning | default — reading files, searching, thinking |
-| `✏️` | code | editing files (`edit`, `write`, `multiedit` tools) |
-| `⚙️` | build | running commands (`bash` tool) |
+Each circle colour matches the agent's colour in the OpenCode TUI:
 
-Mode resets to `📋` at the start of each new response (`session.status: busy`).
+| Icon | Agent | TUI colour | When |
+|------|-------|-----------|------|
+| `⚪` | unknown | — | startup, after `/new`, before first response |
+| `🔵` | `build` | secondary (blue) | default built-in agent |
+| `🟣` | `plan` | accent (purple) | planning/read-only agent |
+| `🟠` | `coder` | primary (orange) | custom coding agent |
+| `🩵` | `local` | info (cyan) | custom local Ollama agent |
 
-Mode icons are configurable via environment variables: `BRIDGE_MODE_PLANNING`, `BRIDGE_MODE_CODE`, `BRIDGE_MODE_BUILD`.
+Agent is detected from `message.updated` events — the only reliable server-side signal (Tab-switching is client-side only, with no server event).
+
+Icons are configurable via environment variables `BRIDGE_AGENT_<NAME>` (uppercase agent name):
+```bash
+export BRIDGE_AGENT_BUILD=🔵
+export BRIDGE_AGENT_PLAN=🟣
+export BRIDGE_AGENT_CODER=🟠
+export BRIDGE_AGENT_LOCAL=🩵
+```
 
 ### State circles
 
@@ -92,25 +103,25 @@ Mode icons are configurable via environment variables: `BRIDGE_MODE_PLANNING`, `
 ### Example titles
 
 ```
-🧠📋🟢 my-project    ← idle, planning mode (just started or finished)
-🧠✏️🔵 my-project    ← running, editing files
-🧠⚙️🔵 my-project    ← running, executing bash command
-🧠⚙️🔴 my-project    ← permission required for bash
+⚪🟢 my-project    ← idle, agent not yet known (just started or /new)
+🟠🔵 my-project    ← coder agent running
+🔵🟢 my-project    ← build agent idle
+🟣🔴 my-project    ← plan agent, permission required
 ```
 
-## Agent State, Mode, and Plugin Version
+## Agent State and Plugin Version
 
-The plugin reports its version (`plugin_version`) in the registration payload and keeps the bridge informed of agent state and mode:
+The plugin reports its version (`plugin_version`) in the registration payload and keeps the bridge informed of agent state and active agent:
 
 - **State**: `idle` — after registration and `session.idle`; `running` — when generating output
-- **Mode**: `planning` / `code` / `build` — updated before each tool call
+- **Agent**: emoji circle sent as `mode` field — updated when `message.updated` fires with a new agent name
 
 This information appears in `/list` XMPP output as icons before the backend bracket and a version tag:
 
 ```
 Sessions:
-  /1  🧠📋⏸  [screen #2]  v0.7.18  ~/projects/my-app  *
-  /2  🧠✏️▶  [screen #4]  v0.7.18  ~/projects/other
+  /1  🧠🟠⏸  [screen #2]  v0.7.19  ~/projects/my-app  *
+  /2  🧠🔵▶  [screen #4]  v0.7.19  ~/projects/other
 
 * = active session
 ```
@@ -132,8 +143,8 @@ In `/list` output, OpenCode sessions are distinguished by the `🧠` prefix (Cla
 
 ```
 Sessions:
-  /1  ⚡⏸   [screen #0]  ~/projects/my-app  *    ← Claude Code
-  /2  🧠📋⏸  [screen #2]  ~/projects/my-app       ← OpenCode
+  /1  ⚡⏸    [screen #0]  ~/projects/my-app  *    ← Claude Code
+  /2  🧠🟠⏸  [screen #2]  ~/projects/my-app       ← OpenCode (coder agent)
 
 * = active session
 ```
@@ -143,4 +154,3 @@ Sessions:
 - `claude-xmpp-bridge` — must be running (via systemd or manually)
 - `claude-xmpp-client` — socket client for bridge communication (relay, state, register, unregister, notify)
 - GNU Screen or tmux
-

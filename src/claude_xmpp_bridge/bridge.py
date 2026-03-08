@@ -151,9 +151,9 @@ class XMPPBridge:
             version = info.get("plugin_version") or ""
             project = info["project"]
 
-            # Mode icon (only if mode known)
-            mode_icons = {"planning": "📋", "code": "✏️", "build": "⚙️"}
-            mode_icon = mode_icons.get(mode, "")
+            # Agent/mode icon — plugin sends emoji directly (e.g. 🟠 for coder).
+            # Use as-is; empty string if not set.
+            mode_icon = mode
 
             # State icon
             if state == "idle":

@@ -689,14 +689,15 @@ def test_agent_mode_defaults_to_none(db_path):
 
 
 def test_update_state_with_mode_sets_agent_mode(db_path):
+    # Plugin sends emoji directly as mode value (e.g. 🟠 for coder agent)
     reg = SessionRegistry(db_path)
     try:
         reg.register("mode-sess", "", "", "/proj")
-        reg.update_state("mode-sess", "running", mode="code")
+        reg.update_state("mode-sess", "running", mode="🟠")
         info = reg.get("mode-sess")
         assert info is not None
         assert info["agent_state"] == "running"
-        assert info["agent_mode"] == "code"
+        assert info["agent_mode"] == "🟠"
     finally:
         reg.close()
 
@@ -705,12 +706,12 @@ def test_update_state_without_mode_leaves_agent_mode_unchanged(db_path):
     reg = SessionRegistry(db_path)
     try:
         reg.register("mode-sess", "", "", "/proj")
-        reg.update_state("mode-sess", "running", mode="build")
+        reg.update_state("mode-sess", "running", mode="🔵")
         reg.update_state("mode-sess", "idle")  # no mode arg
         info = reg.get("mode-sess")
         assert info is not None
         assert info["agent_state"] == "idle"
-        assert info["agent_mode"] == "build"  # preserved
+        assert info["agent_mode"] == "🔵"  # preserved
     finally:
         reg.close()
 
@@ -719,7 +720,7 @@ def test_agent_mode_persists_across_restart(db_path):
     reg1 = SessionRegistry(db_path)
     try:
         reg1.register("mode-sess", "", "", "/proj")
-        reg1.update_state("mode-sess", "idle", mode="planning")
+        reg1.update_state("mode-sess", "idle", mode="🟣")
     finally:
         reg1.close()
 
@@ -727,7 +728,7 @@ def test_agent_mode_persists_across_restart(db_path):
     try:
         info = reg2.get("mode-sess")
         assert info is not None
-        assert info["agent_mode"] == "planning"
+        assert info["agent_mode"] == "🟣"
     finally:
         reg2.close()
 
@@ -737,11 +738,11 @@ def test_reregister_preserves_agent_mode(db_path):
     reg = SessionRegistry(db_path)
     try:
         reg.register("mode-sess", "", "", "/proj")
-        reg.update_state("mode-sess", "running", mode="code")
+        reg.update_state("mode-sess", "running", mode="🟠")
         reg.register("mode-sess", "", "", "/proj")  # re-register
         info = reg.get("mode-sess")
         assert info is not None
-        assert info["agent_mode"] == "code"
+        assert info["agent_mode"] == "🟠"
     finally:
         reg.close()
 
@@ -811,9 +812,9 @@ def test_schema_migration_adds_agent_mode(db_path):
         assert info is not None
         assert info["agent_mode"] is None  # defaulted to NULL after migration
 
-        # agent_mode is writable after migration
-        reg.update_state("legacy-sess", "idle", mode="planning")
-        assert reg.get("legacy-sess")["agent_mode"] == "planning"  # type: ignore[index]
+        # agent_mode is writable after migration (plugin sends emoji directly)
+        reg.update_state("legacy-sess", "idle", mode="⚪")
+        assert reg.get("legacy-sess")["agent_mode"] == "⚪"  # type: ignore[index]
     finally:
         reg.close()
 

@@ -6,30 +6,34 @@
  *  - session.created          → registrace nové top-level session (při /new)
  *  - session.deleted          → odhlásí session z bridge
  *  - session.idle             → XMPP notifikace s poslední odpovědí + MCP inbox poll
- *  - session.status (busy)    → mód = "planning" (model začal myslet, čeká na první tool)
- *  - tool.execute.before      → detekce módu dle tool typu + okamžitý update titulku
+ *  - session.status (busy)    → model začal generovat (stav 🔵, agent se nemění)
+ *  - message.updated          → detekce aktivního agenta (pole info.agent)
+ *  - tool.execute.before      → okamžitý update titulku na 🔵 (agent se nemění)
  *  - permission.asked         → informativní XMPP notifikace (co se chystá spustit); potvrzení přes TUI
  *  - permission.replied       → aktualizace titulu
  *  - server.instance.disposed → unregister + reset titulu
  *
- * Titulky oken — semafor: {módIkona}{stavKruh} projekt
+ * Titulky oken — semafor: {agentKolečko}{stavKruh} projekt
  *
- *   Mód (levý symbol — co agent právě dělá):
- *     BRIDGE_MODE_PLANNING (výchozí 📋) — model přemýšlí / čte soubory
- *     BRIDGE_MODE_CODE     (výchozí ✏️)  — edituje soubory (edit/write/multiedit)
- *     BRIDGE_MODE_BUILD    (výchozí ⚙️)  — spouští příkazy (bash)
+ *   Agent (levý symbol — barevné kolečko odpovídající barvě agenta v OpenCode TUI):
+ *     ⚪ neznámý    — před první odpovědí nebo po /new
+ *     🔵 build      — výchozí agent (secondary = modrá)
+ *     🟣 plan       — plánovací agent (accent = fialová)
+ *     🟠 coder      — coding agent (primary = oranžová)
+ *     🩵 local      — lokální agent (info = tyrkysová)
+ *
+ *   Ikony jsou konfigurovatelné přes env proměnné BRIDGE_AGENT_<JMÉNO> (uppercase):
+ *     export BRIDGE_AGENT_BUILD=🔵
+ *     export BRIDGE_AGENT_PLAN=🟣
+ *     export BRIDGE_AGENT_CODER=🟠
+ *     export BRIDGE_AGENT_LOCAL=🩵
  *
  *   Stav (pravý kruh — lifecycle agenta):
  *     🟢 idle        — čeká na vstup
  *     🔵 running     — model generuje výstup nebo pokračuje po permission
  *     🔴 interaction — permission dialog otevřen v TUI
  *
- *   Příklady: 📋🟢 projekt  |  ✏️🔵 projekt  |  ⚙️🔵 projekt  |  📋🔴 projekt
- *
- * Konfigurace mód ikon přes env proměnné:
- *   export BRIDGE_MODE_PLANNING=📋   # nebo jiný emoji dle vkusu
- *   export BRIDGE_MODE_CODE=✏️
- *   export BRIDGE_MODE_BUILD=⚙️
+ *   Příklady: ⚪🟢 projekt  |  🟠🔵 projekt  |  🔵🔴 projekt
  *
  * MCP inbox polling:
  *   - Při session.idle: okamžitý poll
@@ -43,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.18"
+  const PLUGIN_VERSION = "0.7.19"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -113,37 +117,45 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   let messageBuffer = []
 
   // ---------------------------------------------------------------------------
-  // Mód agenta — co právě dělá (detekován z tool callů).
-  //   "planning" — model přemýšlí / čte soubory (výchozí při startu + busy)
-  //   "code"     — edituje soubory (tool: edit / write / multiedit)
-  //   "build"    — spouští příkazy (tool: bash)
+  // Agent ikony — barevné kolečko odpovídající barvě agenta v OpenCode TUI.
   //
-  // Ikony lze přizpůsobit přes env proměnné BRIDGE_MODE_PLANNING/CODE/BUILD.
+  // Výchozí mapování (agent name → emoji):
+  //   build → 🔵  (secondary = modrá,    index 0 v paletě)
+  //   plan  → 🟣  (accent    = fialová,  index 1)
+  //   coder → 🟠  (primary   = oranžová, color: "primary" v opencode.json)
+  //   local → 🩵  (info      = tyrkysová, color: "info" v opencode.json)
+  //
+  // Přizpůsobení přes env proměnné BRIDGE_AGENT_<JMÉNO> (uppercase):
+  //   export BRIDGE_AGENT_BUILD=🔵
+  //   export BRIDGE_AGENT_PLAN=🟣
+  //   export BRIDGE_AGENT_CODER=🟠
+  //   export BRIDGE_AGENT_LOCAL=🩵
   // ---------------------------------------------------------------------------
-  const modeIcons = {
-    planning: process.env.BRIDGE_MODE_PLANNING ?? "📋",
-    code:     process.env.BRIDGE_MODE_CODE     ?? "✏️",
-    build:    process.env.BRIDGE_MODE_BUILD    ?? "⚙️",
+  const DEFAULT_AGENT_ICONS = {
+    build: "🔵",
+    plan:  "🟣",
+    coder: "🟠",
+    local: "🩵",
   }
 
-  // Mód → tool name mapping (vše co není bash/edit/write/multiedit = planning)
-  const TOOL_MODES = {
-    bash:      "build",
-    edit:      "code",
-    write:     "code",
-    multiedit: "code",
+  // Vrátí ikonu pro daného agenta — nejdřív env, pak default, pak ⚪.
+  const agentIcon = (name) => {
+    if (!name) return "⚪"
+    const envKey = "BRIDGE_AGENT_" + name.toUpperCase()
+    return process.env[envKey] ?? DEFAULT_AGENT_ICONS[name] ?? "⚪"
   }
 
-  // Aktuální mód — mění se při tool.execute.before a při session.status: busy
-  let currentMode = "planning"
+  // Aktuální agent — null = neznámý (před první odpovědí nebo po /new).
+  // Nastavuje se z message.updated (pole info.agent).
+  let currentAgent = null
 
-  // Sestaví emoji titulek okna z aktuálního módu + stavového kruhu.
+  // Sestaví emoji titulek okna z ikony agenta + stavového kruhu.
   // Volitelný parametr name přepíše projectName (použití při session.created).
   const buildTitle = (stateCircle, name) =>
-    `${modeIcons[currentMode] ?? modeIcons.planning}${stateCircle} ${name ?? projectName}`
+    `${agentIcon(currentAgent)}${stateCircle} ${name ?? projectName}`
 
   // Sestaví ASCII fallback titulek (bez emoji) — jen stavový prefix + název.
-  // Mód se v ASCII nevyjadřuje (je to záložní cesta pro bwrap sandbox).
+  // Agent se v ASCII nevyjadřuje (je to záložní cesta pro bwrap sandbox).
   const buildAscii = (statePrefix, name) =>
     `${statePrefix} ${name ?? projectName}`
 
@@ -294,17 +306,19 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   // ---------------------------------------------------------------------------
-  // Hlásí stav do bridge s aktuálním módem.
+  // Hlásí stav do bridge s ikonou aktuálního agenta.
+  // Pole "mode" obsahuje emoji kolečko agenta (nebo "⚪" pokud neznámý) —
+  // bridge ho uloží a zobrazí v /list výstupu před stavovým kruhem.
   // ---------------------------------------------------------------------------
   const reportState = async (state) => {
     if (!registeredSessionID) return
-    const payload = JSON.stringify({ session_id: registeredSessionID, state, mode: currentMode })
+    const payload = JSON.stringify({ session_id: registeredSessionID, state, mode: agentIcon(currentAgent) })
     await $`claude-xmpp-client state ${payload}`.nothrow()
   }
 
   // ---------------------------------------------------------------------------
   // 1. Přejmenovat okno při startu.
-  //    Výchozí mód = "planning" (agent čeká na vstup, ještě nic neudělal).
+  //    Agent = null (neznámý, zobrazí se ⚪ dokud model poprvé neodpoví).
   //    Stavový kruh = 🟢 (idle).
   // ---------------------------------------------------------------------------
   await setTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
@@ -394,23 +408,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
   return {
     // -------------------------------------------------------------------------
-    // tool.execute.before: detekce módu agenta dle právě spouštěného tool.
-    // Volá se před každým tool callem — okamžitě aktualizuje mód i titulek.
-    //
-    // Mapování:
-    //   bash → "build"    (spouštění příkazů, testy, kompilace)
-    //   edit / write / multiedit → "code"  (editace souborů)
-    //   vše ostatní (read, glob, grep, task, ...) → "planning"  (čtení, analýza)
+    // tool.execute.before: okamžitý update titulku při každém tool callu.
+    // Agent se zde nemění — detekuje se z message.updated (pole info.agent).
     // -------------------------------------------------------------------------
-    "tool.execute.before": async (input, _output) => {
-      const newMode = TOOL_MODES[input.tool] ?? "planning"
-      if (newMode !== currentMode) {
-        currentMode = newMode
-        await dbg("mode → " + currentMode + " (tool: " + input.tool + ")")
-      }
+    "tool.execute.before": async (_input, _output) => {
       // Vždy aktualizovat titulek — agent je zaneprázdněn (🔵)
       await setTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
-      // Průběžně hlásit mód do bridge
       await reportState("running")
     },
 
@@ -440,8 +443,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (info.parentID) return
 
         const name = info.directory.split("/").pop() || info.directory
-        // Reset módu na "planning" — nová session začíná bez history
-        currentMode = "planning"
+        // Reset agenta na null — nová session, neznámý agent dokud model neodpoví
+        currentAgent = null
         await setTitle(buildTitle("🟢", name), buildAscii("AI.", name))
 
         const bid = bridgeID(info.id)
@@ -476,13 +479,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
       // --- SESSION STATUS: indikace stavu v titulu ---
       // session.status.type je objekt: { type: "busy" } nebo { type: "idle" }
-      // "busy" = model začal generovat — mód resetujeme na "planning" (čeká na první tool).
-      // Tool.execute.before přijde záhy a upřesní mód dle skutečného tool callu.
+      // "busy" = model začal generovat — agent se nemění, jen přepneme na 🔵.
       if (event.type === "session.status") {
         const statusType = event.properties.status?.type
         if (statusType === "busy") {
           isIdle = false
-          currentMode = "planning"  // výchozí mód na začátku každé odpovědi
+          // currentAgent se nemění — zachováme posledního známého agenta
           await setTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
           await reportState("running")
         }
@@ -492,7 +494,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // --- SESSION IDLE: semafor 🟢 + XMPP notifikace + MCP inbox poll ---
       if (event.type === "session.idle") {
         isIdle = true
-        // Titulek: zachovat aktuální mód (ukazuje co agent naposledy dělal) + 🟢
+        // Titulek: zachovat agent ikonu (ukazuje posledního aktivního agenta) + 🟢
         await setTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
         await reportState("idle")
 
@@ -539,12 +541,32 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
+      // --- MESSAGE UPDATED: detekce aktivního agenta ---
+      // AssistantMessage nese pole info.agent s názvem agenta (např. "coder", "build").
+      // Aktualizujeme currentAgent a titulek okna — agent kolečko se změní.
+      // Toto je jediný spolehlivý způsob detekce agenta (Tab-přepnutí nemá server event).
+      if (event.type === "message.updated") {
+        const info = event.properties.info
+        if (info?.role === "assistant" && info?.agent) {
+          const newAgent = info.agent
+          if (newAgent !== currentAgent) {
+            currentAgent = newAgent
+            await dbg("agent → " + currentAgent + " (" + agentIcon(currentAgent) + ")")
+            // Aktualizovat titulek s novou agent ikonou (stav se nemění)
+            // Pokud je agent idle, zobrazíme 🟢; pokud running, 🔵.
+            // Bezpečná volba: neměnit stav kruh, jen agent ikonu — titulek
+            // se stejně aktualizuje při příštím session.idle / tool.execute.before.
+          }
+        }
+        return
+      }
+
       // --- PERMISSION ASKED: semafor 🔴 + informativní XMPP notifikace ---
       // OpenCode nečeká na výsledek event handlerů — TUI dialog nelze zavřít
       // z pluginu přes permission.asked event. Posíláme tedy jen notifikaci
       // co se chystá spustit; potvrzení musí jít přes TUI.
       if (event.type === "permission.asked") {
-        // Titulek: zachovat mód (již detekovaný z tool.execute.before), přepnout na 🔴
+        // Titulek: zachovat agent ikonu, přepnout stav na 🔴
         await setTitle(buildTitle("🔴"), buildAscii("AI!", projectName))
 
         const askEnabled =

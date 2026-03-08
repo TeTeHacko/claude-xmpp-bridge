@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.19] - 2026-03-09
+
+### Changed
+- Agent mode indicator replaced by **agent identity indicator**: the left icon
+  in the window title and `/list` output now shows a coloured circle matching
+  the active OpenCode agent's colour in the TUI, instead of a tool-type icon.
+  Default mapping: `build`→🔵, `plan`→🟣, `coder`→🟠, `local`→🩵, unknown→⚪.
+  Icons are configurable via env vars `BRIDGE_AGENT_<NAME>` (uppercase).
+- Agent is detected from `message.updated` events (field `info.agent`) — the
+  only reliable server-side signal, since Tab-switching is client-side only.
+- Plugin no longer tracks tool-type mode (`planning`/`code`/`build`); the
+  `tool.execute.before` hook now only updates the state circle to 🔵.
+- `reportState()` sends the agent emoji directly in the `mode` field instead
+  of a string like `"code"`.
+- Bridge `_cmd_list()` now uses `agent_mode` value as-is (emoji) instead of
+  mapping it through a fixed `mode_icons` dict.
+- `opencode.json`: added `"color": "primary"` to `coder` agent and
+  `"color": "info"` to `local` agent so their TUI colours match the plugin
+  circle icons (🟠 and 🩵 respectively).
+
 ## [0.7.18] - 2026-03-08
 
 ### Added
