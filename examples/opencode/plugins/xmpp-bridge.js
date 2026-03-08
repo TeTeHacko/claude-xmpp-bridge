@@ -25,7 +25,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.9"
+  const PLUGIN_VERSION = "0.7.10"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -218,12 +218,13 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   // ---------------------------------------------------------------------------
-  // 1. Přejmenovat okno na 🧠projekt při startu.
-  //    Původní titulek nelze přečíst bez screen socketu, takže ho neobnovujeme
-  //    — po ukončení opencode zůstane titulek 🧠projekt, dokud ho nepřepíše
-  //    další session-start-title.sh hook nebo manuálně uživatel.
+  // 1. Přejmenovat okno na 🧠⏸projekt při startu (idle — čeká na vstup).
+  //    Stav se mění dle událostí:
+  //      🧠⏸ = idle (session.idle, startup, permission.replied)
+  //      🧠▶ = running (session.status: running)
+  //      🧠❓ = vyžaduje interakci (permission.asked)
   // ---------------------------------------------------------------------------
-  await setTitle("🧠" + projectName)
+  await setTitle("🧠⏸" + projectName)
 
   // ---------------------------------------------------------------------------
   // 2. Registrace aktivní session do bridge — ODLOŽENA přes setImmediate()
@@ -335,7 +336,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (info.parentID) return
 
         const name = info.directory.split("/").pop() || info.directory
-        await setTitle("🧠" + name)
+        await setTitle("🧠⏸" + name)
 
         const bid = bridgeID(info.id)
         const reg = JSON.stringify({
@@ -372,7 +373,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const status = event.properties.status
         if (status === "running") {
           isIdle = false
-          await setTitle("🧠" + projectName)
+          await setTitle("🧠▶" + projectName)
           if (registeredSessionID) {
             await $`claude-xmpp-client state ${JSON.stringify({session_id: registeredSessionID, state: "running"})}`.nothrow()
           }
@@ -380,11 +381,11 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- SESSION IDLE: titul ⌨ + XMPP notifikace + MCP inbox poll ---
+      // --- SESSION IDLE: titul 🧠⏸ + XMPP notifikace + MCP inbox poll ---
       if (event.type === "session.idle") {
         isIdle = true
-        // Titul: přepnout na 🧠❓ (čeká na vstup)
-        await setTitle("🧠❓" + projectName)
+        // Titul: přepnout na 🧠⏸ (čeká na vstup, bez potřeby interakce)
+        await setTitle("🧠⏸" + projectName)
         if (registeredSessionID) {
           await $`claude-xmpp-client state ${JSON.stringify({session_id: registeredSessionID, state: "idle"})}`.nothrow()
         }
@@ -437,7 +438,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // z pluginu přes permission.asked event. Posíláme tedy jen notifikaci
       // co se chystá spustit; potvrzení musí jít přes TUI.
       if (event.type === "permission.asked") {
-        // Titul: přepnout na 🧠❓ (čeká na potvrzení)
+        // Titul: přepnout na 🧠❓ (vyžaduje interakci uživatele — potvrzení v TUI)
         await setTitle("🧠❓" + projectName)
 
         const notifyEnabled =
@@ -483,9 +484,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- PERMISSION REPLIED: obnovit titul 🧠 (dialog uzavřen) ---
+      // --- PERMISSION REPLIED: obnovit titul 🧠▶ (dialog uzavřen, model pokračuje) ---
       if (event.type === "permission.replied") {
-        await setTitle("🧠" + projectName)
+        await setTitle("🧠▶" + projectName)
         return
       }
     },
