@@ -4181,3 +4181,245 @@ class TestStateCommand:
         assert result == {"ok": True}
         assert bridge.registry.get("s1")["agent_state"] == "running"  # type: ignore[index]
         bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# TestNudgePattern — nudge=True relay and broadcast
+# ---------------------------------------------------------------------------
+
+
+class TestNudgePattern:
+    """nudge=True uses _nudge_session (inbox + CR) instead of _stuff_to_session."""
+
+    def _make_bridge_with_sessions(self, tmp_path, MockXMPP):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register(
+            session_id="agent-a",
+            sty="12345.pts-0",
+            window="1",
+            project="/home/user/project-a",
+            backend="screen",
+        )
+        bridge.registry.register(
+            session_id="agent-b",
+            sty="12345.pts-0",
+            window="2",
+            project="/home/user/project-b",
+            backend="screen",
+        )
+        return bridge, conn
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_nudge_session_enqueues_and_sends_cr(self, MockXMPP, tmp_path):
+        """_nudge_session stores message in inbox and sends only a CR nudge."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        assert bridge.mcp_server is not None
+        bridge.mcp_server.enqueue = MagicMock()
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            info = bridge.registry.get("agent-b")
+            assert info is not None
+            ok = await bridge._nudge_session("agent-b", info, "nudge me!")
+
+        assert ok is True
+        bridge.mcp_server.enqueue.assert_called_once_with("agent-b", "nudge me!")
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_nudge_session_logs_audit_nudge_sent(self, MockXMPP, tmp_path):
+        """_nudge_session logs NUDGE_SENT when CR succeeds."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        bridge.audit.log = MagicMock()
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            info = bridge.registry.get("agent-b")
+            assert info is not None
+            await bridge._nudge_session("agent-b", info, "hello")
+
+        events = [call[0][0] for call in bridge.audit.log.call_args_list]
+        assert "NUDGE_SENT" in events
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_nudge_session_logs_audit_nudge_failed_on_cr_error(self, MockXMPP, tmp_path):
+        """_nudge_session logs NUDGE_FAILED when the CR subprocess fails."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        bridge.audit.log = MagicMock()
+
+        with patch("asyncio.create_subprocess_exec", _mock_subprocess(1)):
+            info = bridge.registry.get("agent-b")
+            assert info is not None
+            ok = await bridge._nudge_session("agent-b", info, "ping")
+
+        assert ok is False
+        events = [call[0][0] for call in bridge.audit.log.call_args_list]
+        assert "NUDGE_FAILED" in events
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_nudge_session_returns_false_for_no_backend(self, MockXMPP, tmp_path):
+        """_nudge_session returns False immediately when session has no backend."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("ro", sty="", window="", project="/ro", backend=None)
+
+        info = bridge.registry.get("ro")
+        assert info is not None
+        ok = await bridge._nudge_session("ro", info, "hello")
+        assert ok is False
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_nudge_true_uses_nudge_session_not_stuff(self, MockXMPP, tmp_path):
+        """relay with nudge=True calls _nudge_session, not _stuff_to_session."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        bridge._nudge_session = AsyncMock(return_value=True)
+        bridge._stuff_to_session = AsyncMock(return_value=True)
+
+        resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": "hi", "nudge": True})
+
+        assert resp == {"ok": True}
+        bridge._nudge_session.assert_awaited_once()
+        bridge._stuff_to_session.assert_not_awaited()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_nudge_false_uses_stuff_session(self, MockXMPP, tmp_path):
+        """relay with nudge=False (default) calls _stuff_to_session, not _nudge_session."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        bridge._nudge_session = AsyncMock(return_value=True)
+        bridge._stuff_to_session = AsyncMock(return_value=True)
+
+        resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": "hi"})
+
+        assert resp == {"ok": True}
+        bridge._stuff_to_session.assert_awaited_once()
+        bridge._nudge_session.assert_not_awaited()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_nudge_xmpp_notification_contains_nudge_tag(self, MockXMPP, tmp_path):
+        """relay with nudge=True includes '(nudge)' tag in XMPP observer message."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        bridge._nudge_session = AsyncMock(return_value=True)
+
+        await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": "check-in", "nudge": True})
+
+        sent = conn.send.call_args[0][1]
+        assert "nudge" in sent.lower()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_nudge_true_uses_nudge_session(self, MockXMPP, tmp_path):
+        """broadcast with nudge=True calls _nudge_session for each target."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
+        bridge.registry.register("agent-c", sty="sty1", window="3", project="/proj-c", backend="screen")
+
+        nudged: list[str] = []
+
+        async def _mock_nudge(session_id, info, text):
+            nudged.append(session_id)
+            return True
+
+        bridge._nudge_session = _mock_nudge  # type: ignore[method-assign]
+        bridge._stuff_to_session = AsyncMock(return_value=True)
+
+        resp = await bridge._handle_broadcast({"session_id": "agent-a", "message": "nudge all", "nudge": True})
+
+        assert resp["ok"] is True
+        assert resp["delivered"] == 2
+        assert "agent-b" in nudged
+        assert "agent-c" in nudged
+        assert "agent-a" not in nudged
+        bridge._stuff_to_session.assert_not_awaited()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_nudge_xmpp_notification_contains_nudge_tag(self, MockXMPP, tmp_path):
+        """broadcast with nudge=True includes '(nudge)' tag in XMPP observer message."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
+        bridge._nudge_session = AsyncMock(return_value=True)
+
+        await bridge._handle_broadcast({"session_id": "agent-a", "message": "broadcast nudge", "nudge": True})
+
+        sent = conn.send.call_args[0][1]
+        assert "nudge" in sent.lower()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_nudge_true_does_not_enqueue_via_enqueue_for_mcp(self, MockXMPP, tmp_path):
+        """broadcast nudge=True does NOT call _enqueue_for_mcp (inbox is handled by _nudge_session)."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
+        bridge._nudge_session = AsyncMock(return_value=True)
+        bridge._enqueue_for_mcp = MagicMock()
+
+        await bridge._handle_broadcast({"session_id": "agent-a", "message": "nudge", "nudge": True})
+
+        # _nudge_session handles inbox internally — _enqueue_for_mcp must NOT be called
+        bridge._enqueue_for_mcp.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_nudge_via_socket(self, MockXMPP, tmp_path):
+        """relay nudge=True works end-to-end via socket round-trip."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("ag-1", sty="sty1", window="1", project="/proj-1", backend="screen")
+        bridge.registry.register("ag-2", sty="sty1", window="2", project="/proj-2", backend="screen")
+
+        await bridge.socket_server.start()
+        try:
+            with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+                resp = await _socket_request(
+                    bridge.config.socket_path,
+                    {"cmd": "relay", "session_id": "ag-1", "to": "ag-2", "message": "nudge!", "nudge": True},
+                )
+            assert resp == {"ok": True}
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()

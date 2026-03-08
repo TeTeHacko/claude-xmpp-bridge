@@ -234,6 +234,45 @@ class XMPPBridge:
             )
         return ok
 
+    async def _nudge_session(self, session_id: str, info: SessionInfo, message: str) -> bool:
+        """Enqueue *message* to the MCP inbox and send a bare CR nudge to the session.
+
+        The nudge pattern (Návrh #3) separates message delivery from terminal
+        injection: the full message is stored safely in SQLite, and only a CR
+        is sent via the multiplexer.  This causes readline/session.idle to fire
+        in the target agent's plugin, which then calls receive_messages() to
+        drain the inbox — completely avoiding the race condition where a screen
+        inject arrives while the agent is busy processing tool calls.
+
+        Returns True if the CR nudge was delivered successfully (the inbox write
+        always succeeds — it is the nudge delivery that can fail).
+        """
+        mux = get_multiplexer(info["backend"])
+        if not mux:
+            log.warning("No backend for nudge (project=%s)", info["project"])
+            return False
+        self._enqueue_for_mcp(session_id, message)
+        ok = await mux.send_nudge(info["sty"], info["window"])
+        if ok:
+            self.audit.log(
+                "NUDGE_SENT",
+                session_id=session_id,
+                project=info["project"],
+                backend=info["backend"],
+                message=message,
+                message_len=len(message),
+            )
+        else:
+            self.audit.log(
+                "NUDGE_FAILED",
+                session_id=session_id,
+                project=info["project"],
+                backend=info["backend"],
+                message=message,
+                message_len=len(message),
+            )
+        return ok
+
     def _xmpp_send(self, text: str) -> bool:
         return self.xmpp.send(self.config.recipient, text)
 
@@ -716,10 +755,13 @@ class XMPPBridge:
           - ``to_index``   : target session index (1-based int) (mutually exclusive)
           - ``to_project`` : target project path prefix         (mutually exclusive)
           - ``session_id`` : sender session_id for labelling    (optional)
+          - ``nudge``      : if True, store in inbox + send CR only (default: False)
         """
         message = str(req.get("message", ""))
         if not message:
             return {"ok": False, "error": "missing message"}
+
+        nudge = bool(req.get("nudge", False))
 
         # Resolve target session
         to_raw = req.get("to")
@@ -754,7 +796,12 @@ class XMPPBridge:
         sender_prefix = self._session_prefix(sender_info) if sender_info else (sender_id or "?")
         target_prefix = self._session_prefix(target_info)
 
-        ok = await self._stuff_to_session(target_id, target_info, message)
+        if nudge:
+            ok = await self._nudge_session(target_id, target_info, message)
+            xmpp_arrow = "↔ (nudge)"
+        else:
+            ok = await self._stuff_to_session(target_id, target_info, message)
+            xmpp_arrow = "↔"
 
         self.audit.log(
             "RELAY_SENT" if ok else "RELAY_FAILED",
@@ -767,10 +814,8 @@ class XMPPBridge:
         if ok:
             # Notify observer so they can see inter-agent traffic
             self._xmpp_send(
-                f"↔ {sender_prefix} → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
+                f"{xmpp_arrow} {sender_prefix} → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
             )
-            # Socket relay delivers immediately to terminal — MCP inbox not needed.
-            # (inbox-only delivery is the job of send_message(screen=False))
             return {"ok": True}
         else:
             return {
@@ -789,10 +834,13 @@ class XMPPBridge:
         Protocol fields:
           - ``message``    : text to send to all other agents (required)
           - ``session_id`` : sender session_id (excluded from delivery, optional)
+          - ``nudge``      : if True, store in inbox + send CR only (default: False)
         """
         message = str(req.get("message", ""))
         if not message:
             return {"ok": False, "error": self.messages.broadcast_no_message}
+
+        nudge = bool(req.get("nudge", False))
 
         sender_id = str(req.get("session_id", ""))
         sender_info = self.registry.get(sender_id) if sender_id else None
@@ -805,21 +853,29 @@ class XMPPBridge:
         if not targets:
             return {"ok": True, "delivered": 0}
 
-        results = await asyncio.gather(
-            *(self._stuff_to_session(sid, info, message) for sid, info in targets.items()),
-        )
+        if nudge:
+            results = await asyncio.gather(
+                *(self._nudge_session(sid, info, message) for sid, info in targets.items()),
+            )
+        else:
+            results = await asyncio.gather(
+                *(self._stuff_to_session(sid, info, message) for sid, info in targets.items()),
+            )
 
         delivered: list[str] = []
         failed: list[str] = []
         for (_sid, info), ok in zip(targets.items(), results, strict=True):
             if ok:
                 delivered.append(self._session_prefix(info))
-                # Screen relay succeeded — no MCP inbox needed.
-                # Enqueueing here would cause double-delivery via pollInbox().
+                if not nudge:
+                    # Screen relay succeeded — no MCP inbox needed.
+                    # Enqueueing here would cause double-delivery via pollInbox().
+                    pass
             else:
                 failed.append(self._session_prefix(info))
-                # Screen relay failed — enqueue as fallback for pollInbox().
-                self._enqueue_for_mcp(_sid, message)
+                if not nudge:
+                    # Screen relay failed — enqueue as fallback for pollInbox().
+                    self._enqueue_for_mcp(_sid, message)
 
         self.audit.log(
             "BROADCAST_SENT",
@@ -832,7 +888,10 @@ class XMPPBridge:
 
         # Single XMPP summary for the observer
         recipients = ", ".join(delivered) if delivered else "—"
-        self._xmpp_send(f"📢 {sender_prefix} → {recipients}: {message[:200]}" + ("…" if len(message) > 200 else ""))
+        nudge_tag = " (nudge)" if nudge else ""
+        self._xmpp_send(
+            f"📢{nudge_tag} {sender_prefix} → {recipients}: {message[:200]}" + ("…" if len(message) > 200 else "")
+        )
 
         return {"ok": True, "delivered": len(delivered), "failed": len(failed)}
 

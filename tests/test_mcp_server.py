@@ -558,3 +558,107 @@ class TestEnqueueForMcp:
             bridge = XMPPBridge(cfg)
             # Should not raise even though mcp_server is None
             bridge._enqueue_for_mcp("ses_TEST", "hello")
+
+
+# ---------------------------------------------------------------------------
+# send_message nudge mode
+# ---------------------------------------------------------------------------
+
+
+class TestSendMessageNudge:
+    async def test_send_nudge_true_calls_nudge_session(self, started_server: BridgeMCPServer):
+        """nudge=True must call _nudge_session, not _stuff_to_session."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        result = await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True)
+        started_server._bridge._nudge_session.assert_awaited_once()
+        started_server._bridge._stuff_to_session.assert_not_awaited()
+        assert "nudge" in result.lower() or "delivered" in result.lower() or "alpha" in result.lower()
+
+    async def test_send_nudge_true_returns_message_id_with_nudge_tag(self, started_server: BridgeMCPServer):
+        """nudge=True confirmation string must include both [id:...] and (nudge)."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        result = await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True)
+        assert "[id:" in result
+        assert "nudge" in result.lower()
+
+    async def test_send_nudge_true_no_backend_returns_error(self, started_server: BridgeMCPServer):
+        """nudge=True for a session without a backend must return an error."""
+        started_server._bridge.registry.sessions["ses_NOBACK"] = _make_session_info(
+            project="/home/user/noback", backend=None
+        )
+        started_server._bridge.registry.get = MagicMock(
+            side_effect=lambda sid: started_server._bridge.registry.sessions.get(sid)
+        )
+        result = await started_server._tool_send_message(to="ses_NOBACK", message="ping", nudge=True)
+        assert "multiplexer" in result.lower() or "no backend" in result.lower() or "noback" in result.lower()
+
+    async def test_send_nudge_true_failure_returns_error(self, started_server: BridgeMCPServer):
+        """nudge=True when CR send fails must return a failure message."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=False)
+        result = await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True)
+        assert "failed" in result.lower() or "delivery" in result.lower()
+
+    async def test_send_nudge_true_notifies_xmpp(self, started_server: BridgeMCPServer):
+        """nudge=True must send an XMPP notification to the observer."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True)
+        started_server._bridge._xmpp_send.assert_called_once()
+        call_arg = started_server._bridge._xmpp_send.call_args[0][0]
+        assert "[MCP:" in call_arg
+        assert "nudge" in call_arg.lower()
+
+    async def test_send_nudge_takes_priority_over_screen(self, started_server: BridgeMCPServer):
+        """nudge=True must use nudge even when screen=True is also set."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True, screen=True)
+        started_server._bridge._nudge_session.assert_awaited_once()
+        started_server._bridge._stuff_to_session.assert_not_awaited()
+
+    async def test_send_nudge_logs_audit(self, started_server: BridgeMCPServer):
+        """nudge=True must emit a MCP_SEND audit event."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True)
+        started_server._bridge.audit.log.assert_called()
+        event_arg = started_server._bridge.audit.log.call_args[0][0]
+        assert event_arg == "MCP_SEND"
+
+
+# ---------------------------------------------------------------------------
+# broadcast_message nudge mode
+# ---------------------------------------------------------------------------
+
+
+class TestBroadcastMessageNudge:
+    async def test_broadcast_nudge_true_calls_nudge_session(self, started_server: BridgeMCPServer):
+        """nudge=True broadcast must call _nudge_session for each target."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        result = await started_server._tool_broadcast_message(
+            message="nudge all", sender_session_id="ses_AAA", nudge=True
+        )
+        assert started_server._bridge._nudge_session.await_count == 1  # ses_BBB only (ses_AAA excluded)
+        started_server._bridge._stuff_to_session.assert_not_awaited()
+        assert "1" in result
+
+    async def test_broadcast_nudge_true_does_not_call_enqueue_on_success(self, started_server: BridgeMCPServer):
+        """nudge=True broadcast must NOT call self.enqueue — _nudge_session handles inbox internally."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        started_server._bridge.registry.inbox_put = MagicMock()
+        await started_server._tool_broadcast_message(message="nudge", sender_session_id="ses_AAA", nudge=True)
+        # inbox_put must NOT be called directly by broadcast tool when nudge=True
+        started_server._bridge.registry.inbox_put.assert_not_called()
+
+    async def test_broadcast_nudge_xmpp_contains_nudge_tag(self, started_server: BridgeMCPServer):
+        """nudge=True broadcast XMPP notification must include '(nudge)' tag."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        await started_server._tool_broadcast_message(message="nudge all", sender_session_id="", nudge=True)
+        started_server._bridge._xmpp_send.assert_called_once()
+        call_arg = started_server._bridge._xmpp_send.call_args[0][0]
+        assert "nudge" in call_arg.lower()
+
+    async def test_broadcast_nudge_logs_audit(self, started_server: BridgeMCPServer):
+        """nudge=True broadcast must emit a MCP_BROADCAST audit event."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        await started_server._tool_broadcast_message(message="nudge", sender_session_id="", nudge=True)
+        started_server._bridge.audit.log.assert_called()
+        event_arg = started_server._bridge.audit.log.call_args[0][0]
+        assert event_arg == "MCP_BROADCAST"

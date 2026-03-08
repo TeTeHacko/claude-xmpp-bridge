@@ -120,14 +120,20 @@ class BridgeMCPServer:
         server = self
 
         @mcp.tool()
-        async def send_message(to: str, message: str, screen: bool = True) -> str:
+        async def send_message(to: str, message: str, screen: bool = True, nudge: bool = False) -> str:
             """Send a message to a specific agent session identified by session_id.
 
-            By default the message is delivered via the terminal multiplexer (screen/tmux)
-            exactly as the socket ``relay`` command does, AND queued in the MCP inbox.
-            Set ``screen=False`` to skip terminal delivery and only queue in the MCP inbox
-            (useful for testing polling without screen relay, or for sessions without a
-            terminal multiplexer).
+            Delivery modes (mutually exclusive; nudge takes priority over screen):
+              - nudge=True  : store message in SQLite inbox, send bare CR to wake the
+                              agent.  The agent's plugin picks up the message on the
+                              next session.idle via receive_messages().  This avoids the
+                              race condition where a screen inject interrupts an agent
+                              mid-task.  Recommended for all inter-agent communication.
+              - screen=True : deliver via the terminal multiplexer immediately (default
+                              when nudge=False).  Fast but can interfere if the agent is
+                              currently executing tool calls.
+              - screen=False: only enqueue in MCP inbox, no terminal interaction at all.
+                              Useful when the target agent polls frequently on its own.
 
             The bridge also sends an XMPP notification to the human observer.
             The returned confirmation string includes a unique ``message_id`` that the
@@ -136,30 +142,35 @@ class BridgeMCPServer:
             Args:
                 to: Target session_id (as shown by list_sessions).
                 message: Text to deliver to the target agent.
-                screen: If True (default), deliver via screen/tmux relay.
-                        If False, only enqueue in MCP inbox (no screen relay).
+                nudge: If True, store in inbox and send CR nudge only (recommended).
+                screen: If True (default), deliver via screen/tmux relay (when nudge=False).
+                        If False, only enqueue in MCP inbox (no screen relay, no nudge).
 
             Returns:
                 A confirmation string with message_id on success, or an error description.
             """
-            return await server._tool_send_message(to=to, message=message, screen=screen)
+            return await server._tool_send_message(to=to, message=message, screen=screen, nudge=nudge)
 
         @mcp.tool()
-        async def broadcast_message(message: str, sender_session_id: str = "") -> str:
+        async def broadcast_message(message: str, sender_session_id: str = "", nudge: bool = False) -> str:
             """Broadcast a message to all registered agent sessions.
 
-            The message is delivered via the terminal multiplexer to every session
-            that has a backend.  The sender session (if provided) is excluded from
-            delivery so an agent does not echo its own broadcast to itself.
+            The message is delivered to every session that has a backend.  The sender
+            session (if provided) is excluded from delivery so an agent does not echo
+            its own broadcast to itself.
 
             Args:
                 message: Text to deliver to all agents.
                 sender_session_id: Optional — caller's own session_id to exclude from delivery.
+                nudge: If True, store in each inbox and send CR nudge only (recommended).
+                       If False (default), deliver via terminal multiplexer immediately.
 
             Returns:
                 A summary string with delivery count.
             """
-            return await server._tool_broadcast_message(message=message, sender_session_id=sender_session_id)
+            return await server._tool_broadcast_message(
+                message=message, sender_session_id=sender_session_id, nudge=nudge
+            )
 
         @mcp.tool()
         async def receive_messages(session_id: str) -> list[str]:
@@ -220,7 +231,7 @@ class BridgeMCPServer:
         home = os.path.expanduser("~")
         return path.replace(home, "~") if path.startswith(home) else path
 
-    async def _tool_send_message(self, *, to: str, message: str, screen: bool = True) -> str:
+    async def _tool_send_message(self, *, to: str, message: str, screen: bool = True, nudge: bool = False) -> str:
         """Implementation of the send_message tool."""
         bridge = self._bridge
         if bridge is None:
@@ -237,7 +248,38 @@ class BridgeMCPServer:
         target_prefix = bridge._session_prefix(target_info)
         message_id = uuid.uuid4().hex[:12]
 
-        if screen:
+        if nudge:
+            # nudge=True: store in inbox + send CR (preferred for inter-agent messaging)
+            if not target_info["backend"]:
+                bridge.audit.log(
+                    "MCP_SEND",
+                    message_id=message_id,
+                    to_session_id=to,
+                    nudge=True,
+                    ok=False,
+                    reason="no_backend",
+                    message=message[:100],
+                )
+                return bridge.messages.mcp_send_no_backend.format(project=self._short_path(target_info["project"]))
+
+            ok = await bridge._nudge_session(to, target_info, message)
+            bridge._xmpp_send(
+                f"[MCP:{message_id}] (nudge) → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
+            )
+            bridge.audit.log(
+                "MCP_SEND",
+                message_id=message_id,
+                to_session_id=to,
+                nudge=True,
+                ok=ok,
+                message=message[:100],
+            )
+            if ok:
+                return bridge.messages.mcp_send_ok.format(target_prefix=target_prefix) + f" [id:{message_id}] (nudge)"
+            else:
+                return bridge.messages.mcp_send_failed.format(project=self._short_path(target_info["project"]))
+
+        elif screen:
             # screen=True: require a backend and deliver via terminal multiplexer
             if not target_info["backend"]:
                 bridge.audit.log(
@@ -255,7 +297,7 @@ class BridgeMCPServer:
 
             if ok:
                 # screen=True delivers immediately to terminal — no inbox queuing needed.
-                # Inbox is reserved for screen=False (async, idle-handler pickup).
+                # Inbox is reserved for nudge/screen=False (async, idle-handler pickup).
                 bridge._xmpp_send(
                     f"[MCP:{message_id}] → {target_prefix}: {message[:200]}" + ("…" if len(message) > 200 else "")
                 )
@@ -296,7 +338,7 @@ class BridgeMCPServer:
             )
             return bridge.messages.mcp_send_ok.format(target_prefix=target_prefix) + f" [id:{message_id}] (inbox only)"
 
-    async def _tool_broadcast_message(self, *, message: str, sender_session_id: str) -> str:
+    async def _tool_broadcast_message(self, *, message: str, sender_session_id: str, nudge: bool = False) -> str:
         """Implementation of the broadcast_message tool."""
         bridge = self._bridge
         if bridge is None:
@@ -320,26 +362,30 @@ class BridgeMCPServer:
             )
             return bridge.messages.broadcast_sent.format(count=0)
 
-        results = await asyncio.gather(
-            *(bridge._stuff_to_session(sid, info, message) for sid, info in targets.items()),
-        )
+        if nudge:
+            results = await asyncio.gather(
+                *(bridge._nudge_session(sid, info, message) for sid, info in targets.items()),
+            )
+        else:
+            results = await asyncio.gather(
+                *(bridge._stuff_to_session(sid, info, message) for sid, info in targets.items()),
+            )
 
         delivered = 0
         for (sid, _info), ok in zip(targets.items(), results, strict=True):
             if ok:
-                # Screen relay succeeded — no MCP inbox needed.
-                # Enqueueing here would cause double-delivery: the plugin's
-                # pollInbox() would inject the same message a second time.
                 delivered += 1
-            else:
+            elif not nudge:
                 # Screen relay failed — enqueue in MCP inbox as fallback so
                 # the plugin can pick it up on the next session.idle poll.
                 self.enqueue(sid, message)
 
         sender_info = bridge.registry.get(sender_session_id) if sender_session_id else None
         sender_prefix = bridge._session_prefix(sender_info) if sender_info else (sender_session_id or "MCP")
+        nudge_tag = " (nudge)" if nudge else ""
         bridge._xmpp_send(
-            f"[MCP] 📢 {sender_prefix} → {delivered} session(s): {message[:200]}" + ("…" if len(message) > 200 else "")
+            f"[MCP]{nudge_tag} 📢 {sender_prefix} → {delivered} session(s): {message[:200]}"
+            + ("…" if len(message) > 200 else "")
         )
         bridge.audit.log(
             "MCP_BROADCAST",

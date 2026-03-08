@@ -39,6 +39,10 @@ class Multiplexer(Protocol):
         """Send text to a multiplexer session. Returns True on success."""
         ...
 
+    async def send_nudge(self, target: str, window: str) -> bool:
+        """Send only a CR to wake up the agent (nudge pattern). Returns True on success."""
+        ...
+
 
 class ScreenMultiplexer:
     """GNU Screen backend — sends text via at N# stuff."""
@@ -114,6 +118,40 @@ class ScreenMultiplexer:
         log.info("Stuffed to screen %s window %s", target, window)
         return True
 
+    async def send_nudge(self, target: str, window: str) -> bool:
+        """Send only a CR to wake up the agent (nudge pattern).
+
+        Unlike send_text, no message text is injected — only a bare CR is sent.
+        This triggers readline's Enter handling and causes session.idle to fire,
+        which prompts the plugin's pollInbox() to drain the MCP inbox.
+        """
+        if not _TARGET_RE.match(target):
+            log.error("Rejected invalid screen target: %r", target)
+            return False
+        proc = await asyncio.create_subprocess_exec(
+            "screen",
+            "-S",
+            target,
+            "-X",
+            "at",
+            f"{window}#",
+            "stuff",
+            "\r",
+            env=_get_safe_env(),
+        )
+        try:
+            if await asyncio.wait_for(proc.wait(), timeout=5) != 0:
+                log.error("Screen nudge CR failed (exit %d)", proc.returncode)
+                return False
+        except TimeoutError:
+            log.error("Screen nudge CR timed out")
+            proc.kill()
+            await proc.wait()
+            return False
+
+        log.info("Nudged screen %s window %s", target, window)
+        return True
+
 
 class TmuxMultiplexer:
     """tmux backend — sends text via send-keys."""
@@ -164,6 +202,37 @@ class TmuxMultiplexer:
             return False
 
         log.info("Sent to tmux pane %s", target)
+        return True
+
+    async def send_nudge(self, target: str, window: str) -> bool:
+        """Send only Enter to wake up the agent (nudge pattern).
+
+        Unlike send_text, no message text is injected — only a bare Enter is sent.
+        This triggers readline's Enter handling and causes session.idle to fire,
+        which prompts the plugin's pollInbox() to drain the MCP inbox.
+        """
+        if not _TARGET_RE.match(target):
+            log.error("Rejected invalid tmux target: %r", target)
+            return False
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "send-keys",
+            "-t",
+            target,
+            "Enter",
+            env=_get_safe_env(),
+        )
+        try:
+            if await asyncio.wait_for(proc.wait(), timeout=5) != 0:
+                log.error("tmux nudge Enter failed (exit %d)", proc.returncode)
+                return False
+        except TimeoutError:
+            log.error("tmux nudge Enter timed out")
+            proc.kill()
+            await proc.wait()
+            return False
+
+        log.info("Nudged tmux pane %s", target)
         return True
 
 
