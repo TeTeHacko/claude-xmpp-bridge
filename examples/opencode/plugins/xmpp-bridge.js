@@ -172,14 +172,34 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         // Calls the xmpp-bridge MCP tool receive_messages() to drain any messages
         // that other agents sent via send_message() or broadcast_message().
         // Each pending message is injected into this session via screen relay.
+        // MCP streamable-http requires: 1) POST initialize → get mcp-session-id header
+        //                               2) POST tools/call with that header
         if (registeredSessionID && STY) {
           try {
-            const mcpRes = await fetch("http://127.0.0.1:7878/mcp", {
+            // Step 1: initialize — get mcp-session-id
+            const initRes = await fetch("http://127.0.0.1:7878/mcp", {
               method:  "POST",
               headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
               body: JSON.stringify({
+                jsonrpc: "2.0", id: 1, method: "initialize",
+                params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "opencode-plugin", version: "1.0" } },
+              }),
+            }).catch(() => null)
+
+            const mcpSessionId = initRes?.headers?.get("mcp-session-id")
+            if (!mcpSessionId) throw new Error("no mcp-session-id")
+
+            // Step 2: tools/call with session header
+            const mcpRes = await fetch("http://127.0.0.1:7878/mcp", {
+              method:  "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "Mcp-Session-Id": mcpSessionId,
+              },
+              body: JSON.stringify({
                 jsonrpc: "2.0",
-                id:      1,
+                id:      2,
                 method:  "tools/call",
                 params:  {
                   name:      "receive_messages",
