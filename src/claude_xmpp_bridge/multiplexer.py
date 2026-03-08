@@ -23,6 +23,17 @@ def sanitize_text(text: str) -> str:
     return _CONTROL_CHARS_RE.sub("", text)
 
 
+def _screen_stuff_escape(text: str) -> str:
+    """Escape characters that GNU Screen's ``stuff`` command interprets.
+
+    Screen's command parser expands ``$VAR`` as environment variables (or empty
+    string if unset) and interprets C-style backslash sequences (``\\n``,
+    ``\\r``, ``\\t``, etc.).  To preserve the literal text we escape ``\\`` →
+    ``\\\\`` (must be first) and ``$`` → ``\\$``.
+    """
+    return text.replace("\\", "\\\\").replace("$", "\\$")
+
+
 def _get_safe_env() -> dict[str, str]:
     """Return a minimal environment for safely executing subprocesses."""
     env = {}
@@ -71,7 +82,7 @@ class ScreenMultiplexer:
         if not _TARGET_RE.match(target):
             log.error("Rejected invalid screen target: %r", target)
             return False
-        text = sanitize_text(text)
+        text = _screen_stuff_escape(sanitize_text(text))
         proc1 = await asyncio.create_subprocess_exec(
             "screen",
             "-S",

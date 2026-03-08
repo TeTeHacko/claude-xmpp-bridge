@@ -915,7 +915,7 @@ class XMPPBridge:
         Protocol response fields:
           - ``ok``       : True
           - ``sessions`` : list of dicts with session_id, project, backend,
-                           window, source, registered_at
+                           sty, window, source, registered_at
         """
         sessions = self.registry.list_sessions()
         sorted_ids = sorted(sessions, key=lambda s: sessions[s]["registered_at"])
@@ -928,6 +928,7 @@ class XMPPBridge:
                     "session_id": sid,
                     "project": info["project"],
                     "backend": info["backend"],
+                    "sty": info.get("sty", ""),
                     "window": info["window"],
                     "source": info.get("source"),
                     "registered_at": info["registered_at"],

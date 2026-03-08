@@ -24,17 +24,8 @@
  * Vyžaduje: claude-xmpp-bridge démon + claude-xmpp-client v $PATH
  */
 
-/** Zkrátí absolutní cestu — nahradí $HOME za ~ */
-function shortPath(dir) {
-  const home = process.env.HOME ?? ""
-  if (!dir) return "?"
-  if (dir === home) return "~"
-  if (dir.startsWith(home + "/")) return "~" + dir.slice(home.length)
-  return dir
-}
-
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.6"
+  const PLUGIN_VERSION = "0.7.8"
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -43,23 +34,46 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       ? "tmux"
       : "none"
 
-  // $WINDOW z env je nastaven screenem pro každé okno zvlášť — spolehlivý zdroj.
-  // screen -Q info vrací aktivní okno (ne okno pluginu) → nelze použít.
-  const WINDOW = process.env.WINDOW ?? "0"
+  // $WINDOW: čteme z env rodičovského procesu (/proc/ppid/environ).
+  // Důvod: OpenCode je spuštěno jako podproces bash shellu screen okna.
+  // Screen nastaví $WINDOW v shellu, ale OpenCode může mít přepsané env
+  // (např. zděděné z jiného kontextu). Rodičovský bash má vždy správnou hodnotu.
+  const readWindowFromPpid = () => {
+    try {
+      // Node.js synchronní čtení — voláme při inicializaci, async není nutné.
+      // eslint-disable-next-line no-undef
+      const fs = require("fs")
+      const raw = fs.readFileSync(`/proc/${process.ppid}/environ`, "latin1")
+      // environ je null-byte oddělený seznam KEY=VALUE\0
+      const match = raw.split("\0").find(e => e.startsWith("WINDOW="))
+      return match ? match.slice(7) : null
+    } catch (_) {
+      return null
+    }
+  }
+  const WINDOW = readWindowFromPpid() ?? process.env.WINDOW ?? "0"
+
+  // Opravit $WINDOW v env celého procesu. process.env.WINDOW mohl být zděděn
+  // špatně (viz readWindowFromPpid výše). Nastavením správné hodnoty zajistíme,
+  // že bash tools spuštěné modelem (subprocesy OpenCode) vidí správný WINDOW.
+  // Zároveň nastavíme BRIDGE_WINDOW pro explicitní přístup.
+  process.env.WINDOW = WINDOW
+  process.env.BRIDGE_WINDOW = WINDOW
 
   const projectName = directory.split("/").pop() || directory
 
   // ---------------------------------------------------------------------------
-  // bridgeID(): přidá ":wWINDOW" suffix pro screen backend.
+  // bridgeID(): přidá "_wWINDOW" suffix pro screen backend.
   // Důvod: OpenCode sessions jsou sdílené přes instance — dvě okna ve stejném
   // projektu vidí stejné session ID. Suffix zaručuje unikátnost per screen okno.
-  // Příklad: "ses_abc123" → "ses_abc123:w4" (v okně 4 screen session)
+  // Příklad: "ses_abc123" → "ses_abc123_w4" (v okně 4 screen session)
+  // WINDOW je čteno z /proc/ppid/environ (viz výše) — zaručeně správná hodnota.
   // ---------------------------------------------------------------------------
   const bridgeID = (opencodeID) =>
     (STY && opencodeID) ? `${opencodeID}_w${WINDOW}` : (opencodeID ?? "")
 
   // Sledovaná session ID — nastavena při registraci, použita při ukončení.
-  // Ukládáme bridge ID (s :wWINDOW suffixem), ne raw OpenCode ID.
+  // Ukládáme bridge ID (s _wWINDOW suffixem), ne raw OpenCode ID.
   let registeredSessionID = null
 
   // Mapa opencode_id → bridge_id pro session.deleted handler
@@ -71,6 +85,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   const IDLE_POLL_INTERVAL_MS = 30_000
   let isIdle = false
   let pollTimer = null
+  let polling = false  // guard against concurrent pollInbox calls
 
   // ---------------------------------------------------------------------------
   // messageBuffer: lokální fronta zpráv čekajících na doručení.
@@ -84,18 +99,38 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Vždy injektuje nejvýše JEDNU zprávu — zbytek jde do messageBuffer.
   // Volá se okamžitě při session.idle a periodicky každých 30s pokud isIdle.
   // Funguje jen pro screen sessions (STY musí být nastaveno).
+  // Guard: `polling` flag zabrání concurrent spuštění (session.idle + interval).
   // ---------------------------------------------------------------------------
   const dbg = (msg) => client.app.log({ body: { service: "xmpp-bridge", level: "info", message: msg } }).catch(() => {})
 
+  // ---------------------------------------------------------------------------
+  // rawRelay(): posílá zprávu přes claude-xmpp-client relay BEZ bun shell.
+  // Důvod: bun shell $`...` interpretuje shell metaznaky ($, |, ', >) v obsahu
+  // zprávy, čímž ji poškodí. Bun.spawn předá argumenty přímo (exec, ne shell).
+  // ---------------------------------------------------------------------------
+  const rawRelay = async (to, msg) => {
+    try {
+      const proc = Bun.spawn(["claude-xmpp-client", "relay", "--to", to, msg], {
+        stdout: "pipe", stderr: "pipe",
+      })
+      const exitCode = await proc.exited
+      const stderr = await new Response(proc.stderr).text()
+      return { exitCode, stderr }
+    } catch (err) {
+      return { exitCode: -1, stderr: String(err) }
+    }
+  }
+
   const pollInbox = async () => {
-    if (!registeredSessionID || !STY) return
+    if (!registeredSessionID || !STY || polling) return
+    polling = true
     try {
       // Nejdřív zkusit lokální buffer — pokud tam je zpráva, injektovat ji
       // a nechodit vůbec na MCP (model ještě zpracovává předchozí).
       if (messageBuffer.length > 0) {
         const msg = messageBuffer.shift()
         await dbg("relaying buffered msg to " + registeredSessionID + ": " + msg.slice(0, 80))
-        const relayRes = await $`claude-xmpp-client relay --to ${registeredSessionID} ${msg}`.nothrow()
+        const relayRes = await rawRelay(registeredSessionID, msg)
         await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
         return
       }
@@ -152,14 +187,16 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
             }
             await dbg("relaying msg to " + registeredSessionID + ": " + first.slice(0, 80)
               + (messageBuffer.length ? " (+" + messageBuffer.length + " buffered)" : ""))
-            // Inject into session via screen stuff (same mechanism as socket relay)
-            const relayRes = await $`claude-xmpp-client relay --to ${registeredSessionID} ${first}`.nothrow()
+            // Inject into session via raw exec (ne bun shell — chrání metaznaky ve zprávách)
+            const relayRes = await rawRelay(registeredSessionID, first)
             await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
           }
         }
       }
     } catch (err) {
       await dbg("MCP poll error: " + err)
+    } finally {
+      polling = false
     }
   }
 
@@ -240,6 +277,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
       registeredSessionID = bid
       ocToBridge.set(active.id, bid)
+      // Export identity do env — bash tools agenta vidí $BRIDGE_SESSION_ID
+      process.env.BRIDGE_SESSION_ID = bid
 
       const reg = JSON.stringify({
         session_id:     bid,
@@ -311,6 +350,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         await $`claude-xmpp-client state ${JSON.stringify({session_id: bid, state: "idle"})}`.nothrow()
         registeredSessionID = bid
         ocToBridge.set(info.id, bid)
+        process.env.BRIDGE_SESSION_ID = bid
         return
       }
 

@@ -3760,6 +3760,7 @@ class TestSocketListCommand:
         assert sess["session_id"] == "ag-1"
         assert sess["project"] == "/proj-x"
         assert sess["backend"] == "screen"
+        assert sess["sty"] == "sty1"
         assert sess["window"] == "3"
         assert sess["source"] == "opencode"
         assert "registered_at" in sess
