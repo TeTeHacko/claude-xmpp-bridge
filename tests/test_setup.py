@@ -321,13 +321,6 @@ class TestFindOpencodeDir:
         assert result is not None
         assert (result / "plugins" / "xmpp-bridge.js").is_file()
 
-    def test_plugin_contains_source_field(self):
-        """Plugin file must contain source: \"opencode\" in register payloads."""
-        result = _find_opencode_dir()
-        assert result is not None
-        plugin_text = (result / "plugins" / "xmpp-bridge.js").read_text()
-        assert 'source:     "opencode"' in plugin_text
-
 
 # ---------------------------------------------------------------------------
 # _step_opencode
@@ -706,39 +699,3 @@ class TestBridgePing:
         result = asyncio.run(bridge._handle_request({"cmd": "ping"}))
         assert result == {"ok": True}
         bridge.registry.close()
-
-
-# ---------------------------------------------------------------------------
-# OpenCode plugin runtime bridge detection
-# ---------------------------------------------------------------------------
-
-
-class TestOpencodePluginBridgeDetection:
-    def test_plugin_uses_nothrow_for_resilience(self):
-        """Plugin must use .nothrow() on all claude-xmpp-client calls (no bridgeAvailable guard needed)."""
-        plugin_dir = _find_opencode_dir()
-        assert plugin_dir is not None
-        text = (plugin_dir / "plugins" / "xmpp-bridge.js").read_text()
-        # bridgeAvailable guard was removed — .nothrow() handles bridge-not-running gracefully
-        assert "bridgeAvailable" not in text
-        assert "claude-xmpp-client ping" not in text
-
-    def test_bridge_client_calls_use_nothrow(self):
-        """The runClient wrapper must use .nothrow() and all direct $`...` shell calls use it too."""
-        plugin_dir = _find_opencode_dir()
-        assert plugin_dir is not None
-        text = (plugin_dir / "plugins" / "xmpp-bridge.js").read_text()
-        import re
-
-        # The runClient wrapper must exist and use .nothrow() — all bridge calls go through it
-        assert "const runClient" in text, "runClient wrapper must be defined"
-        # Find the runClient function body line that calls the client binary
-        lines = text.splitlines()
-        runclient_nothrow_lines = [
-            line for line in lines if re.search(r"\$`\$\{CLIENT_BIN\}", line) and ".nothrow()" in line
-        ]
-        assert len(runclient_nothrow_lines) > 0, "runClient wrapper must use .nothrow() on CLIENT_BIN call"
-
-        # No direct $`claude-xmpp-client ...` calls outside of runClient (they all go via wrapper)
-        direct_calls = [line for line in lines if re.search(r"\$`claude-xmpp-client", line)]
-        assert len(direct_calls) == 0, f"direct claude-xmpp-client calls found (use runClient instead): {direct_calls}"

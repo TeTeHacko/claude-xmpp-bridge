@@ -302,7 +302,10 @@ def client_main() -> None:
         data = _parse_json_arg(args.json_data)
         data["cmd"] = "state"
         result = send_to_bridge(data, socket_path)
-        if result is not None and "error" in result:
+        if result is None:
+            print("Error: bridge not running", file=sys.stderr)
+            sys.exit(1)
+        elif "error" in result:
             print(f"Error: {result['error']}", file=sys.stderr)
             sys.exit(1)
 

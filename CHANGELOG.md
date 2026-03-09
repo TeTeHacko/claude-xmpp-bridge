@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.23] - 2026-03-09
+
+### Added
+- New integration test file `tests/test_client_integration.py` with 10 tests
+  covering the full `claude-xmpp-client` ↔ bridge socket protocol: exit codes
+  for `state` (unknown session, known session, bridge not running), agent mode
+  updates, and the complete re-registration flow after a simulated bridge
+  restart.  Tests use `asyncio.run_in_executor` so the subprocess doesn't
+  block the in-process socket server.
+- `pytest.mark.integration` marker for subprocess-based tests; run only unit
+  tests with `pytest -m "not integration"`.
+- Plugin: `REREG_INTERVAL_MS` is now configurable via
+  `XMPP_BRIDGE_REREG_INTERVAL_MS` env var (default 90 000 ms) so CI can
+  override the interval without waiting 90 seconds.
+
+### Fixed
+- `claude-xmpp-client state` now exits non-zero when the bridge is not running
+  (socket does not exist).  Previously it silently exited 0, masking the error
+  and preventing `reregisterIfNeeded` from triggering re-registration.
+
+### Removed
+- Deleted brittle structural tests `TestOpencodePluginBridgeDetection` and
+  `TestFindOpencodeDir.test_plugin_contains_source_field` from `test_setup.py`.
+  These tests matched specific JS syntax patterns and broke on every refactor
+  even when behaviour was correct.  The invariants they checked are now covered
+  by the new integration tests.
+
 ## [0.7.22] - 2026-03-09
 
 ### Fixed

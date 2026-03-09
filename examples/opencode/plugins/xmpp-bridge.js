@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.22"
+  const PLUGIN_VERSION = "0.7.23"
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
@@ -137,7 +137,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   const IDLE_POLL_INTERVAL_MS = 30_000
   // Periodický re-register: pokud bridge session nezná (restart bridge), re-zaregistruje.
   // Interval 90s — nezávislý na session.idle, zajistí obnovu i pokud agent je long-running.
-  const REREG_INTERVAL_MS = 90_000
+  // Přepis přes env: XMPP_BRIDGE_REREG_INTERVAL_MS (pro testy nastavit na nízkou hodnotu).
+  const REREG_INTERVAL_MS = parseInt(process.env.XMPP_BRIDGE_REREG_INTERVAL_MS ?? "90000")
   let isIdle = false
   let pollTimer = null
   let reregTimer = null
