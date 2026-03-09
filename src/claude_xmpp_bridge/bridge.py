@@ -391,8 +391,10 @@ class XMPPBridge:
             # Window-level check: exit 0 ↔ window exists, exit 1 ↔ window gone.
             window = info.get("window") or "0"
             cmd = ["screen", "-S", sty, "-p", window, "-Q", "title"]
+            slot = f"{sty}:{window}"
         elif backend == "tmux":
             cmd = ["tmux", "has-session", "-t", sty]
+            slot = sty
         else:
             return True  # unknown backend — assume alive
 
@@ -407,8 +409,12 @@ class XMPPBridge:
         except TimeoutError:
             proc.kill()
             await proc.wait()
+            log.debug("_is_session_alive: timeout (slot=%s cmd=%s)", slot, cmd)
             return False
-        return proc.returncode == 0
+        alive = proc.returncode == 0
+        if not alive:
+            log.debug("_is_session_alive: dead (slot=%s cmd=%s rc=%s)", slot, cmd, proc.returncode)
+        return alive
 
     async def _cleanup_stale_sessions(self) -> int:
         """Remove dead sessions and deduplicate (keep newest per key)."""

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.25] - 2026-03-10
+
+### Fixed
+- **JS plugin:** `session.deleted` handler now resets `registeredSessionID` to
+  `null` and clears `reregTimer` when the deleted session matches the currently
+  registered one.  Previously the timer kept firing `reportState` for the
+  deleted session, which triggered `reregisterIfNeeded` and re-registered the
+  session immediately after deletion — an infinite re-register loop.
+- **bridge.py `_is_session_alive`:** Added `slot` variable for debug logging
+  and improved log message to include the slot identifier (sty:window) when a
+  session is detected as dead.
+
 ## [0.7.24] - 2026-03-09
 
 ### Added

@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.24"
+  const PLUGIN_VERSION = "0.7.25"
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
@@ -537,6 +537,13 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         await $`${process.env.HOME}/claude-home/agent-notify.sh end ${bid} ${info.directory}`.nothrow()
         await runClient("unregister", bid)
         ocToBridge.delete(info.id)
+        // Resetovat registeredSessionID a zastavit reregTimer — jinak by timer
+        // dál volal reportState pro smazanou session a okamžitě ji znovu registroval.
+        if (registeredSessionID === bid) {
+          registeredSessionID = null
+          process.env.BRIDGE_SESSION_ID = ""
+        }
+        if (reregTimer) { clearInterval(reregTimer); reregTimer = null }
         return
       }
 

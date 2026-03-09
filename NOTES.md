@@ -56,6 +56,12 @@ Bridge `send_message(nudge=True)` uloží zprávu do SQLite inbox a pošle jen C
 **Řešení:** Bridge zapisuje kopii zpráv do `~/.claude/agent-log/<session_id>.jsonl`
 **Priorita:** Nízká — není blokující.
 
+### Návrh #5: Sandbox agent s vlastním SSH klíčem místo mountu
+**Problém:** Sandbox (bwrap) aktuálně mountuje SSH klíč z hostu dovnitř. To je bezpečnostní riziko — kompromitovaný sandbox má přístup ke klíči.
+**Řešení:** Místo mountu klíče vytvořit extra agenta (samostatný Claude/OpenCode proces) který běží *mimo* sandbox a má přístup ke klíči. Sandbox komunikuje s tímto agentem přes XMPP bridge (`send_message`/`receive_messages`). Agent provede SSH operaci a vrátí výsledek.
+**Výhody:** Klíč nikdy nevstoupí do sandboxu. Sandbox může být plně izolovaný (no-net nebo omezený net).
+**Priorita:** Medium — závisí na tom jak moc se sandbox používá pro SSH operace.
+
 ---
 
 ## Architekturální pozorování
