@@ -47,7 +47,37 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.19"
+  const PLUGIN_VERSION = "0.7.20"
+
+  // ---------------------------------------------------------------------------
+  // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
+  // V bwrap sandboxu může být $PATH ořezaná a `which` vrátí chybu.
+  // Pokud binárka není dostupná, všechna bridge volání se tiše přeskočí —
+  // zabrání se tím výpisům "bun: command not found" do terminálu.
+  // ---------------------------------------------------------------------------
+  const resolveClientBin = () => {
+    try {
+      // eslint-disable-next-line no-undef
+      const { execFileSync } = require("child_process")
+      const path = execFileSync("which", ["claude-xmpp-client"], { encoding: "utf8" }).trim()
+      return path || null
+    } catch (_) {
+      return null
+    }
+  }
+  const CLIENT_BIN = resolveClientBin()
+
+  // Wrapper: spustí claude-xmpp-client pouze pokud je dostupný.
+  // Tiše vrátí { exitCode: 127 } pokud není — žádný výpis do terminálu.
+  const runClient = async (...args) => {
+    if (!CLIENT_BIN) return { exitCode: 127, stdout: "", stderr: "" }
+    try {
+      const res = await $`${CLIENT_BIN} ${args}`.nothrow()
+      return res
+    } catch (_) {
+      return { exitCode: 1, stdout: "", stderr: "" }
+    }
+  }
 
   const STY     = process.env.STY    ?? ""
   const BACKEND = STY
@@ -176,8 +206,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // přepínače CLI. stdout: "ignore" zabrání zablokování při přeplnění pipe bufferu.
   // ---------------------------------------------------------------------------
   const rawRelay = async (to, msg) => {
+    if (!CLIENT_BIN) return { exitCode: 127, stderr: "claude-xmpp-client not available" }
     try {
-      const proc = Bun.spawn(["claude-xmpp-client", "relay", "--to", to, "--", msg], {
+      const proc = Bun.spawn([CLIENT_BIN, "relay", "--to", to, "--", msg], {
         stdout: "ignore", stderr: "pipe",
       })
       const exitCode = await proc.exited
@@ -313,7 +344,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   const reportState = async (state) => {
     if (!registeredSessionID) return
     const payload = JSON.stringify({ session_id: registeredSessionID, state, mode: agentIcon(currentAgent) })
-    await $`claude-xmpp-client state ${payload}`.nothrow()
+    await runClient("state", payload)
   }
 
   // ---------------------------------------------------------------------------
@@ -356,7 +387,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // ---------------------------------------------------------------------------
       let bid = bridgeID(active.id)
       if (STY) {
-        const listRes = await $`claude-xmpp-client list`.nothrow()
+        const listRes = await runClient("list")
         if (listRes.exitCode === 0 && listRes.stdout) {
           try {
             const sessions = JSON.parse(listRes.stdout)
@@ -389,7 +420,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         source:         "opencode",
         plugin_version: PLUGIN_VERSION,
       })
-      await $`claude-xmpp-client register ${reg}`.nothrow()
+      await runClient("register", reg)
       await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${active.directory}`.nothrow()
       // Report initial state (agent is idle at startup, mode = planning)
       await reportState("idle")
@@ -429,7 +460,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         messageBuffer = []
         if (registeredSessionID) {
           await $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow()
-          await $`claude-xmpp-client unregister ${registeredSessionID}`.nothrow()
+          await runClient("unregister", registeredSessionID)
         }
         // Resetovat titul okna
         await setTitle("", projectName)
@@ -457,7 +488,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           source:         "opencode",
           plugin_version: PLUGIN_VERSION,
         })
-        await $`claude-xmpp-client register ${reg}`.nothrow()
+        await runClient("register", reg)
         await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${info.directory}`.nothrow()
         registeredSessionID = bid
         ocToBridge.set(info.id, bid)
@@ -472,7 +503,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (info.parentID) return
         const bid = ocToBridge.get(info.id) ?? bridgeID(info.id)
         await $`${process.env.HOME}/claude-home/agent-notify.sh end ${bid} ${info.directory}`.nothrow()
-        await $`claude-xmpp-client unregister ${bid}`.nothrow()
+        await runClient("unregister", bid)
         ocToBridge.delete(info.id)
         return
       }
@@ -537,7 +568,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           project:    lastAssistant.info.path?.cwd ?? directory,
           message:    text,
         })
-        await $`claude-xmpp-client response ${payload}`.nothrow()
+        await runClient("response", payload)
         return
       }
 
@@ -608,7 +639,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           project:    directory,
           message:    `${perm.permission}\n${detail}`,
         })
-        await $`claude-xmpp-client notify ${payload}`.nothrow()
+        await runClient("notify", payload)
         return
       }
 

@@ -1908,7 +1908,7 @@ class TestListIcons:
         with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
-        # No agent-specific circles should appear (only source 🧠 and state ⏸/▶)
+        # No agent-specific circles should appear (only source 🧠 and state 🟢/🔵)
         assert "🟠" not in text
         assert "🟣" not in text
         assert "🩵" not in text

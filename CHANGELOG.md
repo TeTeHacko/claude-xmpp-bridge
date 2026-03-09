@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.20] - 2026-03-09
+
+### Fixed
+- `_is_session_alive` now checks the specific Screen **window** (via
+  `screen -S <sty> -p <window> -Q title`) instead of just the screen session
+  (`screen -ls`).  Stale sessions in dead windows are now cleaned up on `/list`
+  even when the screen session itself is still alive.
+- `/list` state icons changed from `⏸`/`▶` to `🟢`/`🔵` to match the circles
+  shown in the Screen window title set by the plugin.
+- Plugin: `claude-xmpp-client` is now resolved once at startup via `which`.
+  If not found (e.g. inside a bwrap sandbox with restricted `$PATH`), all
+  bridge calls are silently skipped — no more `bun: command not found` spam
+  in the terminal.  `rawRelay` (Bun.spawn) updated likewise.
+
 ## [0.7.19] - 2026-03-09
 
 ### Changed

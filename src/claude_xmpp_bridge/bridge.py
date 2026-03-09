@@ -37,6 +37,7 @@ MAX_XMPP_BODY = 10_000  # max length of incoming XMPP message body (chars)
 NO_BACKEND_SESSION_TTL = 24 * 3600  # 24 hours
 
 _ALIVE_CHECK_CMDS: dict[str, list[str]] = {
+    # screen: window-level check done in _is_session_alive via -p <window> -Q title
     "screen": ["screen", "-ls"],
     "tmux": ["tmux", "has-session", "-t"],
 }
@@ -155,13 +156,13 @@ class XMPPBridge:
             # Use as-is; empty string if not set.
             mode_icon = mode
 
-            # State icon
+            # State icon — matches the circles used in the Screen window title
             if state == "idle":
-                state_icon = "⏸"
+                state_icon = "🟢"
             elif state == "running":
-                state_icon = "▶"
+                state_icon = "🔵"
             else:
-                state_icon = state  # raw value fallback
+                state_icon = state  # raw value fallback (e.g. "interaction" → 🔴 sent by plugin)
 
             # Icons prefix: source + mode + state
             icons = source_icon + mode_icon + (state_icon if state else "")
@@ -365,13 +366,18 @@ class XMPPBridge:
     # --- Stale session cleanup ---
 
     async def _is_session_alive(self, info: SessionInfo) -> bool:
-        """Check if the session's terminal multiplexer is still running."""
+        """Check if the session's terminal multiplexer window is still running.
+
+        For screen: uses ``screen -S <sty> -p <window> -Q title`` which returns
+        exit 1 when the window no longer exists, even if the screen session itself
+        is still alive.  This catches stale sessions left behind when a window is
+        closed or repurposed without the plugin calling unregister.
+
+        For tmux: ``tmux has-session -t <sty>`` (session-level, window check TBD).
+        """
         backend = info["backend"]
         if backend is None:
             return True  # read-only sessions can't be verified
-        cmd_parts = _ALIVE_CHECK_CMDS.get(backend)
-        if cmd_parts is None:
-            return True  # unknown backend — assume alive
         sty = info["sty"]
         if not sty:
             return True  # no sty — can't check
@@ -381,9 +387,17 @@ class XMPPBridge:
             if var in os.environ:
                 env[var] = os.environ[var]
 
+        if backend == "screen":
+            # Window-level check: exit 0 ↔ window exists, exit 1 ↔ window gone.
+            window = info.get("window") or "0"
+            cmd = ["screen", "-S", sty, "-p", window, "-Q", "title"]
+        elif backend == "tmux":
+            cmd = ["tmux", "has-session", "-t", sty]
+        else:
+            return True  # unknown backend — assume alive
+
         proc = await asyncio.create_subprocess_exec(
-            *cmd_parts,
-            sty,
+            *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
