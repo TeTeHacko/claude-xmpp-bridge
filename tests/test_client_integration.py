@@ -338,3 +338,65 @@ class TestReregisterTimer:
         # State must work again
         r2 = await _run_client(cfg.socket_path, "state", _state_json(sid))
         assert r2.returncode == 0, f"state after timer re-register failed: {r2.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# TestClientSubcommandsWithoutBridge
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestClientSubcommandsWithoutBridge:
+    """Verify exit codes and stderr for every client subcommand when the bridge
+    is not running (socket does not exist).
+
+    Plugin sandbox contract:
+      - state   → exit non-zero + "Error:" in stderr  (plugin detects failure)
+      - register → exit 0, empty stderr               (plugin ignores silently)
+      - unregister → exit 0, empty stderr             (plugin ignores silently)
+
+    The asymmetry is intentional: state is the heartbeat that drives
+    reregisterIfNeeded; register/unregister are fire-and-forget.
+    """
+
+    async def test_state_without_bridge_exits_nonzero(self, tmp_path):
+        """state without bridge → exit non-zero, stderr contains 'Error:'."""
+        result = await _run_client(
+            tmp_path / "no.sock",
+            "state",
+            _state_json("any-session"),
+        )
+        assert result.returncode != 0, f"state must exit non-zero when bridge not running, got {result.returncode}"
+        assert "Error:" in result.stderr, f"state must print 'Error:' to stderr, got: {result.stderr!r}"
+
+    async def test_register_without_bridge_exits_zero_silently(self, tmp_path):
+        """register without bridge → exit 0, no stderr output.
+
+        The plugin calls register fire-and-forget; a non-zero exit here would
+        cause unnecessary noise in sandbox environments.
+        """
+        result = await _run_client(
+            tmp_path / "no.sock",
+            "register",
+            _reg_json("any-session"),
+        )
+        assert result.returncode == 0, (
+            f"register must exit 0 when bridge not running (silent skip), got {result.returncode}: {result.stderr!r}"
+        )
+        assert result.stderr.strip() == "", (
+            f"register must produce no stderr when bridge not running, got: {result.stderr!r}"
+        )
+
+    async def test_unregister_without_bridge_exits_zero_silently(self, tmp_path):
+        """unregister without bridge → exit 0, no stderr output."""
+        result = await _run_client(
+            tmp_path / "no.sock",
+            "unregister",
+            "any-session-id",
+        )
+        assert result.returncode == 0, (
+            f"unregister must exit 0 when bridge not running (silent skip), got {result.returncode}: {result.stderr!r}"
+        )
+        assert result.stderr.strip() == "", (
+            f"unregister must produce no stderr when bridge not running, got: {result.stderr!r}"
+        )

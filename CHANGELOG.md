@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.24] - 2026-03-09
+
+### Added
+- `tests/test_plugin_sandbox.py` — 13 static invariant tests for the OpenCode
+  plugin's sandbox-safe behaviour: `CLIENT_BIN` null fallback (runClient and
+  rawRelay return `{exitCode:127}` silently), `setTitle` stdout escape-sequence
+  fallback (`\x1bk`), `screenTitleWorks` cache, `.nothrow()` on every bun
+  shell `$\`...\`` call, and `registeredSessionID` guards in `pollInbox`,
+  `reregTimer` callback, and `reportState`.
+- `TestClientSubcommandsWithoutBridge` in `test_client_integration.py` — 3
+  integration tests verifying exit codes when bridge is not running: `state`
+  exits non-zero with `Error:` in stderr; `register` and `unregister` exit 0
+  silently (plugin fire-and-forget contract).
+
 ## [0.7.23] - 2026-03-09
 
 ### Added
