@@ -724,18 +724,21 @@ class TestOpencodePluginBridgeDetection:
         assert "claude-xmpp-client ping" not in text
 
     def test_bridge_client_calls_use_nothrow(self):
-        """All register/unregister/notify/response calls must use .nothrow() for resilience."""
+        """The runClient wrapper must use .nothrow() and all direct $`...` shell calls use it too."""
         plugin_dir = _find_opencode_dir()
         assert plugin_dir is not None
         text = (plugin_dir / "plugins" / "xmpp-bridge.js").read_text()
         import re
 
-        # Find all claude-xmpp-client call lines
+        # The runClient wrapper must exist and use .nothrow() — all bridge calls go through it
+        assert "const runClient" in text, "runClient wrapper must be defined"
+        # Find the runClient function body line that calls the client binary
         lines = text.splitlines()
-        client_call_lines = [
-            line for line in lines if re.search(r"claude-xmpp-client (register|unregister|notify|response)", line)
+        runclient_nothrow_lines = [
+            line for line in lines if re.search(r"\$`\$\{CLIENT_BIN\}", line) and ".nothrow()" in line
         ]
-        assert len(client_call_lines) > 0, "expected bridge client calls in plugin"
-        # Every such call must be followed by .nothrow() on the same line
-        for line in client_call_lines:
-            assert ".nothrow()" in line, f"missing .nothrow() on: {line.strip()}"
+        assert len(runclient_nothrow_lines) > 0, "runClient wrapper must use .nothrow() on CLIENT_BIN call"
+
+        # No direct $`claude-xmpp-client ...` calls outside of runClient (they all go via wrapper)
+        direct_calls = [line for line in lines if re.search(r"\$`claude-xmpp-client", line)]
+        assert len(direct_calls) == 0, f"direct claude-xmpp-client calls found (use runClient instead): {direct_calls}"

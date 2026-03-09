@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.22] - 2026-03-09
+
+### Fixed
+- Plugin: `reportState` now detects bridge errors via stderr content
+  (`"Error:"` substring) in addition to exit code, working around cases where
+  the bun runtime returns `exitCode: null` for failed subprocesses.
+  Added `dbg()` logging of exit code and stderr for every `state` call.
+- Plugin: added a periodic re-register timer (`REREG_INTERVAL_MS = 90s`) as a
+  reliable fallback for sessions that lose their bridge registration (e.g. after
+  a bridge restart). The timer is started after initial registration and
+  cancelled on `server.instance.disposed`.
+- Plugin: renamed `stateExit` → `stateFailed` (boolean) for clarity.
+
 ## [0.7.21] - 2026-03-09
 
 ### Fixed

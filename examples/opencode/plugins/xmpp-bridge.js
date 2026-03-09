@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.21"
+  const PLUGIN_VERSION = "0.7.22"
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
@@ -135,8 +135,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Idle polling state
   // ---------------------------------------------------------------------------
   const IDLE_POLL_INTERVAL_MS = 30_000
+  // Periodický re-register: pokud bridge session nezná (restart bridge), re-zaregistruje.
+  // Interval 90s — nezávislý na session.idle, zajistí obnovu i pokud agent je long-running.
+  const REREG_INTERVAL_MS = 90_000
   let isIdle = false
   let pollTimer = null
+  let reregTimer = null
   let polling = false  // guard against concurrent pollInbox calls
 
   // ---------------------------------------------------------------------------
@@ -340,13 +344,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Hlásí stav do bridge s ikonou aktuálního agenta.
   // Pole "mode" obsahuje emoji kolečko agenta (nebo "⚪" pokud neznámý) —
   // bridge ho uloží a zobrazí v /list výstupu před stavovým kruhem.
-  // Vrací exit kód z claude-xmpp-client (0 = OK, jiné = bridge session nezná).
+  // Vrací true pokud bridge session nezná (detekce dle stderr nebo exit code).
   // ---------------------------------------------------------------------------
   const reportState = async (state) => {
-    if (!registeredSessionID) return 1
+    if (!registeredSessionID) return true
     const payload = JSON.stringify({ session_id: registeredSessionID, state, mode: agentIcon(currentAgent) })
     const res = await runClient("state", payload)
-    return res.exitCode ?? 0
+    // Detekce selhání: stderr obsahuje "Error:" (robustní — nezávisí na exit code)
+    // nebo exit code nenulový (fallback)
+    const failed = (res.stderr && res.stderr.includes("Error:")) || (res.exitCode !== null && res.exitCode !== 0)
+    await dbg("reportState(" + state + ") exit=" + res.exitCode + " failed=" + failed + (res.stderr ? " stderr=" + res.stderr.slice(0, 100) : ""))
+    return failed
   }
 
   // ---------------------------------------------------------------------------
@@ -367,10 +375,11 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Stane se po restartu bridge: session v DB zmizí, ale plugin běží dál.
   // Register je idempotentní — bridge zachová agent_state/agent_mode.
   // ---------------------------------------------------------------------------
-  const reregisterIfNeeded = async (exitCode) => {
-    if (exitCode === 0 || !registeredSessionID) return
-    await dbg("bridge session unknown (exit=" + exitCode + "), re-registering " + registeredSessionID)
-    await runClient("register", makeRegPayload(registeredSessionID))
+  const reregisterIfNeeded = async (failed) => {
+    if (!failed || !registeredSessionID) return
+    await dbg("bridge session unknown, re-registering " + registeredSessionID)
+    const regRes = await runClient("register", makeRegPayload(registeredSessionID))
+    await dbg("register result: exit=" + regRes.exitCode + (regRes.stderr ? " stderr=" + regRes.stderr.slice(0, 100) : ""))
   }
 
   // ---------------------------------------------------------------------------
@@ -449,6 +458,19 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           if (isIdle) await pollInbox()
         }, IDLE_POLL_INTERVAL_MS)
       }
+
+      // Spustit periodický re-register timer — obnoví registraci po restartu bridge.
+      // Nezávislý na session.idle, zajistí obnovu i pokud agent čeká dlouho na vstup.
+      if (!reregTimer) {
+        reregTimer = setInterval(async () => {
+          if (!registeredSessionID) return
+          const failed = await reportState(isIdle ? "idle" : "running")
+          if (failed) {
+            await dbg("periodic rereg: bridge session unknown, re-registering " + registeredSessionID)
+            await runClient("register", makeRegPayload(registeredSessionID))
+          }
+        }, REREG_INTERVAL_MS)
+      }
     } catch (_) {
       // Bridge neběží nebo session list selhal — tiše přeskočit
     }
@@ -474,6 +496,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       if (event.type === "server.instance.disposed") {
         isIdle = false
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+        if (reregTimer) { clearInterval(reregTimer); reregTimer = null }
         messageBuffer = []
         if (registeredSessionID) {
           await $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow()
@@ -535,8 +558,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         isIdle = true
         // Titulek: zachovat agent ikonu (ukazuje posledního aktivního agenta) + 🟢
         await setTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
-        const stateExit = await reportState("idle")
-        await reregisterIfNeeded(stateExit)
+        const stateFailed = await reportState("idle")
+        await reregisterIfNeeded(stateFailed)
 
         const sessionID = event.properties.sessionID
 
