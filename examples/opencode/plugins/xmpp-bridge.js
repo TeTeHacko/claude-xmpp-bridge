@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.20"
+  const PLUGIN_VERSION = "0.7.21"
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
@@ -340,11 +340,37 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Hlásí stav do bridge s ikonou aktuálního agenta.
   // Pole "mode" obsahuje emoji kolečko agenta (nebo "⚪" pokud neznámý) —
   // bridge ho uloží a zobrazí v /list výstupu před stavovým kruhem.
+  // Vrací exit kód z claude-xmpp-client (0 = OK, jiné = bridge session nezná).
   // ---------------------------------------------------------------------------
   const reportState = async (state) => {
-    if (!registeredSessionID) return
+    if (!registeredSessionID) return 1
     const payload = JSON.stringify({ session_id: registeredSessionID, state, mode: agentIcon(currentAgent) })
-    await runClient("state", payload)
+    const res = await runClient("state", payload)
+    return res.exitCode ?? 0
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sestaví registrační payload pro aktuální session.
+  // ---------------------------------------------------------------------------
+  const makeRegPayload = (sessionID, projectDir) => JSON.stringify({
+    session_id:     sessionID,
+    sty:            STY,
+    window:         WINDOW,
+    project:        projectDir ?? directory,
+    backend:        BACKEND,
+    source:         "opencode",
+    plugin_version: PLUGIN_VERSION,
+  })
+
+  // ---------------------------------------------------------------------------
+  // Re-registrace — volá se při session.idle pokud bridge session nezná.
+  // Stane se po restartu bridge: session v DB zmizí, ale plugin běží dál.
+  // Register je idempotentní — bridge zachová agent_state/agent_mode.
+  // ---------------------------------------------------------------------------
+  const reregisterIfNeeded = async (exitCode) => {
+    if (exitCode === 0 || !registeredSessionID) return
+    await dbg("bridge session unknown (exit=" + exitCode + "), re-registering " + registeredSessionID)
+    await runClient("register", makeRegPayload(registeredSessionID))
   }
 
   // ---------------------------------------------------------------------------
@@ -411,16 +437,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // Export identity do env — bash tools agenta vidí $BRIDGE_SESSION_ID
       process.env.BRIDGE_SESSION_ID = bid
 
-      const reg = JSON.stringify({
-        session_id:     bid,
-        sty:            STY,
-        window:         WINDOW,
-        project:        active.directory,
-        backend:        BACKEND,
-        source:         "opencode",
-        plugin_version: PLUGIN_VERSION,
-      })
-      await runClient("register", reg)
+      await runClient("register", makeRegPayload(bid, active.directory))
       await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${active.directory}`.nothrow()
       // Report initial state (agent is idle at startup, mode = planning)
       await reportState("idle")
@@ -479,16 +496,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         await setTitle(buildTitle("🟢", name), buildAscii("AI.", name))
 
         const bid = bridgeID(info.id)
-        const reg = JSON.stringify({
-          session_id:     bid,
-          sty:            STY,
-          window:         WINDOW,
-          project:        info.directory,
-          backend:        BACKEND,
-          source:         "opencode",
-          plugin_version: PLUGIN_VERSION,
-        })
-        await runClient("register", reg)
+        await runClient("register", makeRegPayload(bid, info.directory))
         await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${info.directory}`.nothrow()
         registeredSessionID = bid
         ocToBridge.set(info.id, bid)
@@ -523,11 +531,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       }
 
       // --- SESSION IDLE: semafor 🟢 + XMPP notifikace + MCP inbox poll ---
-      if (event.type === "session.idle") {
+       if (event.type === "session.idle") {
         isIdle = true
         // Titulek: zachovat agent ikonu (ukazuje posledního aktivního agenta) + 🟢
         await setTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
-        await reportState("idle")
+        const stateExit = await reportState("idle")
+        await reregisterIfNeeded(stateExit)
 
         const sessionID = event.properties.sessionID
 

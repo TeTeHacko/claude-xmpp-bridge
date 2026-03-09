@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.21] - 2026-03-09
+
+### Fixed
+- Plugin now re-registers with the bridge on each `session.idle` event if
+  the bridge doesn't recognise the session (exit code ≠ 0 from
+  `claude-xmpp-client state`).  This recovers sessions that disappear from
+  the bridge DB after a bridge restart — without requiring the user to
+  restart OpenCode in every window.
+
 ## [0.7.20] - 2026-03-09
 
 ### Fixed
