@@ -125,6 +125,9 @@ recipient = "you@example.com"
 | `CLAUDE_XMPP_MESSAGES` | Messages TOML file path |
 | `CLAUDE_XMPP_SOCKET_TOKEN` | Shared secret for socket authentication |
 | `CLAUDE_XMPP_AUDIT_LOG` | Audit log destination (`journald` or file path) |
+| `CLAUDE_XMPP_SMTP_HOST` | SMTP relay hostname or IP (empty = disabled) |
+| `CLAUDE_XMPP_SMTP_PORT` | SMTP relay port (default: 25) |
+| `CLAUDE_XMPP_EMAIL_THRESHOLD` | Email relay character threshold (default: 4000) |
 
 Configuration priority: CLI flags > environment variables > config.toml > defaults.
 
@@ -176,6 +179,32 @@ Each record is one JSON object per line:
 ```
 
 Audited events: `BRIDGE_START`, `BRIDGE_STOP`, `XMPP_IN`, `XMPP_OUT`, `XMPP_REJECTED`, `TOKEN_REJECTED`, `SESSION_REGISTERED`, `SESSION_REPLACED`, `SESSION_LIMIT_HIT`, `SESSION_UNREGISTERED`, `SESSION_EXPIRED`, `SESSION_STATE`, `TERMINAL_SEND`, `TERMINAL_SEND_FAILED`, `ASK_QUEUED`, `ASK_ANSWERED`, `ASK_TIMEOUT`, `RELAY_SENT`, `RELAY_FAILED`, `BROADCAST_SENT`, `MCP_SEND`, `MCP_BROADCAST`, `MCP_RECEIVE`, `SOCKET_CMD`.
+
+### Email relay
+
+When a notification exceeds `email_threshold` characters, the bridge sends the full
+message body by email via a local SMTP relay and delivers only a truncated snippet
+to XMPP.  This keeps your Jabber client responsive for very large payloads (full
+file contents, long diffs, etc.).
+
+```toml
+# config.toml
+smtp_host = "192.168.1.1"     # SMTP relay host (empty = disabled, default)
+smtp_port = 25                # SMTP relay port (default: 25)
+email_threshold = 4000        # trigger above this many chars (default: 4000)
+```
+
+| Env variable | Description |
+|--------------|-------------|
+| `CLAUDE_XMPP_SMTP_HOST` | SMTP relay hostname or IP |
+| `CLAUDE_XMPP_SMTP_PORT` | SMTP relay port (default: 25) |
+| `CLAUDE_XMPP_EMAIL_THRESHOLD` | Character threshold for email relay (default: 4000) |
+
+Both sender and recipient are set to `recipient` (the bridge sends email to you
+from itself).  The SMTP relay must accept unauthenticated connections from localhost.
+
+Every outgoing XMPP message is recorded as a `XMPP_OUT` audit event with
+`email_relay: true/false` so you can diagnose delivery in `journalctl`.
 
 ## Usage
 
