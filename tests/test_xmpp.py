@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from claude_xmpp_bridge.xmpp import (
     BACKOFF_INITIAL,
-    BACKOFF_MAX,
     BACKOFF_MULTIPLIER,
     XMPPConnection,
 )
@@ -49,6 +48,7 @@ class TestBackoffEscalation:
     """Backoff should escalate: 5 → 10 → 20 → 40 → 60 → 60."""
 
     async def test_backoff_escalates(self):
+        """Each call to _on_disconnected must double the backoff up to BACKOFF_MAX."""
         conn = XMPPConnection("bot@example.com", "secret")
         conn._bot = MagicMock()
 
@@ -59,8 +59,7 @@ class TestBackoffEscalation:
 
             for _ in range(6):
                 delays.append(conn._backoff)
-                # Simulate what _on_disconnected does to backoff
-                conn._backoff = min(conn._backoff * BACKOFF_MULTIPLIER, BACKOFF_MAX)
+                await conn._on_disconnected(None)
 
         assert delays == [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]
 

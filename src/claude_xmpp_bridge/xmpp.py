@@ -68,7 +68,11 @@ class XMPPConnection:
             await self._message_callback(msg)
 
     async def _on_disconnected(self, _event: object) -> None:
-        """Handle disconnection: clear state and schedule reconnect with backoff."""
+        """Handle disconnection: clear state and schedule reconnect with backoff.
+
+        If ``_should_reconnect`` is False (set by :meth:`disconnect`), only
+        clears the connected state without scheduling a reconnect.
+        """
         self.connected.clear()
         if not self._should_reconnect:
             return
@@ -81,7 +85,7 @@ class XMPPConnection:
 
     def send(self, recipient: str, text: str) -> bool:
         """Send a plaintext message. Returns True if sent, False if not connected."""
-        if not self._bot or not self.connected.is_set():
+        if not self._bot or not self.is_connected:
             log.warning("XMPP not connected, dropping: %s", text[:100])
             return False
         msg = self._bot.make_message(mto=recipient, mbody=text, mtype="chat")

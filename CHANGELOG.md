@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.36] - 2026-03-10
+
+### Fixed
+- **`send()` uses `self.is_connected` internally** — the method was still calling
+  `self.connected.is_set()` directly instead of the new `is_connected` property,
+  creating an inconsistency in the class's own API.
+- **`TestBackoffEscalation` now tests real logic** — the test previously manually
+  incremented `_backoff` (duplicating constants, not testing code).  It now calls
+  `_on_disconnected()` directly so any change to the backoff formula is caught.
+
+### Changed
+- **`_on_disconnected` docstring extended** — documents the `_should_reconnect=False`
+  branch that skips reconnect scheduling.
+
 ## [0.7.35] - 2026-03-10
 
 ### Added
