@@ -149,7 +149,7 @@ class TestPluginClientBinFallback:
 
 
 class TestPluginTitleFallback:
-    """setTitle must write to process.stdout when screen -X is unavailable."""
+    """setTitle must write to process.stdout only in bwrap sandbox (inSandbox=true)."""
 
     def test_setTitle_has_stdout_escape_sequence_fallback(self):
         """setTitle must write ESC k ... ESC \\ to stdout as fallback for bwrap
@@ -164,20 +164,18 @@ class TestPluginTitleFallback:
         assert r"\x1bk" in body, r"setTitle stdout fallback must use \x1bk (Screen title escape sequence)"
         assert r"\x1b\\" in body, r"setTitle stdout fallback must close with \x1b\\ (Screen title terminator)"
 
-    def test_setTitle_stdout_path_reachable_when_screen_fails(self):
-        """The stdout.write path must be reachable when screenTitleWorks is false.
+    def test_setTitle_stdout_path_reachable_only_in_sandbox(self):
+        """The stdout.write path must be guarded by inSandbox — it must only run
+        when the bwrap sandbox is detected, never outside it.
 
         Logic must be:
-          if (STY && screenTitleWorks !== false) { screen -X ... }
-          if (STY) { stdout.write ... }   ← reachable when screenTitleWorks=false
+          if (STY && !inSandbox) { screen -X ... }
+          if (STY && inSandbox)  { stdout.write ... }   ← sandbox only
         """
         text = _plugin_text()
         body = _function_body(text, "const setTitle = async")
         assert body, "setTitle function not found in plugin"
 
-        # The stdout.write for screen must NOT be inside an else branch of the
-        # screenTitleWorks check — it must be a separate if(STY) block so it
-        # runs even when screenTitleWorks is false.
         lines = body.splitlines()
         stdout_line_idx = next(
             (i for i, ln in enumerate(lines) if r"\x1bk" in ln),
@@ -185,35 +183,47 @@ class TestPluginTitleFallback:
         )
         assert stdout_line_idx is not None, r"No \x1bk line found in setTitle"
 
-        # The stdout.write line must be preceded by `if (STY)` (not `else`)
-        # within a few lines
+        # The stdout.write line must be preceded by `if (STY && inSandbox)` within a few lines
         context = "\n".join(lines[max(0, stdout_line_idx - 5) : stdout_line_idx + 1])
-        assert "if (STY)" in context, f"stdout.write fallback must be inside 'if (STY)' block, context:\n{context}"
-        assert "} else {" not in context and "else if" not in context, (
-            "stdout.write fallback must NOT be in an else branch — it must be reachable "
-            "independently of the screenTitleWorks check"
+        assert "inSandbox" in context, (
+            f"stdout.write fallback must be guarded by inSandbox, context:\n{context}"
         )
 
-    def test_screenTitleWorks_set_to_false_on_screen_failure(self):
-        """After screen -X fails, screenTitleWorks must be set to false so
-        subsequent setTitle calls skip the screen -X attempt entirely.
+    def test_sandbox_detected_once_at_startup(self):
+        """detectSandbox() must exist and inSandbox must be set once at startup,
+        not re-evaluated on every setTitle call.
+        """
+        text = _plugin_text()
+
+        # detectSandbox function must exist
+        detect_body = _function_body(text, "const detectSandbox = async")
+        assert detect_body, "detectSandbox function not found in plugin"
+
+        # Must use screen -Q to probe socket availability
+        assert "screen" in detect_body, "detectSandbox must call screen to probe socket"
+        assert "-Q" in detect_body, "detectSandbox must use screen -Q (query) to probe socket"
+
+        # inSandbox must be assigned from detectSandbox result
+        assert "inSandbox = await detectSandbox()" in text, (
+            "inSandbox must be set once via 'await detectSandbox()'"
+        )
+
+    def test_screen_title_called_without_sandbox_guard(self):
+        """Outside sandbox, screen -X title must always be attempted — no
+        screenTitleWorks cache that permanently disables it after one failure.
         """
         text = _plugin_text()
         body = _function_body(text, "const setTitle = async")
         assert body, "setTitle function not found in plugin"
 
-        # Must assign false to screenTitleWorks when screen -X fails
-        assert "screenTitleWorks = false" in body, "setTitle must set screenTitleWorks = false when screen -X fails"
-
-    def test_screenTitleWorks_checked_before_screen_call(self):
-        """screen -X must only be called when screenTitleWorks !== false."""
-        text = _plugin_text()
-        body = _function_body(text, "const setTitle = async")
-        assert body, "setTitle function not found in plugin"
-
-        assert "screenTitleWorks !== false" in body, (
-            "setTitle must check 'screenTitleWorks !== false' before calling screen -X"
+        # Old cache variable must not exist
+        assert "screenTitleWorks" not in body, (
+            "screenTitleWorks cache must not exist — transient failures must not "
+            "permanently disable screen -X title outside sandbox"
         )
+
+        # screen -X title must be called when !inSandbox
+        assert "!inSandbox" in body, "setTitle must call screen -X title when !inSandbox"
 
 
 # ---------------------------------------------------------------------------

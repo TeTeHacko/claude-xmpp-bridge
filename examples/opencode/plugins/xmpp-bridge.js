@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.36"
+  const PLUGIN_VERSION = "0.7.37"
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
@@ -304,18 +304,44 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   // ---------------------------------------------------------------------------
-  // screenTitleWorks: cache výsledku `screen -X title`.
-  // null = neznámo (ještě nezkoušeno), true = funguje, false = selhal (sandbox).
-  // Zabrání opakovanému volání selžou-li příkazu při každém setTitle().
+  // Detekce bwrap sandboxu — provedena JEDNOU při startu.
+  //
+  // bwrap --new-session volá setsid() → proces nemá kontrolující terminál →
+  // `screen -S $STY -Q title` selže (nelze se připojit k Screen socketu).
+  // Mimo sandbox příkaz uspěje (nebo selže jen přechodně).
+  //
+  // Proč detekovat jednou místo cache na první selhání:
+  //   screen -X title může přechodně selhat při startu (race condition — Screen
+  //   socket ještě není připraven). Pokud bychom cache nastavili na false při
+  //   prvním selhání, stdout fallback by se používal trvale i mimo sandbox,
+  //   což způsobuje artefakty v TUI (escape sekvence interferují s alternativním
+  //   bufferem OpenCode / React Ink).
+  //
+  // Stdout fallback (ESC k ... ESC \) se smí použít POUZE v sandboxu:
+  //   - Mimo sandbox: Screen zachytí sekvenci z pty a překreslí caption/hardstatus
+  //     ve špatný moment → zdvojené okno listy, blikání, artefakty.
+  //   - V sandboxu: Screen socket není dostupný, stdout je jediná cesta.
   // ---------------------------------------------------------------------------
-  let screenTitleWorks = STY ? null : false
+  const detectSandbox = async () => {
+    if (!STY) return false
+    try {
+      const res = await $`screen -S ${STY} -Q title`.nothrow()
+      // exitCode 0 = socket dostupný → mimo sandbox
+      // exitCode ≠ 0 = socket nedostupný → sandbox (nebo Screen neběží)
+      return res.exitCode !== 0
+    } catch (_) {
+      return true
+    }
+  }
+  const inSandbox = await detectSandbox()
 
   // ---------------------------------------------------------------------------
   // Pomocník pro nastavení titulu okna.
   // emojiTitle — použit přes `screen -X title` (mimo sandbox, plná podpora UTF-8)
   // asciiTitle  — fallback: zapsán přímo na stdout (fd 1, zděděný Screen pty fd).
+  //               Použit POUZE v bwrap sandboxu (viz detectSandbox výše).
   //
-  // Proč stdout místo /dev/tty:
+  // Proč stdout místo /dev/tty v sandboxu:
   //   bwrap --new-session volá setsid() → proces nemá kontrolující terminál →
   //   open("/dev/tty") vrátí ENXIO i přes bind-mount. Stdout (fd 1) je však
   //   zděděný file descriptor stále napojený na Screen pseudo-tty; Screen
@@ -326,13 +352,16 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   //   printf zapíše escape sekvenci do pipe, ne do terminálu — Screen ji nikdy nevidí.
   // ---------------------------------------------------------------------------
   const setTitle = async (emojiTitle, asciiTitle) => {
-    if (STY && screenTitleWorks !== false) {
-      const res = await $`screen -S ${STY} -p ${WINDOW} -X title ${emojiTitle}`.nothrow()
-      if (res.exitCode === 0) { screenTitleWorks = true; return }
-      screenTitleWorks = false
+    if (STY && !inSandbox) {
+      // Mimo sandbox: vždy použít screen -X title (přes socket).
+      // Přechodné selhání (race condition při startu) se tiše ignoruje —
+      // příští volání setTitle uspěje. NIKDY nepadáme na stdout fallback,
+      // protože ten způsobuje artefakty v TUI (altscreen + caption kolize).
+      await $`screen -S ${STY} -p ${WINDOW} -X title ${emojiTitle}`.nothrow()
+      return
     }
-    if (STY) {
-      // Fallback: zápis přímo na stdout → Screen pty → Screen nastaví window title.
+    if (STY && inSandbox) {
+      // Sandbox fallback: zápis přímo na stdout → Screen pty → Screen nastaví window title.
       // Funguje i uvnitř bwrap --new-session (zděděný fd, ne /dev/tty).
       process.stdout.write('\x1bk' + asciiTitle + '\x1b\\')
       return

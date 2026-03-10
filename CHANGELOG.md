@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.37] - 2026-03-10
+
+### Fixed
+- **Screen TUI artefacts on startup** — the plugin's `setTitle()` was falling back
+  to writing raw `ESC k ... ESC \` escape sequences directly to stdout whenever
+  `screen -X title` failed (including transient failures at startup due to a race
+  condition before the Screen socket is ready).  Writing escape sequences to the
+  inherited pty while OpenCode TUI is active causes Screen to redraw `caption` /
+  `hardstatus` at the wrong moment, producing doubled window lists, flickering,
+  and garbage characters (especially visible with `altscreen on` + `caption always`
+  in `.screenrc`).
+
+  **Fix:** sandbox is now detected **once at startup** via `screen -S $STY -Q title`.
+  The stdout escape fallback is used **only** when `inSandbox === true` (bwrap
+  `--new-session` → no socket access).  Outside sandbox, `screen -X title` is
+  always used; transient failures are silently ignored (next `setTitle()` call
+  will succeed).
+
+- **`session-start-title.sh` hook** — same issue: the hook was unconditionally
+  writing `\033k...\033\\` to stderr (the inherited Screen pty).  Now tries
+  `screen -S $STY -p $WINDOW -X title` first; falls back to escape sequences
+  only when the socket is unavailable (sandbox / no Screen).
+
 ## [0.7.36] - 2026-03-10
 
 ### Fixed
