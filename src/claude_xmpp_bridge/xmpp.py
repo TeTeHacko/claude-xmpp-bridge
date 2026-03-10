@@ -29,6 +29,11 @@ class XMPPConnection:
         self._backoff = BACKOFF_INITIAL
         self._should_reconnect = True
 
+    @property
+    def is_connected(self) -> bool:
+        """Return True if the XMPP session is currently active."""
+        return self.connected.is_set()
+
     def on_message(self, callback: Callable[[slixmpp.Message], Awaitable[None]]) -> None:
         """Set the incoming message callback."""
         self._message_callback = callback
@@ -50,6 +55,7 @@ class XMPPConnection:
         log.info("XMPP connecting as %s (force_starttls=%s)", self.jid, self._force_starttls)
 
     async def _on_session_start(self, _event: object) -> None:
+        """Handle session_start: send presence, reset backoff, mark connected."""
         if self._bot:
             self._bot.send_presence()
         self._backoff = BACKOFF_INITIAL  # Reset on successful connect
@@ -57,10 +63,12 @@ class XMPPConnection:
         log.info("XMPP connected")
 
     async def _on_message(self, msg: slixmpp.Message) -> None:
+        """Dispatch incoming message to the registered callback."""
         if self._message_callback:
             await self._message_callback(msg)
 
     async def _on_disconnected(self, _event: object) -> None:
+        """Handle disconnection: clear state and schedule reconnect with backoff."""
         self.connected.clear()
         if not self._should_reconnect:
             return

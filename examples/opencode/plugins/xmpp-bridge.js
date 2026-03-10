@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.34"
+  const PLUGIN_VERSION = "0.7.35"
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.

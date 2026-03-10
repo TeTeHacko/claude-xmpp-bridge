@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.35] - 2026-03-10
+
+### Added
+- **`XMPPConnection.is_connected` property** — convenience property that mirrors
+  `conn.connected.is_set()` so callers no longer need to access the internal
+  asyncio `Event` directly.
+- **Additional `test_xmpp.py` coverage** — new test classes cover `is_connected`,
+  `_on_message` callback dispatch (including no-callback and replacement cases),
+  `send()` HTML stripping (`del msg["html"]`), and `start()` event-handler
+  registration / force-STARTTLS path.
+
+### Changed
+- **`XMPPConnection` private methods gain docstrings** — `_on_session_start`,
+  `_on_message`, and `_on_disconnected` now have concise docstrings describing
+  their purpose and side-effects.
+
 ## [0.7.34] - 2026-03-10
 
 ### Changed

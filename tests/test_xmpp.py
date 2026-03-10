@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from claude_xmpp_bridge.xmpp import (
     BACKOFF_INITIAL,
@@ -136,3 +136,121 @@ class TestDisconnectNoReconnect:
         assert not conn.connected.is_set()
         mock_sleep.assert_not_called()
         conn._bot.connect.assert_not_called()
+
+
+class TestIsConnectedProperty:
+    """is_connected property mirrors connected.is_set()."""
+
+    def test_is_connected_false_initially(self):
+        conn = XMPPConnection("bot@example.com", "secret")
+        assert conn.is_connected is False
+
+    def test_is_connected_true_when_event_set(self):
+        conn = XMPPConnection("bot@example.com", "secret")
+        conn.connected.set()
+        assert conn.is_connected is True
+
+    def test_is_connected_false_after_clear(self):
+        conn = XMPPConnection("bot@example.com", "secret")
+        conn.connected.set()
+        conn.connected.clear()
+        assert conn.is_connected is False
+
+
+class TestOnMessageCallback:
+    """_on_message dispatches to the registered callback."""
+
+    async def test_on_message_calls_callback(self):
+        conn = XMPPConnection("bot@example.com", "secret")
+        callback = AsyncMock()
+        conn.on_message(callback)
+        msg = MagicMock()
+
+        await conn._on_message(msg)
+
+        callback.assert_called_once_with(msg)
+
+    async def test_on_message_no_callback_is_safe(self):
+        """_on_message without a registered callback must not raise."""
+        conn = XMPPConnection("bot@example.com", "secret")
+        msg = MagicMock()
+        # Should not raise
+        await conn._on_message(msg)
+
+    async def test_on_message_replaced_callback(self):
+        """Only the last registered callback should be called."""
+        conn = XMPPConnection("bot@example.com", "secret")
+        first = AsyncMock()
+        second = AsyncMock()
+        conn.on_message(first)
+        conn.on_message(second)
+        msg = MagicMock()
+
+        await conn._on_message(msg)
+
+        first.assert_not_called()
+        second.assert_called_once_with(msg)
+
+
+class TestSendHtmlStripping:
+    """send() must strip the html stanza from the message."""
+
+    def test_send_deletes_html_key(self):
+        conn = XMPPConnection("bot@example.com", "secret")
+        mock_msg = MagicMock()
+        mock_bot = MagicMock()
+        mock_bot.make_message.return_value = mock_msg
+        conn._bot = mock_bot
+        conn.connected.set()
+
+        conn.send("user@example.com", "hello")
+
+        # del msg["html"] should have been called
+        mock_msg.__delitem__.assert_called_once_with("html")
+        mock_msg.send.assert_called_once()
+
+
+class TestStart:
+    """start() wires up event handlers and calls bot.connect()."""
+
+    def test_start_calls_connect(self):
+        conn = XMPPConnection("bot@example.com", "secret")
+        mock_bot = MagicMock()
+
+        with patch("claude_xmpp_bridge.xmpp.slixmpp.ClientXMPP", return_value=mock_bot):
+            conn.start()
+
+        mock_bot.connect.assert_called_once()
+
+    def test_start_registers_three_handlers(self):
+        conn = XMPPConnection("bot@example.com", "secret")
+        mock_bot = MagicMock()
+
+        with patch("claude_xmpp_bridge.xmpp.slixmpp.ClientXMPP", return_value=mock_bot):
+            conn.start()
+
+        assert mock_bot.add_event_handler.call_count == 3
+        events = [c.args[0] for c in mock_bot.add_event_handler.call_args_list]
+        assert "session_start" in events
+        assert "message" in events
+        assert "disconnected" in events
+
+    def test_start_force_starttls_disables_plain(self):
+        conn = XMPPConnection("bot@example.com", "secret", force_starttls=True)
+        mock_bot = MagicMock()
+        mock_bot.__getitem__ = MagicMock(return_value=MagicMock())
+
+        with patch("claude_xmpp_bridge.xmpp.slixmpp.ClientXMPP", return_value=mock_bot):
+            conn.start()
+
+        # feature_mechanisms plugin accessed via mock_bot["feature_mechanisms"]
+        mock_bot.__getitem__.assert_any_call("feature_mechanisms")
+
+    def test_start_no_starttls_skips_plain_disable(self):
+        conn = XMPPConnection("bot@example.com", "secret", force_starttls=False)
+        mock_bot = MagicMock()
+
+        with patch("claude_xmpp_bridge.xmpp.slixmpp.ClientXMPP", return_value=mock_bot):
+            conn.start()
+
+        mock_bot.__getitem__.assert_not_called()
