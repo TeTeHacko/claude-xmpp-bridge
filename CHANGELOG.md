@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.38] - 2026-03-10
+
+### Fixed
+- **`detectSandbox()` no longer calls `screen -Q`** — the previous implementation
+  ran `screen -S $STY -Q title` to probe socket availability, but `screen -Q`
+  writes "session not found" errors to stderr which leaked into the OpenCode TUI
+  as visible error lines.  Detection is now done by checking whether the Screen
+  socket file exists on the filesystem (`fs.existsSync($SCREENDIR/$STY)`), which
+  is silent, synchronous, and has no side effects.  `detectSandbox` is also now
+  a plain (non-async) function since no subprocess is needed.
+
 ## [0.7.37] - 2026-03-10
 
 ### Fixed

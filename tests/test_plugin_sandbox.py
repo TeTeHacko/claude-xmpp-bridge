@@ -195,17 +195,19 @@ class TestPluginTitleFallback:
         """
         text = _plugin_text()
 
-        # detectSandbox function must exist
-        detect_body = _function_body(text, "const detectSandbox = async")
+        # detectSandbox function must exist (sync — no async needed for fs check)
+        detect_body = _function_body(text, "const detectSandbox = ")
         assert detect_body, "detectSandbox function not found in plugin"
 
-        # Must use screen -Q to probe socket availability
-        assert "screen" in detect_body, "detectSandbox must call screen to probe socket"
-        assert "-Q" in detect_body, "detectSandbox must use screen -Q (query) to probe socket"
+        # Must check filesystem for Screen socket (silent — no screen subprocess output)
+        assert "existsSync" in detect_body or "statSync" in detect_body or "accessSync" in detect_body, (
+            "detectSandbox must use synchronous fs check (existsSync/statSync/accessSync) "
+            "to avoid screen subprocess output appearing in OpenCode TUI"
+        )
 
-        # inSandbox must be assigned from detectSandbox result
-        assert "inSandbox = await detectSandbox()" in text, (
-            "inSandbox must be set once via 'await detectSandbox()'"
+        # inSandbox must be assigned from detectSandbox result (sync call, no await)
+        assert "inSandbox = detectSandbox()" in text, (
+            "inSandbox must be set once via 'detectSandbox()' (synchronous)"
         )
 
     def test_screen_title_called_without_sandbox_guard(self):

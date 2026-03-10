@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.37"
+  const PLUGIN_VERSION = "0.7.38"
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
@@ -304,36 +304,41 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   // ---------------------------------------------------------------------------
-  // Detekce bwrap sandboxu — provedena JEDNOU při startu.
+  // Detekce bwrap sandboxu — provedena JEDNOU při startu, bez volání screen.
   //
   // bwrap --new-session volá setsid() → proces nemá kontrolující terminál →
-  // `screen -S $STY -Q title` selže (nelze se připojit k Screen socketu).
-  // Mimo sandbox příkaz uspěje (nebo selže jen přechodně).
+  // Screen socket soubor není přístupný (nebo neexistuje v sandboxovaném fs).
   //
-  // Proč detekovat jednou místo cache na první selhání:
-  //   screen -X title může přechodně selhat při startu (race condition — Screen
-  //   socket ještě není připraven). Pokud bychom cache nastavili na false při
-  //   prvním selhání, stdout fallback by se používal trvale i mimo sandbox,
-  //   což způsobuje artefakty v TUI (escape sekvence interferují s alternativním
-  //   bufferem OpenCode / React Ink).
+  // Detekce: zkontrolujeme zda socket soubor pro $STY existuje na filesystému.
+  // Screen ukládá sockety do $SCREENDIR (výchozí: ~/.screen nebo /run/screen/S-USER).
+  // Pokud soubor neexistuje → jsme v sandboxu (bind-mount skryl ~/.screen).
+  //
+  // Proč filesystem místo volání `screen -Q ...`:
+  //   screen -Q vypisuje výstup/chyby na stdout/stderr → viditelné v OpenCode TUI.
+  //   Čtení filesystému je tiché, synchronní a bez vedlejších efektů.
   //
   // Stdout fallback (ESC k ... ESC \) se smí použít POUZE v sandboxu:
   //   - Mimo sandbox: Screen zachytí sekvenci z pty a překreslí caption/hardstatus
   //     ve špatný moment → zdvojené okno listy, blikání, artefakty.
   //   - V sandboxu: Screen socket není dostupný, stdout je jediná cesta.
   // ---------------------------------------------------------------------------
-  const detectSandbox = async () => {
+  const detectSandbox = () => {
     if (!STY) return false
     try {
-      const res = await $`screen -S ${STY} -Q title`.nothrow()
-      // exitCode 0 = socket dostupný → mimo sandbox
-      // exitCode ≠ 0 = socket nedostupný → sandbox (nebo Screen neběží)
-      return res.exitCode !== 0
+      // eslint-disable-next-line no-undef
+      const fs = require("fs")
+      // Screen socket je soubor pojmenovaný podle STY (např. "6385.pts-0.black-arch").
+      // Hledáme v $SCREENDIR, pak ve standardních umístěních.
+      const screenDir = process.env.SCREENDIR
+        || `${process.env.HOME}/.screen`
+      const socketPath = `${screenDir}/${STY}`
+      return !fs.existsSync(socketPath)
     } catch (_) {
+      // Pokud fs selže (neočekávaně), předpokládáme sandbox pro bezpečnost.
       return true
     }
   }
-  const inSandbox = await detectSandbox()
+  const inSandbox = detectSandbox()
 
   // ---------------------------------------------------------------------------
   // Pomocník pro nastavení titulu okna.
