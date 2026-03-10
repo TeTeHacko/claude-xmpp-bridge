@@ -120,8 +120,13 @@ class SocketServer:
             await writer.drain()
         except TimeoutError:
             log.warning("Client read timeout")
-        except Exception as e:
-            log.error("Client handler error: %s", e)
+        except UnicodeDecodeError:
+            log.warning("Client sent non-UTF-8 data")
+            with contextlib.suppress(OSError):
+                writer.write(json.dumps({"error": "invalid encoding"}).encode() + b"\n")
+                await writer.drain()
+        except Exception:
+            log.exception("Client handler error")
             with contextlib.suppress(OSError):
                 writer.write(json.dumps({"error": "internal error"}).encode() + b"\n")
                 await writer.drain()

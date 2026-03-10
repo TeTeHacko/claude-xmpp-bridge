@@ -228,9 +228,13 @@ class BridgeMCPServer:
     # ------------------------------------------------------------------
 
     def _short_path(self, path: str) -> str:
-        """Replace $HOME with ~ for display."""
+        """Replace $HOME with ~ for display. Delegates to bridge if available."""
+        if self._bridge is not None:
+            return self._bridge._short_path(path)
         home = os.path.expanduser("~")
-        return path.replace(home, "~") if path.startswith(home) else path
+        if path == home:
+            return "~"
+        return path.replace(home + "/", "~/", 1) if path.startswith(home + "/") else path
 
     async def _tool_send_message(self, *, to: str, message: str, screen: bool = True, nudge: bool = False) -> str:
         """Implementation of the send_message tool."""

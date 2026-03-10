@@ -100,8 +100,8 @@ def _check_permissions(path: Path) -> None:
                 "which allows group/other access.\n"
                 f"Fix with: chmod 600 {path}"
             )
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Cannot check permissions for %s: %s", path, exc)
 
 
 def _resolve_credentials(
@@ -205,7 +205,15 @@ def load_config(
 
     # Force STARTTLS (default True)
     force_starttls_raw = toml.get("force_starttls")
-    force_starttls = bool(force_starttls_raw) if force_starttls_raw is not None else True
+    if force_starttls_raw is None:
+        force_starttls = True
+    elif isinstance(force_starttls_raw, bool):
+        force_starttls = force_starttls_raw
+    else:
+        raise SystemExit(
+            f"Error: force_starttls must be a boolean (true/false) in {CONFIG_FILE}, "
+            f"got {type(force_starttls_raw).__name__}: {force_starttls_raw!r}"
+        )
 
     # Audit log destination: "journald" (default) or path to a file
     audit_log = os.environ.get("CLAUDE_XMPP_AUDIT_LOG") or _toml_str(toml, "audit_log") or "journald"
@@ -216,7 +224,10 @@ def load_config(
     if cli_mcp_port is not None:
         mcp_port = cli_mcp_port
     elif mcp_port_env:
-        mcp_port = int(mcp_port_env)
+        try:
+            mcp_port = int(mcp_port_env)
+        except ValueError:
+            raise SystemExit(f"Error: CLAUDE_XMPP_MCP_PORT must be an integer, got {mcp_port_env!r}") from None
     elif mcp_port_toml is not None:
         mcp_port = int(str(mcp_port_toml))
     else:
@@ -227,7 +238,10 @@ def load_config(
     smtp_port_env = os.environ.get("CLAUDE_XMPP_SMTP_PORT")
     smtp_port_toml = toml.get("smtp_port")
     if smtp_port_env:
-        smtp_port = int(smtp_port_env)
+        try:
+            smtp_port = int(smtp_port_env)
+        except ValueError:
+            raise SystemExit(f"Error: CLAUDE_XMPP_SMTP_PORT must be an integer, got {smtp_port_env!r}") from None
     elif smtp_port_toml is not None:
         smtp_port = int(str(smtp_port_toml))
     else:
@@ -235,7 +249,12 @@ def load_config(
     email_threshold_env = os.environ.get("CLAUDE_XMPP_EMAIL_THRESHOLD")
     email_threshold_toml = toml.get("email_threshold")
     if email_threshold_env:
-        email_threshold = int(email_threshold_env)
+        try:
+            email_threshold = int(email_threshold_env)
+        except ValueError:
+            raise SystemExit(
+                f"Error: CLAUDE_XMPP_EMAIL_THRESHOLD must be an integer, got {email_threshold_env!r}"
+            ) from None
     elif email_threshold_toml is not None:
         email_threshold = int(str(email_threshold_toml))
     else:

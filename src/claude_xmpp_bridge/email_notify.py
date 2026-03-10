@@ -52,7 +52,7 @@ async def send_email(
         )
         log.debug("Email sent to %s via %s:%d", recipient, smtp_host, smtp_port)
         return True
-    except Exception as exc:  # noqa: BLE001
+    except (smtplib.SMTPException, OSError, TimeoutError) as exc:
         log.warning("Email delivery failed: %s", exc)
         return False
 

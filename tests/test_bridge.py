@@ -4682,13 +4682,17 @@ class TestXmppSendEmailRelay:
         bridge = XMPPBridge(_make_config_smtp(tmp_path, threshold=10))
         long_msg = "A" * 600
 
-        def close_coro(coro):
-            coro.close()  # prevent RuntimeWarning: coroutine never awaited
+        mock_task = MagicMock(spec=asyncio.Task)
 
-        with patch("asyncio.ensure_future", side_effect=close_coro) as mock_future:
+        def _fake_create_task(coro):
+            coro.close()  # prevent RuntimeWarning: coroutine never awaited
+            return mock_task
+
+        with patch("asyncio.create_task", side_effect=_fake_create_task) as mock_ct:
             bridge._xmpp_send(long_msg)
 
-        mock_future.assert_called_once()
+        mock_ct.assert_called_once()
+        mock_task.add_done_callback.assert_called_once()
         # XMPP body must be truncated (not the full message)
         xmpp_body = conn.send.call_args[0][1]
         assert len(xmpp_body) < len(long_msg)
@@ -4707,7 +4711,7 @@ class TestXmppSendEmailRelay:
         bridge = XMPPBridge(_make_config_smtp(tmp_path, threshold=10))
         long_msg = "Hello World " + "X" * 100
 
-        with patch("asyncio.ensure_future", side_effect=lambda c: c.close()):
+        with patch("asyncio.create_task", side_effect=lambda c: (c.close(), MagicMock(spec=asyncio.Task))[1]):
             bridge._xmpp_send(long_msg)
 
         xmpp_body = conn.send.call_args[0][1]

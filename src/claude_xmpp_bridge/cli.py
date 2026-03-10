@@ -229,9 +229,7 @@ def client_main() -> None:
     elif args.command == "list":
         result = send_to_bridge({"cmd": "list"}, socket_path)
         if result and result.get("ok"):
-            import json as _json
-
-            print(_json.dumps(result["sessions"]))
+            print(json.dumps(result["sessions"]))
         else:
             print("Error: bridge not running or list failed", file=sys.stderr)
             sys.exit(1)

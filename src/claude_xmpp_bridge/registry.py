@@ -16,7 +16,9 @@ log = logging.getLogger(__name__)
 
 # Validation patterns
 SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
-STY_RE = re.compile(r"^[a-zA-Z0-9_.\-]{0,128}$")  # no colon: prevents tmux session:window injection
+STY_RE = re.compile(
+    r"^[a-zA-Z0-9_.%\-]{0,128}$"
+)  # no colon: prevents tmux session:window injection; % allowed for tmux pane IDs
 WINDOW_RE = re.compile(r"^[0-9]{0,6}$")  # max 6 digits, empty string allowed (screen default)
 
 
@@ -45,7 +47,7 @@ def _validate_session_id(session_id: str) -> None:
 def _validate_sty(sty: str) -> None:
     if not STY_RE.match(sty):
         raise ValueError(
-            f"Invalid sty: {sty!r} (must contain only letters, digits, dots, colons, underscores, hyphens)"
+            f"Invalid sty: {sty!r} (must contain only letters, digits, dots, percent, underscores, hyphens)"
         )
 
 

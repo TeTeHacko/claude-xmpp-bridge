@@ -72,6 +72,8 @@ class XMPPBridge:
         # Per-STY lock to serialize screen -Q queries (concurrent queries on the
         # same session create colliding -queryA sockets and return exit 1).
         self._screen_query_locks: dict[str, asyncio.Lock] = {}
+        # Merged source icons (defaults + user config), computed once.
+        self._icons: dict[str | None, str] = {**DEFAULT_SOURCE_ICONS, **config.source_icons}
 
     # --- XMPP message handling ---
 
@@ -306,7 +308,7 @@ class XMPPBridge:
             # Ensure we don't cut in the middle of a multi-byte sequence
             xmpp_body = f"{snippet}\n\n[… {len(text)} chars total — full message sent by email]"
             # Fire-and-forget email delivery (non-blocking)
-            asyncio.ensure_future(
+            task = asyncio.create_task(
                 send_email(
                     smtp_host=cfg.smtp_host,
                     smtp_port=cfg.smtp_port,
@@ -316,9 +318,19 @@ class XMPPBridge:
                     body=text,
                 )
             )
+            task.add_done_callback(self._email_task_done)
         else:
             xmpp_body = text
         return self.xmpp.send(cfg.recipient, xmpp_body)
+
+    @staticmethod
+    def _email_task_done(task: asyncio.Task[bool]) -> None:
+        """Callback for fire-and-forget email tasks — log unexpected errors."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("Email task raised unexpected error: %s", exc)
 
     def _enqueue_for_mcp(self, session_id: str, message: str) -> None:
         """Queue *message* into the MCP inbox for *session_id* (no-op if MCP disabled)."""
@@ -356,7 +368,7 @@ class XMPPBridge:
           2. Built-in DEFAULT_SOURCE_ICONS
           3. Hardcoded fallback "⚡"
         """
-        icons = {**DEFAULT_SOURCE_ICONS, **self.config.source_icons}
+        icons = self._icons
         return icons.get(source) or icons.get(None, "⚡")
 
     def _session_prefix(self, info: SessionInfo) -> str:
@@ -509,6 +521,11 @@ class XMPPBridge:
                 proc.kill()
                 await proc.wait()
                 log.debug("_is_session_alive: timeout (slot=%s cmd=%s)", slot, cmd)
+                return False
+            except OSError as exc:
+                log.debug("_is_session_alive: OSError (slot=%s cmd=%s err=%s)", slot, cmd, exc)
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
                 return False
             alive = proc.returncode == 0
             if not alive:

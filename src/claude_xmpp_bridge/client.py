@@ -58,11 +58,14 @@ def send_to_bridge(
             # Read until newline — a single recv() may not deliver the full response
             # (TCP/Unix stream does not guarantee message boundaries).
             data = b""
+            max_response = 1_048_576  # 1 MB safety limit
             while b"\n" not in data:
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
                 data += chunk
+                if len(data) > max_response:
+                    break
             if data:
                 parsed = json.loads(data.decode())
                 if isinstance(parsed, dict):

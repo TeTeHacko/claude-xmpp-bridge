@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.31] - 2026-03-10
+
+### Fixed
+- **CRITICAL: `_TARGET_RE` accepted empty target strings** — regex quantifier
+  changed from `{0,128}` to `{1,128}` in `multiplexer.py`.
+- **CRITICAL: `_check_permissions` silently passed on `OSError`** — now logs a
+  warning instead of silently ignoring permission-check failures.
+- **CRITICAL: `force_starttls = bool(val)` evaluated `"no"` as `True`** — added
+  proper string-to-bool parsing in `config.py`.
+- **`asyncio.ensure_future` fire-and-forget lost errors** — replaced with
+  `asyncio.create_task` + `_email_task_done` callback in `bridge.py`.
+- **Client recv loop had no size limit** — added 1 MB cap in `client.py`.
+- **tmux liveness check missing `OSError` handling** — added in `bridge.py`.
+- **`config.py` `int()` env var parsing lacked error handling** — added
+  `ValueError` → `SystemExit` with `from None` for `SMTP_PORT` and
+  `EMAIL_THRESHOLD`.
+- **Registry error message said "colons" but regex excluded them** — fixed
+  error text in `registry.py`.
+- **`email_notify.py` had broad `except Exception`** — narrowed to
+  `SMTPException`, `OSError`, `TimeoutError`.
+- **`socket_server.py` had broad `except Exception`** — split
+  `UnicodeDecodeError` + `log.exception` for unexpected errors.
+- **Redundant `import json as _json` in `cli.py`** — removed.
+- **`_source_icon` created merged dict on every call** — icons dict now cached
+  in `XMPPBridge.__init__`.
+- **tmux pane IDs (`%3`) rejected by `STY_RE`** — added `%` to allowed
+  characters.
+
+### Changed
+- `_short_path` in `mcp_server.py` now delegates to `bridge._short_path` when
+  bridge is available, eliminating code duplication.
+
 ## [0.7.30] - 2026-03-10
 
 ### Changed
