@@ -21,6 +21,7 @@ import logging
 import logging.handlers
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 _AUDIT_LOGGER_NAME = "claude_xmpp_bridge.audit"
@@ -77,6 +78,7 @@ class AuditLogger:
         if target == "journald":
             handler = _build_journald_handler()
         else:
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
             handler = logging.handlers.RotatingFileHandler(
                 target,
                 maxBytes=_MAX_BYTES,

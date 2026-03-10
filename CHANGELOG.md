@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.32] - 2026-03-10
+
+### Changed
+- **Refactor: `multiplexer.py` extracted `_run_cmd` helper** — eliminated 6×
+  duplicated subprocess + timeout + error-handling boilerplate.  Added named
+  constants `_CMD_TIMEOUT` (5 s) and `_INTER_CMD_DELAY` (50 ms).
+- **Refactor: `socket_server.py` switched from `reader.read()` to
+  `reader.readline()`** — line-based protocol now correctly reads exactly one
+  JSON request per connection instead of waiting for EOF.  Added explicit size
+  guard (64 KB max).
+- **Refactor: `bridge.py` `_ask_queue` changed from `list` to
+  `collections.deque`** — `popleft()` O(1) for the common case; `remove()`
+  fallback only for mid-queue timeouts.
+- **Refactor: `messages.py` removed `object.__setattr__` hack** — frozen
+  dataclass overrides now use constructor kwargs via `Messages(**overrides)`.
+- **Refactor: `bridge.py` extracted `_sorted_ids` helper** — deduplicated
+  session sort logic from 3 call sites.
+- **`__init__.py` added `__all__`** for explicit public API.
+- **`audit.py` creates parent directory** for file-based audit log target if
+  it does not exist (prevents `FileNotFoundError`).
+- **`config.py` `_toml_str` logs warning** on non-string TOML values instead
+  of silently coercing them.
+
 ## [0.7.31] - 2026-03-10
 
 ### Fixed

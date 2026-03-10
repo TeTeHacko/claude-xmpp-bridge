@@ -53,19 +53,12 @@ class Messages:
 
 def load_messages(path: Path | None = None) -> Messages:
     """Load messages, optionally overriding defaults from a TOML file."""
-    msgs = Messages()
-    if path is None:
-        return msgs
-
-    if not path.is_file():
-        return msgs
+    if path is None or not path.is_file():
+        return Messages()
 
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
     msg_fields = {f.name for f in fields(Messages)}
-    for key, value in data.items():
-        if key in msg_fields and isinstance(value, str):
-            object.__setattr__(msgs, key, value)
-
-    return msgs
+    overrides = {k: v for k, v in data.items() if k in msg_fields and isinstance(v, str)}
+    return Messages(**overrides)

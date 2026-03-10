@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import dataclasses
 import json
@@ -67,7 +68,7 @@ class XMPPBridge:
             config.socket_token,
             audit_logger=self.audit,
         )
-        self._ask_queue: list[_PendingAsk] = []
+        self._ask_queue: collections.deque[_PendingAsk] = collections.deque()
         self.mcp_server: BridgeMCPServer | None = BridgeMCPServer(config.mcp_port) if config.mcp_port else None
         # Per-STY lock to serialize screen -Q queries (concurrent queries on the
         # same session create colliding -queryA sockets and return exit 1).
@@ -135,6 +136,11 @@ class XMPPBridge:
         else:
             self._xmpp_send(self.messages.unknown_command.format(cmd=cmd))
 
+    @staticmethod
+    def _sorted_ids(sessions: dict[str, SessionInfo]) -> list[str]:
+        """Return session IDs sorted by registration time (oldest first)."""
+        return sorted(sessions, key=lambda s: sessions[s]["registered_at"])
+
     async def _cmd_list(self) -> None:
         await self._cleanup_stale_sessions()
         sessions = self.registry.list_sessions()
@@ -143,7 +149,7 @@ class XMPPBridge:
             return
 
         lines = [self.messages.session_list_header]
-        sorted_ids = sorted(sessions, key=lambda s: sessions[s]["registered_at"])
+        sorted_ids = self._sorted_ids(sessions)
         active_id = self.registry.last_active
         for i, sid in enumerate(sorted_ids, 1):
             info = sessions[sid]
@@ -671,7 +677,9 @@ class XMPPBridge:
             return {"ok": False, "error": "timeout"}
         finally:
             # Remove from queue and send next
-            if pending in self._ask_queue:
+            if self._ask_queue and self._ask_queue[0] is pending:
+                self._ask_queue.popleft()
+            elif pending in self._ask_queue:
                 self._ask_queue.remove(pending)
             self._send_next_ask()
 
@@ -924,7 +932,7 @@ class XMPPBridge:
         home = str(Path.home())
         needle = project.replace("~", home, 1) if project.startswith("~") else project
         sessions = self.registry.list_sessions()
-        sorted_ids = sorted(sessions, key=lambda s: sessions[s]["registered_at"])
+        sorted_ids = self._sorted_ids(sessions)
         for sid in sorted_ids:
             info = sessions[sid]
             if info["project"].startswith(needle):
@@ -1121,7 +1129,7 @@ class XMPPBridge:
                            sty, window, source, registered_at
         """
         sessions = self.registry.list_sessions()
-        sorted_ids = sorted(sessions, key=lambda s: sessions[s]["registered_at"])
+        sorted_ids = self._sorted_ids(sessions)
         result = []
         for i, sid in enumerate(sorted_ids, 1):
             info = sessions[sid]

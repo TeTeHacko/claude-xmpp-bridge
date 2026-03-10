@@ -361,6 +361,16 @@ def validate_config(cfg: Config) -> None:
 
 
 def _toml_str(toml: dict[str, object], key: str) -> str | None:
-    """Get a string value from TOML dict, or None."""
+    """Get a string value from TOML dict, or None.
+
+    Non-string values are coerced via ``str()`` for backwards compatibility
+    (e.g. ``port = 5222`` becomes ``"5222"``).  Returns ``None`` when the
+    key is absent.
+    """
     val = toml.get(key)
-    return str(val) if val is not None else None
+    if val is None:
+        return None
+    if isinstance(val, str):
+        return val
+    log.warning("Config key %r has non-string type %s, coercing to string", key, type(val).__name__)
+    return str(val)

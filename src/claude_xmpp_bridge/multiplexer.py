@@ -17,6 +17,13 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 # Colon is intentionally excluded to prevent tmux session:window injection.
 _TARGET_RE = re.compile(r"^[a-zA-Z0-9_.\-]{1,128}$")
 
+# Timeout (seconds) for each subprocess invocation.
+_CMD_TIMEOUT = 5
+
+# Delay (seconds) between text injection and CR/Enter to give readline time
+# to process the pasted text before the Enter arrives.
+_INTER_CMD_DELAY = 0.05
+
 
 def sanitize_text(text: str) -> str:
     """Remove control characters from text, preserving newlines and unicode."""
@@ -41,6 +48,25 @@ def _get_safe_env() -> dict[str, str]:
         if var in os.environ:
             env[var] = os.environ[var]
     return env
+
+
+async def _run_cmd(*args: str, label: str) -> bool:
+    """Run a subprocess with timeout and safe environment.
+
+    Returns True on success (exit code 0), False on failure or timeout.
+    *label* is used in log messages to identify the operation.
+    """
+    proc = await asyncio.create_subprocess_exec(*args, env=_get_safe_env())
+    try:
+        if await asyncio.wait_for(proc.wait(), timeout=_CMD_TIMEOUT) != 0:
+            log.error("%s failed (exit %d)", label, proc.returncode)
+            return False
+    except TimeoutError:
+        log.error("%s timed out", label)
+        proc.kill()
+        await proc.wait()
+        return False
+    return True
 
 
 class Multiplexer(Protocol):
@@ -76,14 +102,14 @@ class ScreenMultiplexer:
         screen's key-event pipeline (not the raw PTY write path), readline
         correctly recognises the \\r as an Enter keypress.
 
-        A 50 ms sleep between text and CR gives readline time to process the
+        A short sleep between text and CR gives readline time to process the
         pasted text before the Enter arrives.
         """
         if not _TARGET_RE.match(target):
             log.error("Rejected invalid screen target: %r", target)
             return False
         text = _screen_stuff_escape(sanitize_text(text))
-        proc1 = await asyncio.create_subprocess_exec(
+        if not await _run_cmd(
             "screen",
             "-S",
             target,
@@ -92,20 +118,12 @@ class ScreenMultiplexer:
             f"{window}#",
             "stuff",
             text,
-            env=_get_safe_env(),
-        )
-        try:
-            if await asyncio.wait_for(proc1.wait(), timeout=5) != 0:
-                log.error("Screen stuff failed (exit %d)", proc1.returncode)
-                return False
-        except TimeoutError:
-            log.error("Screen stuff timed out")
-            proc1.kill()
-            await proc1.wait()
+            label="Screen stuff",
+        ):
             return False
 
-        await asyncio.sleep(0.05)
-        proc2 = await asyncio.create_subprocess_exec(
+        await asyncio.sleep(_INTER_CMD_DELAY)
+        if not await _run_cmd(
             "screen",
             "-S",
             target,
@@ -114,16 +132,8 @@ class ScreenMultiplexer:
             f"{window}#",
             "stuff",
             "\r",
-            env=_get_safe_env(),
-        )
-        try:
-            if await asyncio.wait_for(proc2.wait(), timeout=5) != 0:
-                log.error("Screen CR failed (exit %d)", proc2.returncode)
-                return False
-        except TimeoutError:
-            log.error("Screen CR timed out")
-            proc2.kill()
-            await proc2.wait()
+            label="Screen CR",
+        ):
             return False
 
         log.info("Stuffed to screen %s window %s", target, window)
@@ -139,7 +149,7 @@ class ScreenMultiplexer:
         if not _TARGET_RE.match(target):
             log.error("Rejected invalid screen target: %r", target)
             return False
-        proc = await asyncio.create_subprocess_exec(
+        if not await _run_cmd(
             "screen",
             "-S",
             target,
@@ -148,16 +158,8 @@ class ScreenMultiplexer:
             f"{window}#",
             "stuff",
             "\r",
-            env=_get_safe_env(),
-        )
-        try:
-            if await asyncio.wait_for(proc.wait(), timeout=5) != 0:
-                log.error("Screen nudge CR failed (exit %d)", proc.returncode)
-                return False
-        except TimeoutError:
-            log.error("Screen nudge CR timed out")
-            proc.kill()
-            await proc.wait()
+            label="Screen nudge CR",
+        ):
             return False
 
         log.info("Nudged screen %s window %s", target, window)
@@ -173,7 +175,7 @@ class TmuxMultiplexer:
             log.error("Rejected invalid tmux target: %r", target)
             return False
         text = sanitize_text(text)
-        proc1 = await asyncio.create_subprocess_exec(
+        if not await _run_cmd(
             "tmux",
             "send-keys",
             "-t",
@@ -181,35 +183,19 @@ class TmuxMultiplexer:
             "-l",
             "--",
             text,
-            env=_get_safe_env(),
-        )
-        try:
-            if await asyncio.wait_for(proc1.wait(), timeout=5) != 0:
-                log.error("tmux send-keys failed (exit %d)", proc1.returncode)
-                return False
-        except TimeoutError:
-            log.error("tmux send-keys timed out")
-            proc1.kill()
-            await proc1.wait()
+            label="tmux send-keys",
+        ):
             return False
 
-        await asyncio.sleep(0.05)
-        proc2 = await asyncio.create_subprocess_exec(
+        await asyncio.sleep(_INTER_CMD_DELAY)
+        if not await _run_cmd(
             "tmux",
             "send-keys",
             "-t",
             target,
             "Enter",
-            env=_get_safe_env(),
-        )
-        try:
-            if await asyncio.wait_for(proc2.wait(), timeout=5) != 0:
-                log.error("tmux Enter failed (exit %d)", proc2.returncode)
-                return False
-        except TimeoutError:
-            log.error("tmux Enter timed out")
-            proc2.kill()
-            await proc2.wait()
+            label="tmux Enter",
+        ):
             return False
 
         log.info("Sent to tmux pane %s", target)
@@ -225,22 +211,14 @@ class TmuxMultiplexer:
         if not _TARGET_RE.match(target):
             log.error("Rejected invalid tmux target: %r", target)
             return False
-        proc = await asyncio.create_subprocess_exec(
+        if not await _run_cmd(
             "tmux",
             "send-keys",
             "-t",
             target,
             "Enter",
-            env=_get_safe_env(),
-        )
-        try:
-            if await asyncio.wait_for(proc.wait(), timeout=5) != 0:
-                log.error("tmux nudge Enter failed (exit %d)", proc.returncode)
-                return False
-        except TimeoutError:
-            log.error("tmux nudge Enter timed out")
-            proc.kill()
-            await proc.wait()
+            label="tmux nudge Enter",
+        ):
             return False
 
         log.info("Nudged tmux pane %s", target)

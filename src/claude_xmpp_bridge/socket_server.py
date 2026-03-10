@@ -78,10 +78,14 @@ class SocketServer:
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            data = await asyncio.wait_for(reader.read(MAX_REQUEST_SIZE), timeout=5)
-            if not data:
+            raw = await asyncio.wait_for(reader.readline(), timeout=5)
+            if not raw:
                 return
-            line = data.decode("utf-8").strip()
+            if len(raw) > MAX_REQUEST_SIZE:
+                writer.write(json.dumps({"error": "request too large"}).encode() + b"\n")
+                await writer.drain()
+                return
+            line = raw.decode("utf-8").strip()
             if not line:
                 return
 
