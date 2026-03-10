@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.26] - 2026-03-10
+
+### Fixed
+- **`_is_session_alive` (screen backend):** Replaced `screen -Q title` subprocess
+  with a direct socket-file existence check (`~/.screen/<sty>`).  The subprocess
+  approach silently failed from a TTY-less process (systemd user service): screen
+  reported attached sessions as dead, causing the bridge to delete live sessions
+  every 60 s and spam `Error: session not found` in Claude windows.  The socket
+  file is accessible without a controlling terminal from any process of the same
+  user.  New helper methods `_screen_socket_path(sty)` and `_screen_socket_alive(sty)`
+  implement the check; all affected tests were updated to mock `_screen_socket_alive`
+  instead of `asyncio.create_subprocess_exec`.
+
 ## [0.7.25] - 2026-03-10
 
 ### Fixed

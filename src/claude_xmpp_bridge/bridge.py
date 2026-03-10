@@ -365,13 +365,46 @@ class XMPPBridge:
 
     # --- Stale session cleanup ---
 
+    def _screen_socket_alive(self, sty: str) -> bool:
+        """Return True if the GNU Screen socket file for *sty* exists.
+
+        This is the primary liveness check for screen sessions.  The socket
+        file is owned by the user and accessible without a TTY, unlike
+        ``screen -Q title`` which fails when called from a process without a
+        controlling terminal (e.g. a systemd user service).
+        """
+        sock = self._screen_socket_path(sty)
+        if sock is None:
+            return True  # cannot determine path — assume alive
+        return sock.exists()
+
+    def _screen_socket_path(self, sty: str) -> Path | None:
+        """Return the path to the GNU Screen socket file for *sty*, or None if
+        the SCREENDIR cannot be determined."""
+        # Screen looks for sockets in $SCREENDIR, then $HOME/.screen, then
+        # /run/screen/S-$USER (distro default).  We check in the same order.
+        screendir = os.environ.get("SCREENDIR")
+        if screendir:
+            return Path(screendir) / sty
+        home = os.environ.get("HOME")
+        if home:
+            candidate = Path(home) / ".screen" / sty
+            if candidate.parent.exists():
+                return candidate
+        user = os.environ.get("USER")
+        if user:
+            return Path(f"/run/screen/S-{user}") / sty
+        return None
+
     async def _is_session_alive(self, info: SessionInfo) -> bool:
         """Check if the session's terminal multiplexer window is still running.
 
-        For screen: uses ``screen -S <sty> -p <window> -Q title`` which returns
-        exit 1 when the window no longer exists, even if the screen session itself
-        is still alive.  This catches stale sessions left behind when a window is
-        closed or repurposed without the plugin calling unregister.
+        For screen: checks existence of the GNU Screen socket file directly.
+        ``screen -Q title`` is unreliable when called from a process without a
+        TTY (e.g. a systemd user service) — screen reports attached sessions as
+        dead because it cannot connect to the controlling terminal.  The socket
+        file is owned by the user and readable without a TTY, so it is a
+        reliable proxy: present → session alive, absent → session dead.
 
         For tmux: ``tmux has-session -t <sty>`` (session-level, window check TBD).
         """
@@ -382,39 +415,40 @@ class XMPPBridge:
         if not sty:
             return True  # no sty — can't check
 
-        env = {}
-        for var in ("PATH", "USER", "HOME"):
-            if var in os.environ:
-                env[var] = os.environ[var]
-
         if backend == "screen":
-            # Window-level check: exit 0 ↔ window exists, exit 1 ↔ window gone.
-            window = info.get("window") or "0"
-            cmd = ["screen", "-S", sty, "-p", window, "-Q", "title"]
-            slot = f"{sty}:{window}"
+            slot = f"{sty}:{info.get('window') or '0'}"
+            alive = self._screen_socket_alive(sty)
+            if not alive:
+                log.debug("_is_session_alive: dead — socket missing (slot=%s)", slot)
+            return alive
+
         elif backend == "tmux":
-            cmd = ["tmux", "has-session", "-t", sty]
             slot = sty
+            env = {}
+            for var in ("PATH", "USER", "HOME"):
+                if var in os.environ:
+                    env[var] = os.environ[var]
+            cmd = ["tmux", "has-session", "-t", sty]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                env=env,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+                log.debug("_is_session_alive: timeout (slot=%s cmd=%s)", slot, cmd)
+                return False
+            alive = proc.returncode == 0
+            if not alive:
+                log.debug("_is_session_alive: dead (slot=%s cmd=%s rc=%s)", slot, cmd, proc.returncode)
+            return alive
+
         else:
             return True  # unknown backend — assume alive
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
-        )
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except TimeoutError:
-            proc.kill()
-            await proc.wait()
-            log.debug("_is_session_alive: timeout (slot=%s cmd=%s)", slot, cmd)
-            return False
-        alive = proc.returncode == 0
-        if not alive:
-            log.debug("_is_session_alive: dead (slot=%s cmd=%s rc=%s)", slot, cmd, proc.returncode)
-        return alive
 
     async def _cleanup_stale_sessions(self) -> int:
         """Remove dead sessions and deduplicate (keep newest per key)."""

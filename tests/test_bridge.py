@@ -208,7 +208,7 @@ class TestListCommand:
             backend="screen",
         )
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             fake_msg = _make_slixmpp_message("user@example.com", "/list")
             await captured["cb"](fake_msg)
 
@@ -244,7 +244,7 @@ class TestListCommand:
             backend="screen",
         )
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             fake_msg = _make_slixmpp_message("user@example.com", "/l")
             await captured["cb"](fake_msg)
 
@@ -584,8 +584,8 @@ class TestStaleSessionCleanup:
             backend="screen",
         )
 
-        # screen -ls returns exit 1 → session is dead
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(1)):
+        # socket missing → session is dead
+        with patch.object(bridge, "_screen_socket_alive", return_value=False):
             removed = await bridge._cleanup_stale_sessions()
 
         assert removed == 1
@@ -612,7 +612,7 @@ class TestStaleSessionCleanup:
         )
 
         # screen -ls returns exit 0 → session is alive
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             removed = await bridge._cleanup_stale_sessions()
 
         assert removed == 0
@@ -638,13 +638,13 @@ class TestStaleSessionCleanup:
             backend=None,
         )
 
-        # Should not call subprocess at all for None backend
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(1)) as mock_exec:
+        # Should not call _screen_socket_alive at all for None backend
+        with patch.object(bridge, "_screen_socket_alive", return_value=False) as mock_alive:
             removed = await bridge._cleanup_stale_sessions()
 
         assert removed == 0
         assert "ro-1" in bridge.registry.sessions
-        mock_exec.assert_not_called()
+        mock_alive.assert_not_called()
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -662,7 +662,7 @@ class TestStaleSessionCleanup:
         )
 
         # /list should clean up dead sessions before listing
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(1)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=False):
             fake_msg = _make_slixmpp_message("user@example.com", "/list")
             await captured["cb"](fake_msg)
 
@@ -706,7 +706,7 @@ class TestStaleSessionCleanup:
         )
 
         # Both alive — but same slot → keep only current
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             removed = await bridge._cleanup_stale_sessions()
 
         assert removed == 1
@@ -750,7 +750,7 @@ class TestStaleSessionCleanup:
         )
 
         # All screen sessions alive (exit 0) — all 3 must survive
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             removed = await bridge._cleanup_stale_sessions()
 
         assert removed == 0
@@ -789,7 +789,7 @@ class TestStaleSessionCleanup:
         )
 
         # Both screen sessions alive (exit 0) — cleanup must not remove either
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             removed = await bridge._cleanup_stale_sessions()
 
         assert removed == 0
@@ -825,7 +825,7 @@ class TestStaleSessionCleanup:
             backend="screen",
         )
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             removed = await bridge._cleanup_stale_sessions()
 
         assert removed == 1
@@ -835,11 +835,11 @@ class TestStaleSessionCleanup:
 
 
 class TestSubprocessTimeout:
-    """_is_session_alive must handle subprocess timeout."""
+    """_is_session_alive must handle subprocess timeout (tmux backend)."""
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_cleanup_handles_subprocess_timeout(self, MockXMPP, tmp_path):
-        """Subprocess that hangs should be killed and session treated as dead."""
+        """tmux subprocess that hangs should be killed and session treated as dead."""
         conn = MagicMock()
         conn.connected = asyncio.Event()
         conn.connected.set()
@@ -851,10 +851,10 @@ class TestSubprocessTimeout:
 
         bridge.registry.register(
             session_id="hanging-1",
-            sty="12345.pts-0",
+            sty="tmux-session",
             window="0",
             project="/home/user/project-a",
-            backend="screen",
+            backend="tmux",
         )
 
         # Mock subprocess that never finishes (wait() times out), then returns after kill()
@@ -891,7 +891,7 @@ class TestOpenCodeSourceTag:
             source="opencode",
         )
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             fake_msg = _make_slixmpp_message("user@example.com", "/list")
             await captured["cb"](fake_msg)
 
@@ -917,7 +917,7 @@ class TestOpenCodeSourceTag:
             # no source → Claude Code
         )
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             fake_msg = _make_slixmpp_message("user@example.com", "/list")
             await captured["cb"](fake_msg)
 
@@ -1379,7 +1379,7 @@ class TestSendToSessionEdgeCases:
             project="/home/user/project",
             backend="screen",
         )
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(1)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=False):
             fake_msg = _make_slixmpp_message("user@example.com", "/1 hello")
             await captured["cb"](fake_msg)
         conn.send.assert_called_once()
@@ -1401,7 +1401,7 @@ class TestSendToSessionEdgeCases:
             project="/home/user/project",
             backend="screen",
         )
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             fake_msg = _make_slixmpp_message("user@example.com", "/1 hello")
             await captured["cb"](fake_msg)
         # Should not raise even if XMPP send failed
@@ -1448,7 +1448,7 @@ class TestSendToSessionEdgeCases:
             project="/home/user/project",
             backend="screen",
         )
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(1)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=False):
             fake_msg = _make_slixmpp_message("user@example.com", "hello world")
             await captured["cb"](fake_msg)
         conn.send.assert_called_once()
@@ -1469,7 +1469,7 @@ class TestSendToSessionEdgeCases:
             project="/home/user/project",
             backend="screen",
         )
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             fake_msg = _make_slixmpp_message("user@example.com", "hello world")
             await captured["cb"](fake_msg)
         bridge.registry.close()
@@ -1773,7 +1773,7 @@ class TestListIcons:
             project="/home/u/proj",
             backend="screen",
         )
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
         assert "⚡" in text  # lightning icon present (before bracket)
@@ -1833,7 +1833,7 @@ class TestListIcons:
             backend="screen",
             source="opencode",
         )
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
         assert "🧠" in text  # brain icon present (before bracket)
@@ -1861,7 +1861,7 @@ class TestListIcons:
             backend="screen",
             source="opencode",
         )
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
         assert "⚡" in text  # lightning for Claude Code session
@@ -1884,7 +1884,7 @@ class TestListIcons:
         )
         # Plugin now sends emoji directly as agent_mode (e.g. 🟠 for coder agent)
         bridge.registry.update_state("oc-mode", "running", mode="🟠")
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
         assert "🧠" in text  # source icon
@@ -1905,7 +1905,7 @@ class TestListIcons:
             backend="screen",
             source="opencode",
         )
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True):
             await captured["cb"](_make_slixmpp_message("user@example.com", "/list"))
         text = conn.send.call_args[0][1]
         # No agent-specific circles should appear (only source 🧠 and state 🟢/🔵)
@@ -3379,7 +3379,10 @@ class TestRelay:
         """relay with 'to' session_id stuffs the message into the target terminal."""
         bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
             resp = await bridge._handle_relay(
                 {"session_id": "agent-a", "to": "agent-b", "message": "yo agent-b, done with module X"}
             )
@@ -3398,7 +3401,8 @@ class TestRelay:
         """relay with 'to_index' stuffs the message into the Nth session."""
         bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             resp = await bridge._handle_relay({"session_id": "agent-a", "to_index": 2, "message": "hello session 2"})
 
         assert resp == {"ok": True}
@@ -3481,7 +3485,7 @@ class TestRelay:
         """When the multiplexer fails, relay returns ok=False with error."""
         bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(1)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=False):
             resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": "hello"})
 
         assert resp.get("ok") is False
@@ -3504,7 +3508,8 @@ class TestRelay:
 
         await bridge.socket_server.start()
         try:
-            with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+                 patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
                 resp = await _socket_request(
                     bridge.config.socket_path,
                     {"cmd": "relay", "session_id": "ag-1", "to": "ag-2", "message": "coordinate!"},
@@ -3520,7 +3525,8 @@ class TestRelay:
         bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
         long_msg = "X" * 300
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": long_msg})
 
         assert resp == {"ok": True}
@@ -3533,7 +3539,8 @@ class TestRelay:
         """relay without session_id still works and uses '?' as sender label."""
         bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             resp = await bridge._handle_relay({"to": "agent-b", "message": "anonymous relay"})
 
         assert resp == {"ok": True}
@@ -3554,7 +3561,8 @@ class TestRelay:
         assert bridge.mcp_server is not None
         bridge.mcp_server.enqueue = MagicMock()
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": "hi"})
 
         assert resp == {"ok": True}
@@ -3618,7 +3626,8 @@ class TestBroadcast:
         bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
         bridge.registry.register("agent-c", sty="sty1", window="3", project="/proj-c", backend="screen")
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             await bridge._handle_broadcast({"session_id": "agent-a", "message": "broadcast!"})
 
         assert conn.send.call_count == 1
@@ -3734,7 +3743,8 @@ class TestBroadcast:
 
         await bridge.socket_server.start()
         try:
-            with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+                 patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
                 resp = await _socket_request(
                     bridge.config.socket_path,
                     {"cmd": "broadcast", "session_id": "ag-1", "message": "all agents stand by"},
@@ -3759,7 +3769,8 @@ class TestBroadcast:
         bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
         bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             await bridge._handle_broadcast({"session_id": "agent-a", "message": "Y" * 300})
 
         sent = conn.send.call_args[0][1]
@@ -3910,7 +3921,8 @@ class TestRelayByProject:
         bridge.registry.register("sender", sty="sty1", window="1", project="/home/user/proj-a", backend="screen")
         bridge.registry.register("target", sty="sty1", window="2", project="/home/user/proj-b", backend="screen")
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             resp = await bridge._handle_relay(
                 {
                     "session_id": "sender",
@@ -3940,7 +3952,8 @@ class TestRelayByProject:
             "target", sty="sty1", window="2", project="/home/user/projects/mp3tagger", backend="screen"
         )
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             resp = await bridge._handle_relay(
                 {
                     "session_id": "sender",
@@ -3969,7 +3982,8 @@ class TestRelayByProject:
         bridge.registry.register("sender", sty="sty1", window="1", project=f"{home}/proj-a", backend="screen")
         bridge.registry.register("target", sty="sty1", window="2", project=f"{home}/proj-b", backend="screen")
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             resp = await bridge._handle_relay(
                 {
                     "session_id": "sender",
@@ -4319,7 +4333,8 @@ class TestNudgePattern:
         assert bridge.mcp_server is not None
         bridge.mcp_server.enqueue = MagicMock()
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             info = bridge.registry.get("agent-b")
             assert info is not None
             ok = await bridge._nudge_session("agent-b", info, "nudge me!")
@@ -4334,7 +4349,8 @@ class TestNudgePattern:
         bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
         bridge.audit.log = MagicMock()
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
             info = bridge.registry.get("agent-b")
             assert info is not None
             await bridge._nudge_session("agent-b", info, "hello")
@@ -4349,7 +4365,7 @@ class TestNudgePattern:
         bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
         bridge.audit.log = MagicMock()
 
-        with patch("asyncio.create_subprocess_exec", _mock_subprocess(1)):
+        with patch.object(bridge, "_screen_socket_alive", return_value=False):
             info = bridge.registry.get("agent-b")
             assert info is not None
             ok = await bridge._nudge_session("agent-b", info, "ping")
@@ -4510,7 +4526,8 @@ class TestNudgePattern:
 
         await bridge.socket_server.start()
         try:
-            with patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
+            with patch.object(bridge, "_screen_socket_alive", return_value=True), \
+                 patch("asyncio.create_subprocess_exec", _mock_subprocess(0)):
                 resp = await _socket_request(
                     bridge.config.socket_path,
                     {"cmd": "relay", "session_id": "ag-1", "to": "ag-2", "message": "nudge!", "nudge": True},
