@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.40] - 2026-03-10
+
+### Fixed
+- **Root cause of Screen TUI artefacts identified and fixed** — OpenCode TUI
+  sends `\033]0;OpenCode\007` (OSC 0 window title escape) on every redraw.
+  Screen intercepts this from the pty and updates the window title, which
+  triggers a caption/hardstatus redraw.  Combined with `backtick` intervals
+  in `.screenrc` this caused constant caption redraws colliding with OpenCode's
+  own rendering → doubled window lists, flickering, garbage characters.
+
+  **Fix:** plugin now runs `screen -X dynamictitle off` at startup (outside
+  sandbox).  This tells Screen to ignore title escape sequences from the pty
+  of that window — OpenCode's OSC 0 writes are silently discarded.  The plugin
+  retains full control of the window title via `screen -X title` (socket IPC,
+  no pty involvement).  `dynamictitle on` is restored on `server.instance.disposed`.
+
 ## [0.7.39] - 2026-03-10
 
 ### Fixed

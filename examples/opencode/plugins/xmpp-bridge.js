@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.39"
+  const PLUGIN_VERSION = "0.7.40"
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
@@ -431,7 +431,20 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   // ---------------------------------------------------------------------------
-  // 1. Přejmenovat okno při startu.
+  // 1. Zakázat dynamické přepisování titulku okna aplikacemi (dynamictitle off).
+  //    OpenCode TUI posílá \033]0;OpenCode\007 (OSC 0) při každém překreslení,
+  //    což způsobuje překreslení Screen caption/hardstatus a vizuální artefakty
+  //    (zdvojené okno listy, blikání) — zejména s backtick intervalem v .screenrc.
+  //    dynamictitle off říká Screenu: ignoruj title escape sekvence z pty tohoto
+  //    okna. Titulek pak řídí výhradně plugin přes screen -X title (socket).
+  //    Obnoví se na dynamictitle on při server.instance.disposed.
+  // ---------------------------------------------------------------------------
+  if (STY && !inSandbox) {
+    await $`screen -S ${STY} -p ${WINDOW} -X dynamictitle off`.nothrow()
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2. Přejmenovat okno při startu.
   //    Agent = null (neznámý, zobrazí se ⚪ dokud model poprvé neodpoví).
   //    Stavový kruh = 🟢 (idle).
   // ---------------------------------------------------------------------------
@@ -550,8 +563,11 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           await $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow()
           await runClient("unregister", registeredSessionID)
         }
-        // Resetovat titul okna
+        // Resetovat titul okna a obnovit dynamické přepisování titulku
         await setTitle("", projectName)
+        if (STY && !inSandbox) {
+          await $`screen -S ${STY} -p ${WINDOW} -X dynamictitle on`.nothrow()
+        }
         return
       }
 
