@@ -227,6 +227,26 @@ class TestPluginTitleFallback:
         # screen -X title must be called when !inSandbox
         assert "!inSandbox" in body, "setTitle must call screen -X title when !inSandbox"
 
+    def test_setTitle_skips_when_title_unchanged(self):
+        """setTitle must cache the last title and skip screen -X title when
+        the title has not changed — prevents race conditions with backtick
+        hardstatus redraws (1s interval in .screenrc).
+        """
+        text = _plugin_text()
+
+        # lastTitle cache variable must exist
+        assert "lastTitle" in text, "lastTitle cache variable must exist in plugin"
+
+        body = _function_body(text, "const setTitle = async")
+        assert body, "setTitle function not found in plugin"
+
+        # Must compare current title to lastTitle before calling screen -X
+        assert "lastTitle" in body, "setTitle must check lastTitle cache before updating"
+        # Must return early if title unchanged
+        assert "=== lastTitle" in body or "lastTitle ===" in body, (
+            "setTitle must return early when title equals lastTitle"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestPluginNothrowOnExternalCalls

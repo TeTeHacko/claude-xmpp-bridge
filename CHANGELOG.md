@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.39] - 2026-03-10
+
+### Fixed
+- **Screen hardstatus artefacts (race condition with backtick redraws)** —
+  `setTitle()` was calling `screen -X title` on every state change event
+  (`tool.execute.before`, `session.status`, `session.idle`, `message.updated`).
+  With `backtick 2 1 1 uptime` in `.screenrc` (1-second hardstatus redraw),
+  concurrent `screen -X title` calls collided with Screen's internal redraw,
+  producing doubled window lists, flickering, and garbage in the statusbar.
+
+  **Fix:** added a `lastTitle` cache — `setTitle()` now skips `screen -X title`
+  (and stdout/OSC writes) when the title string has not changed since the last
+  call.  The title only changes on actual state transitions (idle→running,
+  running→idle, agent switch, permission dialog), so the number of `screen -X`
+  calls drops from O(tool calls) to O(state changes).
+
 ## [0.7.38] - 2026-03-10
 
 ### Fixed

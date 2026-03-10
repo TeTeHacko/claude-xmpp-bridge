@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.38"
+  const PLUGIN_VERSION = "0.7.39"
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
@@ -346,6 +346,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // asciiTitle  — fallback: zapsán přímo na stdout (fd 1, zděděný Screen pty fd).
   //               Použit POUZE v bwrap sandboxu (viz detectSandbox výše).
   //
+  // Cache: pokud se titulek nezměnil, screen -X title se nevolá. Důvod:
+  //   backtick s intervalem 1s v .screenrc způsobuje překreslování hardstatus
+  //   každou sekundu. Souběžné volání screen -X title (při každém tool callu)
+  //   způsobuje race condition → artefakty (zdvojené okno listy, blikání).
+  //   Cache eliminuje zbytečná volání — titulek se mění jen při změně stavu.
+  //
   // Proč stdout místo /dev/tty v sandboxu:
   //   bwrap --new-session volá setsid() → proces nemá kontrolující terminál →
   //   open("/dev/tty") vrátí ENXIO i přes bind-mount. Stdout (fd 1) je však
@@ -356,22 +362,29 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   //   Bun's $ template zachycuje stdout subprocesu do bufferu (jako shell $(...)).
   //   printf zapíše escape sekvenci do pipe, ne do terminálu — Screen ji nikdy nevidí.
   // ---------------------------------------------------------------------------
+  let lastTitle = ""
+
   const setTitle = async (emojiTitle, asciiTitle) => {
     if (STY && !inSandbox) {
-      // Mimo sandbox: vždy použít screen -X title (přes socket).
-      // Přechodné selhání (race condition při startu) se tiše ignoruje —
-      // příští volání setTitle uspěje. NIKDY nepadáme na stdout fallback,
-      // protože ten způsobuje artefakty v TUI (altscreen + caption kolize).
+      // Mimo sandbox: použít screen -X title (přes socket).
+      // Cache: přeskočit pokud se titulek nezměnil — zabrání race condition
+      // s backtick překreslováním hardstatus (interval 1s v .screenrc).
+      if (emojiTitle === lastTitle) return
+      lastTitle = emojiTitle
       await $`screen -S ${STY} -p ${WINDOW} -X title ${emojiTitle}`.nothrow()
       return
     }
     if (STY && inSandbox) {
       // Sandbox fallback: zápis přímo na stdout → Screen pty → Screen nastaví window title.
       // Funguje i uvnitř bwrap --new-session (zděděný fd, ne /dev/tty).
+      if (asciiTitle === lastTitle) return
+      lastTitle = asciiTitle
       process.stdout.write('\x1bk' + asciiTitle + '\x1b\\')
       return
     }
     // tmux nebo bez multiplexeru: OSC 0 (xterm title)
+    if (emojiTitle === lastTitle) return
+    lastTitle = emojiTitle
     process.stdout.write('\x1b]0;' + emojiTitle + '\x07')
   }
 
