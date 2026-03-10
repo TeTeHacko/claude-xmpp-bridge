@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.27] - 2026-03-10
+
+### Added
+- **`registry.py`:** `SessionInfo` now includes a `last_seen` field (Unix timestamp).
+  The field is persisted in a new `last_seen REAL` column (auto-migrated on startup)
+  and updated on every `state` command from the plugin (heartbeat).
+- **`bridge.py` `_screen_window_alive(sty, window)`:** New async helper that runs
+  `screen -S <sty> -p <window> -Q title` to check whether a specific screen window
+  still exists.  Returns `True` on timeout/OSError to avoid false-positive dead
+  detection.
+- **`bridge.py` `_is_session_alive` (screen backend):** Now performs a three-stage
+  liveness check: (1) socket-file existence (fast, no subprocess), (2) window-level
+  subprocess check via `_screen_window_alive`, (3) heartbeat TTL check — if
+  `last_seen` is set and older than `HEARTBEAT_TTL` (300 s ≈ 5 min, ~3 missed
+  heartbeats), the session is considered dead.  This eliminates stale DB sessions
+  that survive bridge restarts when opencode has already exited but the screen
+  window/socket remain.
+
+### Fixed
+- Stale sessions (opencode exited, bash still running in screen window) no longer
+  appear in `/list` after a bridge restart.  Previously they would persist
+  indefinitely because the socket and window checks both returned alive.
+
 ## [0.7.26] - 2026-03-10
 
 ### Fixed

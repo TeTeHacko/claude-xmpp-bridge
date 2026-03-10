@@ -32,6 +32,7 @@ class SessionInfo(TypedDict):
     plugin_version: str | None  # version string sent by plugin on register
     agent_state: str | None  # last known state: "idle", "running", etc.
     agent_mode: str | None  # last known mode: "planning", "code", "build"
+    last_seen: float | None  # timestamp of last successful "state" heartbeat
 
 
 def _validate_session_id(session_id: str) -> None:
@@ -93,6 +94,8 @@ class SessionRegistry:
             self._db.execute("ALTER TABLE sessions ADD COLUMN agent_state TEXT")
         if "agent_mode" not in cols:
             self._db.execute("ALTER TABLE sessions ADD COLUMN agent_mode TEXT")
+        if "last_seen" not in cols:
+            self._db.execute("ALTER TABLE sessions ADD COLUMN last_seen REAL")
         self._db.commit()
         self._load_from_db()
 
@@ -100,7 +103,7 @@ class SessionRegistry:
         """Load sessions and state from SQLite on startup."""
         for row in self._db.execute(
             "SELECT session_id, sty, window, project, backend, source, registered_at,"
-            "       plugin_version, agent_state, agent_mode FROM sessions"
+            "       plugin_version, agent_state, agent_mode, last_seen FROM sessions"
         ):
             self.sessions[row[0]] = SessionInfo(
                 sty=row[1] or "",
@@ -112,6 +115,7 @@ class SessionRegistry:
                 plugin_version=row[7],
                 agent_state=row[8],
                 agent_mode=row[9],
+                last_seen=float(row[10]) if row[10] is not None else None,
             )
         row = self._db.execute("SELECT value FROM state WHERE key = 'last_active'").fetchone()
         if row and row[0] in self.sessions:
@@ -123,8 +127,8 @@ class SessionRegistry:
         self._db.execute(
             "INSERT OR REPLACE INTO sessions"
             " (session_id, sty, window, project, backend, source,"
-            "  registered_at, plugin_version, agent_state, agent_mode)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  registered_at, plugin_version, agent_state, agent_mode, last_seen)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 info["sty"],
@@ -136,6 +140,7 @@ class SessionRegistry:
                 info.get("plugin_version"),
                 info.get("agent_state"),
                 info.get("agent_mode"),
+                info.get("last_seen"),
             ),
         )
         self._save_last_active()
@@ -173,9 +178,10 @@ class SessionRegistry:
         _validate_window(window)
 
         is_reregister = session_id in self.sessions
-        # Preserve agent_state and agent_mode on re-register so a running agent doesn't lose its state.
+        # Preserve agent_state, agent_mode and last_seen on re-register so a running agent doesn't lose its state.
         prev_state = self.sessions[session_id].get("agent_state") if is_reregister else None
         prev_mode = self.sessions[session_id].get("agent_mode") if is_reregister else None
+        prev_last_seen = self.sessions[session_id].get("last_seen") if is_reregister else None
         self.sessions[session_id] = SessionInfo(
             sty=sty,
             window=window,
@@ -186,6 +192,7 @@ class SessionRegistry:
             plugin_version=plugin_version,
             agent_state=prev_state,
             agent_mode=prev_mode,
+            last_seen=prev_last_seen,
         )
         # Don't flip last_active when the same session re-registers — it would
         # hijack plain-text routing away from whatever the user targeted last.
@@ -238,17 +245,22 @@ class SessionRegistry:
     def update_state(self, session_id: str, state: str, mode: str | None = None) -> bool:
         """Update the agent_state (and optionally agent_mode) for a registered session.
 
+        Also updates *last_seen* to the current time — the periodic ``state``
+        call from the plugin serves as a liveness heartbeat.
+
         Returns True if the session exists and was updated, False otherwise.
         """
         info = self.sessions.get(session_id)
         if info is None:
             return False
+        now = time.time()
         info["agent_state"] = state
+        info["last_seen"] = now
         if mode is not None:
             info["agent_mode"] = mode
         self._db.execute(
-            "UPDATE sessions SET agent_state = ?, agent_mode = ? WHERE session_id = ?",
-            (state, info.get("agent_mode"), session_id),
+            "UPDATE sessions SET agent_state = ?, agent_mode = ?, last_seen = ? WHERE session_id = ?",
+            (state, info.get("agent_mode"), now, session_id),
         )
         self._db.commit()
         log.debug("State update: %s → %s (mode=%s)", session_id, state, mode)

@@ -36,6 +36,11 @@ MAX_XMPP_BODY = 10_000  # max length of incoming XMPP message body (chars)
 # expired after this many seconds so stale entries don't accumulate.
 NO_BACKEND_SESSION_TTL = 24 * 3600  # 24 hours
 
+# Maximum age of the last "state" heartbeat before a session is considered dead.
+# The plugin sends a heartbeat every ~90 s (REREG_INTERVAL_MS).  Three missed
+# heartbeats = 270 s, so 300 s (5 min) gives a comfortable margin.
+HEARTBEAT_TTL = 300.0  # seconds
+
 _ALIVE_CHECK_CMDS: dict[str, list[str]] = {
     # screen: window-level check done in _is_session_alive via -p <window> -Q title
     "screen": ["screen", "-ls"],
@@ -368,8 +373,8 @@ class XMPPBridge:
     def _screen_socket_alive(self, sty: str) -> bool:
         """Return True if the GNU Screen socket file for *sty* exists.
 
-        This is the primary liveness check for screen sessions.  The socket
-        file is owned by the user and accessible without a TTY, unlike
+        This is the fast (no subprocess) session-level liveness check.  The
+        socket file is owned by the user and accessible without a TTY, unlike
         ``screen -Q title`` which fails when called from a process without a
         controlling terminal (e.g. a systemd user service).
         """
@@ -377,6 +382,37 @@ class XMPPBridge:
         if sock is None:
             return True  # cannot determine path — assume alive
         return sock.exists()
+
+    async def _screen_window_alive(self, sty: str, window: str) -> bool:
+        """Return True if screen window *window* exists within session *sty*.
+
+        Uses ``screen -S <sty> -p <window> -Q title`` which works reliably from
+        a TTY-less process (verified: exit 0 if window exists, exit 1 with
+        "Could not find pre-select window" if not).  Returns True on timeout or
+        subprocess error to avoid false positives.
+        """
+        env: dict[str, str] = {}
+        for var in ("PATH", "USER", "HOME", "SCREENDIR"):
+            if var in os.environ:
+                env[var] = os.environ[var]
+        win = window or "0"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "screen",
+                "-S",
+                sty,
+                "-p",
+                win,
+                "-Q",
+                "title",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                env=env,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+            return proc.returncode == 0
+        except (TimeoutError, OSError):
+            return True  # assume alive on error
 
     def _screen_socket_path(self, sty: str) -> Path | None:
         """Return the path to the GNU Screen socket file for *sty*, or None if
@@ -399,14 +435,16 @@ class XMPPBridge:
     async def _is_session_alive(self, info: SessionInfo) -> bool:
         """Check if the session's terminal multiplexer window is still running.
 
-        For screen: checks existence of the GNU Screen socket file directly.
-        ``screen -Q title`` is unreliable when called from a process without a
-        TTY (e.g. a systemd user service) — screen reports attached sessions as
-        dead because it cannot connect to the controlling terminal.  The socket
-        file is owned by the user and readable without a TTY, so it is a
-        reliable proxy: present → session alive, absent → session dead.
+        For screen (three-stage check):
+          1. Socket file existence (fast, no subprocess) — if missing, session dead.
+          2. Window-level subprocess check (``screen -S <sty> -p <win> -Q title``) —
+             if the specific window no longer exists, session dead.
+          3. Heartbeat TTL — if the plugin's last ``state`` call is older than
+             HEARTBEAT_TTL seconds, session is considered dead.  The plugin sends
+             a heartbeat every ~90 s via its re-register timer; three missed
+             heartbeats (270 s) is well within the 300 s TTL.
 
-        For tmux: ``tmux has-session -t <sty>`` (session-level, window check TBD).
+        For tmux: ``tmux has-session -t <sty>`` (session-level).
         """
         backend = info["backend"]
         if backend is None:
@@ -417,10 +455,31 @@ class XMPPBridge:
 
         if backend == "screen":
             slot = f"{sty}:{info.get('window') or '0'}"
-            alive = self._screen_socket_alive(sty)
-            if not alive:
+
+            # Stage 1: socket file (fast path, no subprocess)
+            if not self._screen_socket_alive(sty):
                 log.debug("_is_session_alive: dead — socket missing (slot=%s)", slot)
-            return alive
+                return False
+
+            # Stage 2: window-level check
+            window = info.get("window") or "0"
+            if not await self._screen_window_alive(sty, window):
+                log.debug("_is_session_alive: dead — window missing (slot=%s)", slot)
+                return False
+
+            # Stage 3: heartbeat TTL
+            last_seen = info.get("last_seen")
+            if last_seen is not None:
+                age = time.time() - last_seen
+                if age > HEARTBEAT_TTL:
+                    log.debug(
+                        "_is_session_alive: dead — heartbeat stale (slot=%s, age=%.0fs)",
+                        slot,
+                        age,
+                    )
+                    return False
+
+            return True
 
         elif backend == "tmux":
             slot = sty
