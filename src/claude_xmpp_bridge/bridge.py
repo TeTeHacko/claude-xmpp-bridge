@@ -74,6 +74,9 @@ class XMPPBridge:
         )
         self._ask_queue: list[_PendingAsk] = []
         self.mcp_server: BridgeMCPServer | None = BridgeMCPServer(config.mcp_port) if config.mcp_port else None
+        # Per-STY lock to serialize screen -Q queries (concurrent queries on the
+        # same session create colliding -queryA sockets and return exit 1).
+        self._screen_query_locks: dict[str, asyncio.Lock] = {}
 
     # --- XMPP message handling ---
 
@@ -390,29 +393,40 @@ class XMPPBridge:
         a TTY-less process (verified: exit 0 if window exists, exit 1 with
         "Could not find pre-select window" if not).  Returns True on timeout or
         subprocess error to avoid false positives.
+
+        Calls are serialized per *sty* because concurrent ``-Q`` queries on the
+        same screen session create colliding ``-queryA`` sockets and the later
+        ones return exit 1 with "There is already a screen running".
         """
-        env: dict[str, str] = {}
-        for var in ("PATH", "USER", "HOME", "SCREENDIR"):
-            if var in os.environ:
-                env[var] = os.environ[var]
-        win = window or "0"
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "screen",
-                "-S",
-                sty,
-                "-p",
-                win,
-                "-Q",
-                "title",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                env=env,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
-            return proc.returncode == 0
-        except (TimeoutError, OSError):
-            return True  # assume alive on error
+        lock = self._screen_query_locks.get(sty)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._screen_query_locks[sty] = lock
+
+        async with lock:
+            env: dict[str, str] = {}
+            for var in ("PATH", "USER", "HOME", "SCREENDIR"):
+                if var in os.environ:
+                    env[var] = os.environ[var]
+            win = window or "0"
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "screen",
+                    "-S",
+                    sty,
+                    "-p",
+                    win,
+                    "-Q",
+                    "title",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=env,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+                return proc.returncode == 0
+            except (TimeoutError, OSError) as exc:
+                log.debug("_screen_window_alive: assume alive on error (sty=%s, win=%s, exc=%s)", sty, win, exc)
+                return True  # assume alive on error
 
     def _screen_socket_path(self, sty: str) -> Path | None:
         """Return the path to the GNU Screen socket file for *sty*, or None if

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.28] - 2026-03-10
+
+### Fixed
+- **`bridge.py` `_screen_window_alive`:** Serialize `screen -S <sty> -Q title`
+  calls per STY using `asyncio.Lock`.  GNU Screen's `-Q` flag creates a
+  temporary `-queryA` socket; concurrent `-Q` calls on the same session collide
+  and return exit 1 with "There is already a screen running", causing the bridge
+  to incorrectly mark live sessions as dead.  This was the root cause of alloy
+  (and other) sessions being repeatedly cleaned up and re-registered every
+  cleanup cycle.
+
 ## [0.7.27] - 2026-03-10
 
 ### Added
