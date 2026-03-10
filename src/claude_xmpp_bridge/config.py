@@ -19,7 +19,7 @@ DEFAULT_SOCKET_PATH = Path.home() / ".claude" / "bridge.sock"
 DEFAULT_DB_PATH = Path.home() / ".claude" / "bridge.db"
 DEFAULT_MCP_PORT = 7878
 DEFAULT_SMTP_PORT = 25
-EMAIL_THRESHOLD_DEFAULT = 500
+EMAIL_THRESHOLD_DEFAULT = 4000
 
 
 # Default icons per source value. None key = fallback for unknown/unset source.

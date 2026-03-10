@@ -50,7 +50,7 @@ async def send_email(
             subject,
             body,
         )
-        log.debug("Email sent to %s via %s:%d", recipient, smtp_host, smtp_port)
+        log.info("Email sent to %s via %s:%d", recipient, smtp_host, smtp_port)
         return True
     except (smtplib.SMTPException, OSError, TimeoutError) as exc:
         log.warning("Email delivery failed: %s", exc)

@@ -884,7 +884,7 @@ class TestSMTPConfig:
 
         assert cfg.smtp_host == ""  # disabled by default
         assert cfg.smtp_port == 25
-        assert cfg.email_threshold == 500
+        assert cfg.email_threshold == 4000
 
     def test_smtp_host_from_toml(self, monkeypatch, credentials_file, tmp_path):
         toml_file = _write_toml(

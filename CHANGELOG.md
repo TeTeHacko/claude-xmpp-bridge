@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.34] - 2026-03-10
+
+### Changed
+- **`email_threshold` default raised from 500 to 4000** — the previous 500-char
+  threshold was too aggressive, causing routine messages (e.g. 532 chars) to be
+  truncated on XMPP with "full message sent by email" even though XMPP handles
+  multi-KB messages fine.  The new 4000-char default keeps XMPP messages intact
+  for typical usage and only triggers email relay for genuinely large payloads
+  (full file contents, long diffs, etc.).  Configurable via `email_threshold`
+  in config.toml or `CLAUDE_XMPP_EMAIL_THRESHOLD` env var.
+
+## [0.7.33] - 2026-03-10
+
+### Added
+- **`XMPP_OUT` audit event** — every outgoing XMPP message is now recorded
+  in the structured audit log with `recipient`, `body_len`, `original_len`,
+  `email_relay` (bool), and `ok` fields.  Previously there was no visibility
+  into what the bridge actually sent.
+- **INFO-level log when email relay triggers** — `_xmpp_send` now logs the
+  message length, threshold, and SMTP target so email relay activation is
+  visible in production logs (`journalctl`).
+
+### Changed
+- **`email_notify.py` success log promoted from DEBUG to INFO** — previously
+  `"Email sent to …"` was only visible at DEBUG level, making it impossible
+  to confirm delivery in production.
+
+### Fixed
+- **Stale test mocks** — three email-relay tests (`test_short_message_no_email`,
+  `test_no_email_when_smtp_host_empty`, `test_exactly_threshold_length_no_email`)
+  were mocking `asyncio.ensure_future` but the code has used `asyncio.create_task`
+  since v0.7.31.  The assertions were silently passing without testing anything.
+  Now correctly mock `asyncio.create_task`.
+
 ## [0.7.32] - 2026-03-10
 
 ### Changed

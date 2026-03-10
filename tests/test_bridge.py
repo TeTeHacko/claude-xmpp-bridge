@@ -4663,10 +4663,10 @@ class TestXmppSendEmailRelay:
 
         bridge = XMPPBridge(_make_config_smtp(tmp_path, threshold=500))
 
-        with patch("asyncio.ensure_future") as mock_future:
+        with patch("asyncio.create_task") as mock_ct:
             bridge._xmpp_send("short message")
 
-        mock_future.assert_not_called()
+        mock_ct.assert_not_called()
         conn.send.assert_called_once_with("user@example.com", "short message")
         bridge.registry.close()
 
@@ -4731,10 +4731,10 @@ class TestXmppSendEmailRelay:
         bridge = XMPPBridge(_make_config_smtp(tmp_path, smtp_host="", threshold=10))
         long_msg = "A" * 600
 
-        with patch("asyncio.ensure_future") as mock_future:
+        with patch("asyncio.create_task") as mock_ct:
             bridge._xmpp_send(long_msg)
 
-        mock_future.assert_not_called()
+        mock_ct.assert_not_called()
         # Full message sent via XMPP unchanged
         conn.send.assert_called_once_with("user@example.com", long_msg)
         bridge.registry.close()
@@ -4751,9 +4751,9 @@ class TestXmppSendEmailRelay:
         bridge = XMPPBridge(_make_config_smtp(tmp_path, threshold=10))
         exact_msg = "A" * 10  # len == threshold, not > threshold
 
-        with patch("asyncio.ensure_future") as mock_future:
+        with patch("asyncio.create_task") as mock_ct:
             bridge._xmpp_send(exact_msg)
 
-        mock_future.assert_not_called()
+        mock_ct.assert_not_called()
         conn.send.assert_called_once_with("user@example.com", exact_msg)
         bridge.registry.close()

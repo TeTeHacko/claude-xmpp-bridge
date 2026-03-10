@@ -309,10 +309,19 @@ class XMPPBridge:
         full content was sent by email.
         """
         cfg = self.config
+        email_triggered = False
         if cfg.smtp_host and len(text) > cfg.email_threshold:
+            email_triggered = True
             snippet = text[: cfg.email_threshold]
             # Ensure we don't cut in the middle of a multi-byte sequence
             xmpp_body = f"{snippet}\n\n[… {len(text)} chars total — full message sent by email]"
+            log.info(
+                "Email relay triggered: %d chars (threshold %d), sending via %s:%d",
+                len(text),
+                cfg.email_threshold,
+                cfg.smtp_host,
+                cfg.smtp_port,
+            )
             # Fire-and-forget email delivery (non-blocking)
             task = asyncio.create_task(
                 send_email(
@@ -327,7 +336,16 @@ class XMPPBridge:
             task.add_done_callback(self._email_task_done)
         else:
             xmpp_body = text
-        return self.xmpp.send(cfg.recipient, xmpp_body)
+        ok = self.xmpp.send(cfg.recipient, xmpp_body)
+        self.audit.log(
+            "XMPP_OUT",
+            recipient=cfg.recipient,
+            body_len=len(xmpp_body),
+            original_len=len(text),
+            email_relay=email_triggered,
+            ok=ok,
+        )
+        return ok
 
     @staticmethod
     def _email_task_done(task: asyncio.Task[bool]) -> None:
