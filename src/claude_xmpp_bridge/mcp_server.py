@@ -36,7 +36,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
+import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -226,8 +229,6 @@ class BridgeMCPServer:
 
     def _short_path(self, path: str) -> str:
         """Replace $HOME with ~ for display."""
-        import os
-
         home = os.path.expanduser("~")
         return path.replace(home, "~") if path.startswith(home) else path
 
@@ -264,8 +265,18 @@ class BridgeMCPServer:
 
             ok = await bridge._nudge_session(to, target_info, message)
             bridge._xmpp_send(
-                f"🤖 MCP:{message_id} ──nudge──▶ {target_prefix}\n  {message[:200]}"
-                + ("…" if len(message) > 200 else "")
+                json.dumps(
+                    {
+                        "type": "relay",
+                        "mode": "nudge",
+                        "from": None,
+                        "to": to,
+                        "message_id": message_id,
+                        "message": message,
+                        "ts": time.time(),
+                    },
+                    ensure_ascii=False,
+                )
             )
             bridge.audit.log(
                 "MCP_SEND",
@@ -300,8 +311,18 @@ class BridgeMCPServer:
                 # screen=True delivers immediately to terminal — no inbox queuing needed.
                 # Inbox is reserved for nudge/screen=False (async, idle-handler pickup).
                 bridge._xmpp_send(
-                    f"🤖 MCP:{message_id} ──screen──▶ {target_prefix}\n  {message[:200]}"
-                    + ("…" if len(message) > 200 else "")
+                    json.dumps(
+                        {
+                            "type": "relay",
+                            "mode": "screen",
+                            "from": None,
+                            "to": to,
+                            "message_id": message_id,
+                            "message": message,
+                            "ts": time.time(),
+                        },
+                        ensure_ascii=False,
+                    )
                 )
                 bridge.audit.log(
                     "MCP_SEND",
@@ -327,8 +348,18 @@ class BridgeMCPServer:
             # screen=False: only enqueue in MCP inbox, no terminal relay
             self.enqueue(to, message)
             bridge._xmpp_send(
-                f"🤖 MCP:{message_id} ──inbox──▶ {target_prefix}\n  {message[:200]}"
-                + ("…" if len(message) > 200 else "")
+                json.dumps(
+                    {
+                        "type": "relay",
+                        "mode": "inbox",
+                        "from": None,
+                        "to": to,
+                        "message_id": message_id,
+                        "message": message,
+                        "ts": time.time(),
+                    },
+                    ensure_ascii=False,
+                )
             )
             bridge.audit.log(
                 "MCP_SEND",
@@ -374,20 +405,29 @@ class BridgeMCPServer:
             )
 
         delivered = 0
+        delivered_sids: list[str] = []
         for (sid, _info), ok in zip(targets.items(), results, strict=True):
             if ok:
                 delivered += 1
+                delivered_sids.append(sid)
             elif not nudge:
                 # Screen relay failed — enqueue in MCP inbox as fallback so
                 # the plugin can pick it up on the next session.idle poll.
                 self.enqueue(sid, message)
 
-        sender_info = bridge.registry.get(sender_session_id) if sender_session_id else None
-        sender_prefix = bridge._session_prefix(sender_info) if sender_info else (sender_session_id or "MCP")
         mode = "nudge" if nudge else "screen"
         bridge._xmpp_send(
-            f"🤖 {sender_prefix} ──{mode}──▶▶ {delivered} session(s)\n  {message[:200]}"
-            + ("…" if len(message) > 200 else "")
+            json.dumps(
+                {
+                    "type": "broadcast",
+                    "mode": mode,
+                    "from": sender_session_id or None,
+                    "to": delivered_sids,
+                    "message": message,
+                    "ts": time.time(),
+                },
+                ensure_ascii=False,
+            )
         )
         bridge.audit.log(
             "MCP_BROADCAST",

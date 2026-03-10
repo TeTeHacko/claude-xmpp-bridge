@@ -9,6 +9,7 @@ is required.  The ``XMPPBridge`` dependency is fully mocked.
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -209,7 +210,12 @@ class TestSendMessageTool:
         await started_server._tool_send_message(to="ses_AAA", message="ping")
         started_server._bridge._xmpp_send.assert_called_once()
         call_arg = started_server._bridge._xmpp_send.call_args[0][0]
-        assert "🤖" in call_arg
+        payload = json.loads(call_arg)
+        assert payload["type"] == "relay"
+        assert payload["mode"] == "screen"
+        assert payload["to"] == "ses_AAA"
+        assert payload["message"] == "ping"
+        assert "message_id" in payload
 
     async def test_send_returns_message_id(self, started_server: BridgeMCPServer):
         result = await started_server._tool_send_message(to="ses_AAA", message="ping")
@@ -292,7 +298,11 @@ class TestBroadcastMessageTool:
         await started_server._tool_broadcast_message(message="hi", sender_session_id="")
         started_server._bridge._xmpp_send.assert_called_once()
         call_arg = started_server._bridge._xmpp_send.call_args[0][0]
-        assert "🤖" in call_arg
+        payload = json.loads(call_arg)
+        assert payload["type"] == "broadcast"
+        assert payload["mode"] == "screen"
+        assert set(payload["to"]) == {"ses_AAA", "ses_BBB"}
+        assert payload["message"] == "hi"
 
     async def test_broadcast_logs_audit(self, started_server: BridgeMCPServer):
         await started_server._tool_broadcast_message(message="hi", sender_session_id="")
@@ -606,8 +616,12 @@ class TestSendMessageNudge:
         await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True)
         started_server._bridge._xmpp_send.assert_called_once()
         call_arg = started_server._bridge._xmpp_send.call_args[0][0]
-        assert "🤖" in call_arg
-        assert "nudge" in call_arg.lower()
+        payload = json.loads(call_arg)
+        assert payload["type"] == "relay"
+        assert payload["mode"] == "nudge"
+        assert payload["to"] == "ses_AAA"
+        assert payload["message"] == "ping"
+        assert "message_id" in payload
 
     async def test_send_nudge_takes_priority_over_screen(self, started_server: BridgeMCPServer):
         """nudge=True must use nudge even when screen=True is also set."""

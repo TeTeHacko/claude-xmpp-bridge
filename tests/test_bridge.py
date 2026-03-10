@@ -3436,12 +3436,16 @@ class TestRelay:
             )
 
         assert resp == {"ok": True}
-        # Observer should get an XMPP notification
+        # Observer should get a JSON XMPP notification
         conn.send.assert_called_once()
         sent = conn.send.call_args[0][1]
-        assert "🤖" in sent
-        assert "agent" in sent.lower() or "project" in sent.lower()
-        assert "yo agent-b" in sent
+        payload = json.loads(sent)
+        assert payload["type"] == "relay"
+        assert payload["mode"] == "screen"
+        assert payload["from"] == "agent-a"
+        assert payload["to"] == "agent-b"
+        assert payload["message"] == "yo agent-b, done with module X"
+        assert "ts" in payload
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -3458,7 +3462,9 @@ class TestRelay:
         assert resp == {"ok": True}
         conn.send.assert_called_once()
         sent = conn.send.call_args[0][1]
-        assert "hello session 2" in sent
+        payload = json.loads(sent)
+        assert payload["type"] == "relay"
+        assert payload["message"] == "hello session 2"
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -3573,7 +3579,7 @@ class TestRelay:
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_relay_long_message_truncated_in_xmpp_notification(self, MockXMPP, tmp_path):
-        """Observer XMPP notification truncates the message body at 200 chars."""
+        """Observer XMPP notification carries the full message in JSON (no truncation)."""
         bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
         long_msg = "X" * 300
 
@@ -3585,12 +3591,14 @@ class TestRelay:
 
         assert resp == {"ok": True}
         sent = conn.send.call_args[0][1]
-        assert "…" in sent  # truncation marker
+        payload = json.loads(sent)
+        assert payload["type"] == "relay"
+        assert payload["message"] == long_msg  # full message, no truncation
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_relay_without_sender_uses_fallback_label(self, MockXMPP, tmp_path):
-        """relay without session_id still works and uses '?' as sender label."""
+        """relay without session_id still works; JSON 'from' field is null."""
         bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
 
         with (
@@ -3601,8 +3609,9 @@ class TestRelay:
 
         assert resp == {"ok": True}
         sent = conn.send.call_args[0][1]
-        assert "?" in sent
-        assert "anonymous relay" in sent
+        payload = json.loads(sent)
+        assert payload["from"] is None
+        assert payload["message"] == "anonymous relay"
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -3692,7 +3701,12 @@ class TestBroadcast:
 
         assert conn.send.call_count == 1
         sent = conn.send.call_args[0][1]
-        assert "🤖" in sent
+        payload = json.loads(sent)
+        assert payload["type"] == "broadcast"
+        assert payload["mode"] == "screen"
+        assert payload["from"] == "agent-a"
+        assert set(payload["to"]) == {"agent-b", "agent-c"}
+        assert payload["message"] == "broadcast!"
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -3838,7 +3852,9 @@ class TestBroadcast:
             await bridge._handle_broadcast({"session_id": "agent-a", "message": "Y" * 300})
 
         sent = conn.send.call_args[0][1]
-        assert "…" in sent
+        payload = json.loads(sent)
+        assert payload["type"] == "broadcast"
+        assert payload["message"] == "Y" * 300  # full message, no truncation in JSON
         bridge.registry.close()
 
 

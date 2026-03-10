@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.30] - 2026-03-10
+
+### Changed
+- **JSON inter-agent XMPP notifications:** Relay and broadcast XMPP observer
+  messages now use structured JSON instead of plain-text emoji format.  This
+  makes inter-agent traffic machine-parseable for LLMs and auditable for humans.
+  Format: `{"type": "relay"|"broadcast", "mode": "nudge"|"screen"|"inbox",
+  "from": "...", "to": "...", "message": "...", "ts": 1741612800.123}`.
+  MCP server messages also include a `"message_id"` field.
+- Message bodies are no longer truncated in XMPP notifications (full text is
+  included in the JSON payload).
+
+## [0.7.29] - 2026-03-10
+
+### Fixed
+- **`bridge.py` `_screen_query_locks` memory leak:** Per-STY `asyncio.Lock`
+  instances used to serialize `screen -Q` queries were never cleaned up when
+  sessions were removed.  `_cleanup_stale_sessions` now prunes locks for STY
+  values that no longer have any registered session.
+
+### Removed
+- Dead code `_ALIVE_CHECK_CMDS` dict (unused since v0.7.26 when `_is_session_alive`
+  was rewritten to use socket-file checks and `_screen_window_alive`).
+
 ## [0.7.28] - 2026-03-10
 
 ### Fixed

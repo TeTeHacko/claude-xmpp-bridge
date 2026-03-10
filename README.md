@@ -239,7 +239,14 @@ systemctl --user enable --now claude-xmpp-bridge
 
 ## Inter-agent Communication
 
-Multiple AI agents running in different sessions can communicate with each other through the bridge. All inter-agent traffic is forwarded to the human observer's XMPP client.
+Multiple AI agents running in different sessions can communicate with each other through the bridge. All inter-agent traffic is forwarded to the human observer's XMPP client as structured JSON:
+
+```json
+{"type": "relay", "mode": "nudge", "from": "sender_id", "to": "target_id", "message": "...", "ts": 1741612800.123}
+{"type": "broadcast", "mode": "screen", "from": "sender_id", "to": ["id1", "id2"], "message": "...", "ts": 1741612800.123}
+```
+
+MCP server relay messages also include a `"message_id"` field. All other XMPP messages (notify, ask, response, system) remain plain text.
 
 ### Socket protocol
 

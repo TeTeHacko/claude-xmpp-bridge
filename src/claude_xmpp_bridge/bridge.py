@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import json
 import logging
 import os
 import signal
@@ -40,12 +41,6 @@ NO_BACKEND_SESSION_TTL = 24 * 3600  # 24 hours
 # The plugin sends a heartbeat every ~90 s (REREG_INTERVAL_MS).  Three missed
 # heartbeats = 270 s, so 300 s (5 min) gives a comfortable margin.
 HEARTBEAT_TTL = 300.0  # seconds
-
-_ALIVE_CHECK_CMDS: dict[str, list[str]] = {
-    # screen: window-level check done in _is_session_alive via -p <window> -Q title
-    "screen": ["screen", "-ls"],
-    "tmux": ["tmux", "has-session", "-t"],
-}
 
 
 @dataclasses.dataclass
@@ -570,6 +565,15 @@ class XMPPBridge:
             self.audit.log("SESSION_EXPIRED", session_id=sid, project=project, reason=reason)
         if to_remove:
             log.info(self.messages.stale_sessions_cleaned.format(count=len(to_remove)))
+            # Prune _screen_query_locks — remove locks for STY values that no
+            # longer have any registered session.  Without this, the dict grows
+            # unbounded over the lifetime of the bridge process.
+            active_stys = {info["sty"] for info in self.registry.sessions.values() if info.get("sty")}
+            stale_stys = [sty for sty in self._screen_query_locks if sty not in active_stys]
+            for sty in stale_stys:
+                del self._screen_query_locks[sty]
+            if stale_stys:
+                log.debug("Pruned %d stale screen query lock(s)", len(stale_stys))
         return len(to_remove)
 
     # --- Ask queue ---
@@ -962,9 +966,6 @@ class XMPPBridge:
 
         # Build XMPP observer label
         sender_id = str(req.get("session_id", ""))
-        sender_info = self.registry.get(sender_id) if sender_id else None
-        sender_prefix = self._session_prefix(sender_info) if sender_info else (sender_id or "?")
-        target_prefix = self._session_prefix(target_info)
 
         if nudge:
             ok = await self._nudge_session(target_id, target_info, message)
@@ -981,11 +982,19 @@ class XMPPBridge:
 
         mode = "nudge" if nudge else "screen"
         if ok:
-            # Notify observer so they can see inter-agent traffic
-            self._xmpp_send(
-                f"🤖 {sender_prefix} ──{mode}──▶ {target_prefix}\n  {message[:200]}"
-                + ("…" if len(message) > 200 else "")
+            # Notify observer so they can see inter-agent traffic (JSON format)
+            xmpp_payload = json.dumps(
+                {
+                    "type": "relay",
+                    "mode": mode,
+                    "from": sender_id or None,
+                    "to": target_id,
+                    "message": message,
+                    "ts": time.time(),
+                },
+                ensure_ascii=False,
             )
+            self._xmpp_send(xmpp_payload)
             return {"ok": True}
         else:
             return {
@@ -1013,8 +1022,6 @@ class XMPPBridge:
         nudge = bool(req.get("nudge", False))
 
         sender_id = str(req.get("session_id", ""))
-        sender_info = self.registry.get(sender_id) if sender_id else None
-        sender_prefix = self._session_prefix(sender_info) if sender_info else (sender_id or "?")
 
         targets = {
             sid: info for sid, info in self.registry.sessions.items() if sid != sender_id and info.get("backend")
@@ -1056,12 +1063,21 @@ class XMPPBridge:
             message_len=len(message),
         )
 
-        # Single XMPP summary for the observer
+        # Single XMPP summary for the observer (JSON format)
         mode = "nudge" if nudge else "screen"
-        self._xmpp_send(
-            f"🤖 {sender_prefix} ──{mode}──▶▶ {len(delivered)} session(s)\n  {message[:200]}"
-            + ("…" if len(message) > 200 else "")
+        delivered_sids = [sid for (sid, _info), ok in zip(targets.items(), results, strict=True) if ok]
+        xmpp_payload = json.dumps(
+            {
+                "type": "broadcast",
+                "mode": mode,
+                "from": sender_id or None,
+                "to": delivered_sids,
+                "message": message,
+                "ts": time.time(),
+            },
+            ensure_ascii=False,
         )
+        self._xmpp_send(xmpp_payload)
 
         return {"ok": True, "delivered": len(delivered), "failed": len(failed)}
 
