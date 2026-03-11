@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from claude_xmpp_bridge.multiplexer import (
+    _KEYPRESS_RETRIES,
     ScreenMultiplexer,
     TmuxMultiplexer,
     _screen_stuff_escape,
@@ -194,17 +195,30 @@ class TestScreenMultiplexer:
         assert mock_exec.call_count == 1
 
     async def test_failure_cr_stuff_call(self):
-        """Text stuff succeeds, CR stuff fails -> returns False."""
+        """Text stuff succeeds, CR stuff keeps failing after retries -> False."""
         mux = ScreenMultiplexer()
         proc_ok = _make_process_mock(0)
         proc_fail = _make_process_mock(1)
 
         with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
-            mock_exec.side_effect = [proc_ok, proc_fail]
+            mock_exec.side_effect = [proc_ok, *([proc_fail] * _KEYPRESS_RETRIES)]
             result = await mux.send_text("session", "0", "text")
 
         assert result is False
-        assert mock_exec.call_count == 2
+        assert mock_exec.call_count == 1 + _KEYPRESS_RETRIES
+
+    async def test_cr_retry_eventually_succeeds(self):
+        """If the first CR send fails transiently, the retry should recover."""
+        mux = ScreenMultiplexer()
+        proc_ok = _make_process_mock(0)
+        proc_fail = _make_process_mock(1)
+
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            mock_exec.side_effect = [proc_ok, proc_fail, proc_ok]
+            result = await mux.send_text("session", "0", "text")
+
+        assert result is True
+        assert mock_exec.call_count == 3
 
     async def test_timeout(self):
         """Subprocess wait times out -> returns False, kill() is called."""
@@ -312,17 +326,17 @@ class TestTmuxMultiplexer:
         assert mock_exec.call_count == 1
 
     async def test_failure_second_call(self):
-        """First call succeeds, second (Enter) fails -> returns False."""
+        """First call succeeds, Enter keeps failing even after retries -> False."""
         mux = TmuxMultiplexer()
         proc_ok = _make_process_mock(0)
         proc_fail = _make_process_mock(1)
 
         with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
-            mock_exec.side_effect = [proc_ok, proc_fail]
+            mock_exec.side_effect = [proc_ok, *([proc_fail] * _KEYPRESS_RETRIES)]
             result = await mux.send_text("mySession-1", "0", "text")
 
         assert result is False
-        assert mock_exec.call_count == 2
+        assert mock_exec.call_count == 1 + _KEYPRESS_RETRIES
 
     async def test_timeout(self):
         """Subprocess wait times out -> returns False, kill() is called."""

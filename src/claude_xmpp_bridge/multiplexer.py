@@ -24,6 +24,11 @@ _CMD_TIMEOUT = 5
 # to process the pasted text before the Enter arrives.
 _INTER_CMD_DELAY = 0.05
 
+# CR/Enter delivery can fail transiently even after text injection already
+# succeeded. Retry the keypress a few times so readline is more likely to submit
+# the prompt and the message does not remain half-typed in the target session.
+_KEYPRESS_RETRIES = 3
+
 
 def sanitize_text(text: str) -> str:
     """Remove control characters from text, preserving newlines and unicode."""
@@ -44,7 +49,7 @@ def _screen_stuff_escape(text: str) -> str:
 def _get_safe_env() -> dict[str, str]:
     """Return a minimal environment for safely executing subprocesses."""
     env = {}
-    for var in ("PATH", "USER", "HOME", "LANG", "LC_ALL", "TERM"):
+    for var in ("PATH", "USER", "HOME", "LANG", "LC_ALL", "TERM", "SCREENDIR"):
         if var in os.environ:
             env[var] = os.environ[var]
     return env
@@ -67,6 +72,17 @@ async def _run_cmd(*args: str, label: str) -> bool:
         await proc.wait()
         return False
     return True
+
+
+async def _run_cmd_with_retries(*args: str, label: str, retries: int) -> bool:
+    """Run a command and retry transient failures a limited number of times."""
+    for attempt in range(1, retries + 1):
+        if await _run_cmd(*args, label=label):
+            return True
+        if attempt < retries:
+            await asyncio.sleep(_INTER_CMD_DELAY)
+            log.warning("Retrying %s (%d/%d)", label, attempt + 1, retries)
+    return False
 
 
 class Multiplexer(Protocol):
@@ -123,7 +139,7 @@ class ScreenMultiplexer:
             return False
 
         await asyncio.sleep(_INTER_CMD_DELAY)
-        if not await _run_cmd(
+        if not await _run_cmd_with_retries(
             "screen",
             "-S",
             target,
@@ -133,6 +149,7 @@ class ScreenMultiplexer:
             "stuff",
             "\r",
             label="Screen CR",
+            retries=_KEYPRESS_RETRIES,
         ):
             return False
 
@@ -149,7 +166,7 @@ class ScreenMultiplexer:
         if not _TARGET_RE.match(target):
             log.error("Rejected invalid screen target: %r", target)
             return False
-        if not await _run_cmd(
+        if not await _run_cmd_with_retries(
             "screen",
             "-S",
             target,
@@ -159,6 +176,7 @@ class ScreenMultiplexer:
             "stuff",
             "\r",
             label="Screen nudge CR",
+            retries=_KEYPRESS_RETRIES,
         ):
             return False
 
@@ -188,13 +206,14 @@ class TmuxMultiplexer:
             return False
 
         await asyncio.sleep(_INTER_CMD_DELAY)
-        if not await _run_cmd(
+        if not await _run_cmd_with_retries(
             "tmux",
             "send-keys",
             "-t",
             target,
             "Enter",
             label="tmux Enter",
+            retries=_KEYPRESS_RETRIES,
         ):
             return False
 
@@ -211,13 +230,14 @@ class TmuxMultiplexer:
         if not _TARGET_RE.match(target):
             log.error("Rejected invalid tmux target: %r", target)
             return False
-        if not await _run_cmd(
+        if not await _run_cmd_with_retries(
             "tmux",
             "send-keys",
             "-t",
             target,
             "Enter",
             label="tmux nudge Enter",
+            retries=_KEYPRESS_RETRIES,
         ):
             return False
 

@@ -166,6 +166,19 @@ class TestPluginClientBinFallback:
         assert body, "reportState function not found in plugin"
         assert "bridgeSuppressed()" in body, "reportState must not call bridge while cooldown is active"
 
+    def test_plugin_registers_build_aware_plugin_ref(self):
+        """The registration payload should use a build-aware plugin ref, not only
+        the static PLUGIN_VERSION constant, so plugin-only local changes are visible
+        in /list even when the Python package version did not change.
+        """
+        text = _plugin_text()
+        assert "const pluginRef = (() => {" in text, "pluginRef self-hash helper must exist"
+        body = _function_body(text, "const makeRegPayload =")
+        assert body, "makeRegPayload function not found in plugin"
+        assert "plugin_version: pluginRef" in body, (
+            "registration payload must send pluginRef instead of plain PLUGIN_VERSION"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestPluginTitleFallback

@@ -49,6 +49,7 @@ class Messages:
     mcp_send_missing_message: str = "send_message requires 'message'"
     mcp_send_target_not_found: str = "Target session not found: {to}"
     mcp_send_no_backend: str = "Target session [{project}] has no multiplexer"
+    mcp_send_queued: str = "Message queued for {target_prefix}"
     mcp_send_failed: str = "Delivery to [{project}] failed"
     mcp_send_ok: str = "Message delivered to {target_prefix}"
 

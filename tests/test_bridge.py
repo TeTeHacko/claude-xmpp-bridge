@@ -363,6 +363,7 @@ class TestShutdownSequence:
         conn.send.assert_called()
         goodbye_calls = [c for c in conn.send.call_args_list if "stopped" in str(c).lower() or "Bridge" in str(c)]
         assert len(goodbye_calls) >= 1
+        assert any("(v" in str(c) for c in goodbye_calls)
 
         # Should have disconnected
         conn.disconnect.assert_called_once()
@@ -654,6 +655,60 @@ class TestStaleSessionCleanup:
         assert removed == 0
         assert "ro-1" in bridge.registry.sessions
         mock_alive.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_cleanup_prunes_stale_legacy_lock_hints(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        home = tmp_path / "home"
+        lock_dir = home / ".claude" / "working"
+        lock_dir.mkdir(parents=True)
+        (lock_dir / "stale.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "dead-1",
+                    "filepath": "/tmp/dead.py",
+                    "project": "~/proj",
+                    "locked_at": "2026-03-11T01:00:00+01:00",
+                }
+            )
+        )
+        (lock_dir / "live.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "alive-1",
+                    "filepath": "/tmp/live.py",
+                    "project": "~/proj",
+                    "locked_at": "2026-03-11T01:00:01+01:00",
+                }
+            )
+        )
+
+        config = _make_config(tmp_path)
+        bridge = XMPPBridge(config)
+        bridge.registry.register(
+            session_id="alive-1",
+            sty="12345.pts-0",
+            window="0",
+            project="/home/user/project-a",
+            backend="screen",
+        )
+
+        with (
+            patch("claude_xmpp_bridge.bridge.Path.home", return_value=home),
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch.object(bridge, "_screen_window_alive", return_value=True),
+        ):
+            removed = await bridge._cleanup_stale_sessions()
+
+        assert removed == 0
+        assert not (lock_dir / "stale.json").exists()
+        assert (lock_dir / "live.json").exists()
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -2345,6 +2400,17 @@ class TestMessagesFrozen:
             raise AssertionError("Should have raised FrozenInstanceError")
         except dataclasses.FrozenInstanceError:
             pass
+
+
+class TestPluginDisplayRef:
+    def test_plain_version_displays_with_v_prefix(self):
+        assert XMPPBridge._plugin_display_ref("0.7.42") == " v0.7.42"
+
+    def test_build_ref_prefers_hash_suffix(self):
+        assert XMPPBridge._plugin_display_ref("0.7.42+abc1234") == " @abc1234"
+
+    def test_empty_plugin_ref_displays_nothing(self):
+        assert XMPPBridge._plugin_display_ref("") == ""
 
 
 class TestSocketTokenAuth:
@@ -4380,6 +4446,106 @@ class TestStateCommand:
         assert info["agent_mode"] == "🔵"  # preserved
         bridge.registry.close()
 
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_get_context_returns_counts(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "sty", "1", "/proj", backend="screen")
+        bridge.registry.replace_todos("s1", [{"content": "one", "status": "pending", "priority": "high"}])
+        bridge.registry.acquire_file_lock("s1", "/tmp/a.py", "/proj")
+
+        result = bridge._handle_get_context({"session_id": "s1"})
+        assert result["ok"] is True
+        assert result["session"]["todo_count"] == 1
+        assert result["session"]["lock_count"] == 1
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_add_todo_returns_version(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "sty", "1", "/proj", backend="screen")
+        result = bridge._handle_add_todo({"session_id": "s1", "content": "hello"})
+        assert result["ok"] is True
+        assert result["version"] == 1
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_update_todo_unknown_session_returns_error(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        result = bridge._handle_update_todo({"session_id": "missing", "todo_id": "todo-1", "status": "done"})
+        assert result == {"error": "unknown session_id: missing"}
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_remove_todo_unknown_session_returns_error(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        result = bridge._handle_remove_todo({"session_id": "missing", "todo_id": "todo-1"})
+        assert result == {"error": "unknown session_id: missing"}
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_acquire_file_lock_returns_owner(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "sty", "1", "/proj", backend="screen")
+        result = bridge._handle_acquire_file_lock({"session_id": "s1", "filepath": "/tmp/a.py"})
+        assert result["ok"] is True
+        assert result["lock"]["session_id"] == "s1"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_register_deduplicates_screen_empty_window(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        assert bridge._handle_register(
+            {"session_id": "old", "sty": "sty1", "window": "", "project": "/proj-a", "backend": "screen"}
+        ) == {"ok": True}
+        assert bridge._handle_register(
+            {"session_id": "new", "sty": "sty1", "window": "", "project": "/proj-a", "backend": "screen"}
+        ) == {"ok": True}
+        assert list(bridge.registry.sessions) == ["new"]
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_register_deduplicates_tmux_by_window(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        assert bridge._handle_register(
+            {"session_id": "old", "sty": "tmuxA", "window": "1", "project": "/proj-a", "backend": "tmux"}
+        ) == {"ok": True}
+        assert bridge._handle_register(
+            {"session_id": "keep", "sty": "tmuxA", "window": "2", "project": "/proj-b", "backend": "tmux"}
+        ) == {"ok": True}
+        assert bridge._handle_register(
+            {"session_id": "new", "sty": "tmuxA", "window": "1", "project": "/proj-a", "backend": "tmux"}
+        ) == {"ok": True}
+        assert set(bridge.registry.sessions) == {"keep", "new"}
+        bridge.registry.close()
+
 
 # ---------------------------------------------------------------------------
 # TestNudgePattern — nudge=True relay and broadcast
@@ -4503,6 +4669,28 @@ class TestNudgePattern:
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_nudge_no_backend_enqueues_and_succeeds(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("agent-ro", sty="", window="", project="/proj-ro", backend=None)
+        bridge._enqueue_for_mcp = MagicMock()
+        bridge._nudge_session = AsyncMock(return_value=True)
+
+        resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-ro", "message": "hi", "nudge": True})
+
+        assert resp == {"ok": True}
+        bridge._enqueue_for_mcp.assert_called_once()
+        bridge._nudge_session.assert_not_awaited()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_relay_nudge_false_uses_stuff_session(self, MockXMPP, tmp_path):
         """relay with nudge=False (default) calls _stuff_to_session, not _nudge_session."""
         bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
@@ -4587,8 +4775,8 @@ class TestNudgePattern:
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
-    async def test_broadcast_nudge_true_does_not_enqueue_via_enqueue_for_mcp(self, MockXMPP, tmp_path):
-        """broadcast nudge=True does NOT call _enqueue_for_mcp (inbox is handled by _nudge_session)."""
+    async def test_broadcast_nudge_true_enqueues_for_no_backend_targets(self, MockXMPP, tmp_path):
+        """broadcast nudge=True should still enqueue for targets without a backend."""
         conn = MagicMock()
         conn.connected = asyncio.Event()
         conn.connected.set()
@@ -4599,13 +4787,13 @@ class TestNudgePattern:
         bridge = XMPPBridge(_make_config(tmp_path))
         bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
         bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
+        bridge.registry.register("agent-ro", sty="", window="", project="/proj-ro", backend=None)
         bridge._nudge_session = AsyncMock(return_value=True)
         bridge._enqueue_for_mcp = MagicMock()
 
         await bridge._handle_broadcast({"session_id": "agent-a", "message": "nudge", "nudge": True})
 
-        # _nudge_session handles inbox internally — _enqueue_for_mcp must NOT be called
-        bridge._enqueue_for_mcp.assert_not_called()
+        bridge._enqueue_for_mcp.assert_called_once()
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")

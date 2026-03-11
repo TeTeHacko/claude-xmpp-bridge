@@ -300,8 +300,25 @@ claude-xmpp-client broadcast --session-id MY_SESSION_ID "message"
 # List all registered sessions (returns JSON)
 claude-xmpp-client list
 
+# Get one session's coordination context
+claude-xmpp-client get-context ses_abc123_w4
+
 # Report agent state (idle / running)
 claude-xmpp-client state '{"session_id":"abc","state":"idle"}'
+
+# List, add, update, remove todos
+claude-xmpp-client list-todos ses_abc123_w4
+claude-xmpp-client replace-todos '{"session_id":"ses_abc123_w4","todos":[{"content":"Refactor parser","status":"pending","priority":"high"}]}'
+# For concurrent agents, pass expected_version from get-context/list output
+claude-xmpp-client replace-todos '{"session_id":"ses_abc123_w4","expected_version":3,"todos":[{"content":"Refactor parser","status":"pending","priority":"high"}]}'
+claude-xmpp-client add-todo ses_abc123_w4 "Refactor parser" --priority high
+claude-xmpp-client update-todo ses_abc123_w4 abc123def456 --status completed --expected-version 4
+claude-xmpp-client remove-todo ses_abc123_w4 abc123def456
+
+# Acquire and release bridge-native file locks
+claude-xmpp-client acquire-lock ses_abc123_w4 src/app.py --reason "editing"
+claude-xmpp-client release-lock ses_abc123_w4 src/app.py
+claude-xmpp-client cleanup-locks --project /home/user/project
 ```
 
 ### MCP server (port 7878)
@@ -313,7 +330,13 @@ The bridge also exposes an HTTP MCP server on port 7878 (streamable-HTTP transpo
 | `send_message(to, message, screen=True, nudge=False)` | Deliver a message to a session; `screen=False` enqueues to inbox only; `nudge=True` sends only a CR to wake the agent (message stored in inbox, delivered on next `session.idle`) |
 | `broadcast_message(message, sender_session_id)` | Deliver to all sessions except sender |
 | `receive_messages(session_id)` | Drain inbox — returns messages sent to this session |
-| `list_sessions()` | Enumerate all sessions with metadata, state, plugin version, sty, and window |
+| `list_sessions()` | Enumerate all sessions with metadata, state/mode, plugin version, sty/window, and inbox/todo/lock counts |
+| `get_session_context(session_id)` | Return one session's metadata, todos, bridge-native file locks, and coordination counters, including `todos_version` |
+| `list_todos(session_id)` | Return the stored todo list for one session |
+| `replace_todos(session_id, todos, expected_version=None)` | Atomically replace the stored todo list for one session; pass `expected_version` from `get_session_context`/`list_sessions` to reject stale writes |
+| `add_todo(session_id, content, status="pending", priority="medium", expected_version=None)` | Append one todo item and return its `todo_id` and new `todos_version`; optional optimistic-lock version check |
+| `update_todo(session_id, todo_id, ..., expected_version=None)` | Update one todo item by id and return the updated item plus new `todos_version`; optional optimistic-lock version check |
+| `remove_todo(session_id, todo_id, expected_version=None)` | Remove one todo item by id and return the new `todos_version`; optional optimistic-lock version check |
 | `acquire_file_lock(session_id, filepath, project="", reason="")` | Acquire a bridge-native file lock for a session; returns the current owner on conflict |
 | `release_file_lock(session_id, filepath, force=False)` | Release a bridge-native file lock owned by a session |
 | `list_file_locks(project="", include_stale=True)` | List bridge-native file locks plus legacy lock hints from `~/.claude/working`, optionally filtered by project and/or hiding stale locks |
@@ -473,7 +496,7 @@ Claude Code and OpenCode sessions in the **same project directory coexist** — 
 
 ### Session registration payload
 
-The OpenCode plugin registers sessions with `source: "opencode"` and reports its plugin version:
+The OpenCode plugin registers sessions with `source: "opencode"` and reports a build-aware plugin ref:
 
 ```json
 {
@@ -483,9 +506,12 @@ The OpenCode plugin registers sessions with `source: "opencode"` and reports its
   "project": "/home/user/project",
   "backend": "screen",
   "source": "opencode",
-  "plugin_version": "0.7.42"
+  "plugin_version": "0.7.43+abc1234"
 }
 ```
+
+When such a value is shown in `/list`, the bridge displays the compact build suffix
+(`@abc1234`) instead of the full semantic version string.
 
 ### Agent identity environment variables
 

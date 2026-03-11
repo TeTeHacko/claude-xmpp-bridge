@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.43] - 2026-03-10
+
+### Added
+- **Bridge-native MCP todo/context API** — MCP now exposes `get_session_context`,
+  `list_todos`, `replace_todos`, `add_todo`, `update_todo`, and `remove_todo`.
+  Session context includes todos, bridge-native file locks, `todo_count`,
+  `lock_count`, `inbox_count`, and `todos_version` so agents can coordinate
+  through MCP without shell-side helpers.
+
+### Changed
+- **OpenCode plugin reports a build-aware ref** — plugin registration now sends
+  `plugin_version` as `semver+hash`, where the hash is derived from the plugin's
+  own source file. This means local plugin-only changes remain visible in `/list`
+  even when the Python package version did not change.
+- **`/list` shows compact plugin build refs** — when a plugin reports
+  `0.7.43+abc1234`, the human-facing session list displays `@abc1234` instead of
+  the full semantic version string.
+- **Bridge shutdown notification includes version** — XMPP stop messages now show
+  the bridge version that was running, matching the startup notification.
+- **Todo writes now use optimistic locking** — `replace_todos` supports
+  `expected_version`, and todo mutations increment `todos_version` to prevent
+  silent last-write-wins overwrites.
+
+### Fixed
+- **Bridge-native file locks are safer** — lock acquisition is now atomic,
+  cleanup of stale locks respects project filtering, and filepaths are normalized
+  before lock identity checks so equivalent paths cannot create duplicate locks.
+
+### Tests
+- Added coverage for MCP todo/context APIs, optimistic todo version conflicts,
+  atomic todo item operations, build-aware plugin refs, and lock regression cases
+  (atomic acquire, project-filtered cleanup, normalized paths).
+
 ## [0.7.42] - 2026-03-10
 
 ### Added

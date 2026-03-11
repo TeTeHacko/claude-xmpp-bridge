@@ -200,6 +200,44 @@ class TestClientSubcommands:
             client_main()
         assert exc_info.value.code == 1
 
+    def test_get_context_prints_json(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "get-context", "sess-1"])
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {"ok": True, "session": {"session_id": "sess-1"}, "todos": [], "file_locks": []},
+        )
+        client_main()
+        assert '"session_id": "sess-1"' in capsys.readouterr().out
+
+    def test_add_todo_prints_json(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "add-todo", "sess-1", "hello"])
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {"ok": True, "todo": {"todo_id": "abc", "content": "hello"}, "version": 1},
+        )
+        client_main()
+        assert '"todo_id": "abc"' in capsys.readouterr().out
+
+    def test_list_locks_prints_json(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "list-locks"])
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {"ok": True, "locks": [{"filepath": "/tmp/a.py"}]},
+        )
+        client_main()
+        assert '"filepath": "/tmp/a.py"' in capsys.readouterr().out
+
+    def test_update_todo_unknown_session_exits_nonzero(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "update-todo", "sess-1", "todo-1", "--status", "done"])
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {"error": "unknown session_id: sess-1"},
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 1
+        assert "unknown session_id: sess-1" in capsys.readouterr().err
+
 
 class TestAskMissingMessage:
     """ask without message and with a tty should exit non-zero."""

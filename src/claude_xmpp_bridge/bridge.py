@@ -141,6 +141,24 @@ class XMPPBridge:
         """Return session IDs sorted by registration time (oldest first)."""
         return sorted(sessions, key=lambda s: sessions[s]["registered_at"])
 
+    @staticmethod
+    def _plugin_display_ref(plugin_version: str | None) -> str:
+        """Format plugin build info for compact human display."""
+        if not plugin_version:
+            return ""
+        version = str(plugin_version).strip()
+        if not version:
+            return ""
+        if "+" in version:
+            _base, build = version.split("+", 1)
+            return f" @{build}" if build else ""
+        return f" v{version}"
+
+    @staticmethod
+    def _optional_int(value: object) -> int | None:
+        """Convert a socket/MCP request field to int if present."""
+        return int(str(value)) if value is not None else None
+
     async def _cmd_list(self) -> None:
         await self._cleanup_stale_sessions()
         sessions = self.registry.list_sessions()
@@ -186,7 +204,7 @@ class XMPPBridge:
             else:
                 tag = f"[{self.messages.read_only_tag}]"
 
-            meta = f" v{version}" if version else ""
+            meta = self._plugin_display_ref(version)
             lines.append(f"  /{i}  {icons}  {tag}{meta}  {self._short_path(project)}{marker}")
         lines.append(f"\n{self.messages.active_marker}")
         self._xmpp_send("\n".join(lines))
@@ -604,6 +622,7 @@ class XMPPBridge:
             self.registry.unregister(sid)
             log.info("Cleaned stale session %s (project=%s, reason=%s)", sid, project, reason)
             self.audit.log("SESSION_EXPIRED", session_id=sid, project=project, reason=reason)
+        legacy_removed = self._cleanup_legacy_lock_hints()
         if to_remove:
             log.info(self.messages.stale_sessions_cleaned.format(count=len(to_remove)))
             # Prune _screen_query_locks — remove locks for STY values that no
@@ -615,7 +634,33 @@ class XMPPBridge:
                 del self._screen_query_locks[sty]
             if stale_stys:
                 log.debug("Pruned %d stale screen query lock(s)", len(stale_stys))
+        if legacy_removed:
+            log.info("Cleaned %d stale legacy lock hint(s)", legacy_removed)
         return len(to_remove)
+
+    def _cleanup_legacy_lock_hints(self) -> int:
+        """Remove stale lock hint files from ``~/.claude/working``."""
+        lock_dir = Path.home() / ".claude" / "working"
+        if not lock_dir.is_dir():
+            return 0
+
+        active_sessions = set(self.registry.sessions)
+        removed = 0
+        for path in lock_dir.iterdir():
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            session_id = str(data.get("session_id", "")).strip()
+            if session_id and session_id not in active_sessions:
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                    removed += 1
+        return removed
 
     # --- Ask queue ---
 
@@ -741,6 +786,26 @@ class XMPPBridge:
             response = self._handle_query(req)
         elif cmd == "list":
             response = self._handle_list(req)
+        elif cmd == "get_context":
+            response = self._handle_get_context(req)
+        elif cmd == "list_todos":
+            response = self._handle_list_todos(req)
+        elif cmd == "replace_todos":
+            response = self._handle_replace_todos(req)
+        elif cmd == "add_todo":
+            response = self._handle_add_todo(req)
+        elif cmd == "update_todo":
+            response = self._handle_update_todo(req)
+        elif cmd == "remove_todo":
+            response = self._handle_remove_todo(req)
+        elif cmd == "list_file_locks":
+            response = self._handle_list_file_locks(req)
+        elif cmd == "acquire_file_lock":
+            response = self._handle_acquire_file_lock(req)
+        elif cmd == "release_file_lock":
+            response = self._handle_release_file_lock(req)
+        elif cmd == "cleanup_stale_locks":
+            response = self._handle_cleanup_stale_locks(req)
         elif cmd == "ping":
             response = {"ok": True}
         else:
@@ -806,11 +871,9 @@ class XMPPBridge:
             for old_sid, old_info in list(self.registry.sessions.items()):
                 if old_sid == sid:
                     continue
-                if (
-                    sty
-                    and old_info["sty"] == sty
-                    and ((backend == "screen" and window and old_info["window"] == window) or backend == "tmux")
-                ):
+                same_screen_slot = backend == "screen" and old_info["sty"] == sty and old_info["window"] == window
+                same_tmux_slot = backend == "tmux" and old_info["sty"] == sty and old_info["window"] == window
+                if sty and (same_screen_slot or same_tmux_slot):
                     if inherited_registered_at is None:
                         inherited_registered_at = old_info["registered_at"]
                     log.info("Replacing stale session %s (same sty=%s, window=%s)", old_sid, sty, window)
@@ -1001,7 +1064,7 @@ class XMPPBridge:
         if not target_info or not target_id:
             return {"ok": False, "error": self.messages.relay_target_not_found}
 
-        if not target_info["backend"]:
+        if not nudge and not target_info["backend"]:
             return {
                 "ok": False,
                 "error": self.messages.relay_no_backend.format(project=self._short_path(target_info["project"])),
@@ -1018,7 +1081,11 @@ class XMPPBridge:
         )
 
         if nudge:
-            ok = await self._nudge_session(target_id, target_info, wrapped_message)
+            if target_info["backend"]:
+                ok = await self._nudge_session(target_id, target_info, wrapped_message)
+            else:
+                self._enqueue_for_mcp(target_id, wrapped_message)
+                ok = True
         else:
             ok = await self._stuff_to_session(target_id, target_info, wrapped_message)
 
@@ -1074,7 +1141,9 @@ class XMPPBridge:
         sender_id = str(req.get("session_id", ""))
 
         targets = {
-            sid: info for sid, info in self.registry.sessions.items() if sid != sender_id and info.get("backend")
+            sid: info
+            for sid, info in self.registry.sessions.items()
+            if sid != sender_id and (nudge or info.get("backend"))
         }
 
         if not targets:
@@ -1088,9 +1157,13 @@ class XMPPBridge:
         )
 
         if nudge:
-            results = await asyncio.gather(
-                *(self._nudge_session(sid, info, wrapped_message) for sid, info in targets.items()),
-            )
+            async def _deliver_nudge(sid: str, info: SessionInfo) -> bool:
+                if info.get("backend"):
+                    return await self._nudge_session(sid, info, wrapped_message)
+                self._enqueue_for_mcp(sid, wrapped_message)
+                return True
+
+            results = await asyncio.gather(*(_deliver_nudge(sid, info) for sid, info in targets.items()))
         else:
             results = await asyncio.gather(
                 *(self._stuff_to_session(sid, info, wrapped_message) for sid, info in targets.items()),
@@ -1165,22 +1238,253 @@ class XMPPBridge:
         result = []
         for i, sid in enumerate(sorted_ids, 1):
             info = sessions[sid]
-            result.append(
+            result.append(self._session_entry(sid, info, index=i, include_registered_at=True))
+        return {"ok": True, "sessions": result}
+
+    def _legacy_project_matches(self, lock_project: str, lock_filepath: str, project: str) -> bool:
+        if not project:
+            return True
+        short = self._short_path(project)
+        return lock_project in {project, short} or lock_filepath.startswith(project)
+
+    def _session_counts(self, session_id: str) -> dict[str, int]:
+        return {
+            "inbox_count": self.registry.inbox_count(session_id),
+            "todo_count": self.registry.todo_count(session_id),
+            "lock_count": self.registry.file_lock_count(session_id),
+        }
+
+    def _session_entry(
+        self,
+        session_id: str,
+        info: SessionInfo,
+        *,
+        index: int | None = None,
+        include_registered_at: bool = False,
+        normalize_empty: bool = False,
+    ) -> dict[str, object]:
+        entry: dict[str, object] = {
+            "session_id": session_id,
+            "project": info["project"],
+            "backend": (info.get("backend") or "null") if normalize_empty else info.get("backend"),
+            "source": (info.get("source") or "") if normalize_empty else info.get("source"),
+            "window": info.get("window") or "",
+            "sty": info.get("sty") or "",
+            "plugin_version": (info.get("plugin_version") or "") if normalize_empty else info.get("plugin_version"),
+            "agent_state": (info.get("agent_state") or "") if normalize_empty else info.get("agent_state"),
+            "agent_mode": (info.get("agent_mode") or "") if normalize_empty else info.get("agent_mode"),
+            "todos_version": info.get("todos_version", 0),
+            **self._session_counts(session_id),
+        }
+        if index is not None:
+            entry["index"] = index
+        if include_registered_at:
+            entry["registered_at"] = info["registered_at"]
+        return entry
+
+    def _session_context_payload(
+        self, session_id: str, info: SessionInfo, *, normalize_empty: bool
+    ) -> dict[str, object]:
+        return {
+            "ok": True,
+            "session": self._session_entry(session_id, info, normalize_empty=normalize_empty),
+            "todos": [dict(todo) for todo in self.registry.list_todos(session_id)],
+            "file_locks": [dict(lock) for lock in self.registry.list_file_locks_for_session(session_id)],
+        }
+
+    def _list_file_lock_payloads(self, *, project: str = "", include_stale: bool = True) -> list[dict[str, object]]:
+        locks = [
+            {**dict(lock), "stale": lock["session_id"] not in self.registry.sessions, "source": "bridge"}
+            for lock in self.registry.list_file_locks()
+            if self._legacy_project_matches(lock["project"], lock["filepath"], project)
+        ]
+        locks.extend(self._read_legacy_lock_hints(project=project))
+        if not include_stale:
+            locks = [lock for lock in locks if not lock["stale"]]
+        for lock in locks:
+            lock.pop("lockfile", None)
+        locks.sort(key=lambda item: (str(item.get("locked_at", "")), str(item.get("filepath", ""))))
+        return locks
+
+    def _cleanup_stale_lock_payloads(self, *, project: str = "") -> list[dict[str, object]]:
+        removed: list[dict[str, object]] = []
+        for lock in self.registry.list_file_locks():
+            if lock["session_id"] in self.registry.sessions:
+                continue
+            if not self._legacy_project_matches(lock["project"], lock["filepath"], project):
+                continue
+            self.registry.release_file_lock(lock["session_id"], lock["filepath"], force=True)
+            removed.append({**dict(lock), "stale": True, "source": "bridge"})
+        for legacy_lock in self._read_legacy_lock_hints(project=project):
+            if not legacy_lock["stale"]:
+                continue
+            lockfile = legacy_lock.get("lockfile")
+            if isinstance(lockfile, str):
+                with contextlib.suppress(OSError):
+                    Path(lockfile).unlink()
+            result = dict(legacy_lock)
+            result.pop("lockfile", None)
+            removed.append(result)
+        return removed
+
+    def _read_legacy_lock_hints(self, project: str = "") -> list[dict[str, object]]:
+        lock_dir = Path.home() / ".claude" / "working"
+        if not lock_dir.is_dir():
+            return []
+        active_sessions = set(self.registry.sessions)
+        locks: list[dict[str, object]] = []
+        for path in sorted(lock_dir.iterdir()):
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            session_id = str(data.get("session_id", "")).strip()
+            filepath = str(data.get("filepath", "")).strip()
+            lock_project = str(data.get("project", "")).strip()
+            locked_at = str(data.get("locked_at", "")).strip()
+            if not session_id or not filepath:
+                continue
+            if not self._legacy_project_matches(lock_project, filepath, project):
+                continue
+            locks.append(
                 {
-                    "index": i,
-                    "session_id": sid,
-                    "project": info["project"],
-                    "backend": info["backend"],
-                    "sty": info.get("sty", ""),
-                    "window": info["window"],
-                    "source": info.get("source"),
-                    "registered_at": info["registered_at"],
-                    "plugin_version": info.get("plugin_version"),
-                    "agent_state": info.get("agent_state"),
-                    "agent_mode": info.get("agent_mode"),
+                    "session_id": session_id,
+                    "filepath": filepath,
+                    "project": lock_project,
+                    "locked_at": locked_at,
+                    "stale": session_id not in active_sessions,
+                    "source": "legacy",
+                    "lockfile": str(path),
                 }
             )
-        return {"ok": True, "sessions": result}
+        return locks
+
+    def _handle_get_context(self, req: dict[str, object]) -> dict[str, object]:
+        session_id = str(req.get("session_id", ""))
+        info = self.registry.get(session_id)
+        if not info:
+            return {"error": f"unknown session_id: {session_id}"}
+        return self._session_context_payload(session_id, info, normalize_empty=True)
+
+    def _handle_list_todos(self, req: dict[str, object]) -> dict[str, object]:
+        session_id = str(req.get("session_id", ""))
+        return {"ok": True, "todos": [dict(todo) for todo in self.registry.list_todos(session_id)]}
+
+    def _handle_replace_todos(self, req: dict[str, object]) -> dict[str, object]:
+        session_id = str(req.get("session_id", ""))
+        info = self.registry.get(session_id)
+        if not info:
+            return {"error": f"unknown session_id: {session_id}"}
+        todos = req.get("todos")
+        if not isinstance(todos, list):
+            return {"error": "todos must be a list"}
+        expected_version_raw = req.get("expected_version")
+        expected_version = self._optional_int(expected_version_raw)
+        version = self.registry.replace_todos(session_id, todos, expected_version=expected_version)
+        if version is None:
+            return {"error": "todo version conflict", "current_version": info.get("todos_version", 0)}
+        return {"ok": True, "count": len(todos), "version": version}
+
+    def _handle_add_todo(self, req: dict[str, object]) -> dict[str, object]:
+        session_id = str(req.get("session_id", ""))
+        content = str(req.get("content", "")).strip()
+        if not content:
+            return {"error": "missing content"}
+        expected_version_raw = req.get("expected_version")
+        expected_version = self._optional_int(expected_version_raw)
+        todo, version = self.registry.add_todo(
+            session_id,
+            content,
+            status=str(req.get("status", "pending")),
+            priority=str(req.get("priority", "medium")),
+            expected_version=expected_version,
+        )
+        info = self.registry.get(session_id)
+        if todo is None or version is None:
+            current_version = info.get("todos_version", 0) if info else 0
+            if info:
+                return {"error": "todo version conflict", "current_version": current_version}
+            return {"error": f"unknown session_id: {session_id}"}
+        return {"ok": True, "todo": dict(todo), "version": version}
+
+    def _handle_update_todo(self, req: dict[str, object]) -> dict[str, object]:
+        session_id = str(req.get("session_id", ""))
+        todo_id = str(req.get("todo_id", ""))
+        if not todo_id:
+            return {"error": "missing todo_id"}
+        info = self.registry.get(session_id)
+        if not info:
+            return {"error": f"unknown session_id: {session_id}"}
+        expected_version_raw = req.get("expected_version")
+        expected_version = self._optional_int(expected_version_raw)
+        todo, version = self.registry.update_todo(
+            session_id,
+            todo_id,
+            content=str(req["content"]) if "content" in req and req["content"] is not None else None,
+            status=str(req["status"]) if "status" in req and req["status"] is not None else None,
+            priority=str(req["priority"]) if "priority" in req and req["priority"] is not None else None,
+            expected_version=expected_version,
+        )
+        if todo is None or version is None:
+            if info and expected_version is not None and expected_version != info.get("todos_version", 0):
+                return {"error": "todo version conflict", "current_version": info.get("todos_version", 0)}
+            return {"error": f"todo not found: {todo_id}"}
+        return {"ok": True, "todo": dict(todo), "version": version}
+
+    def _handle_remove_todo(self, req: dict[str, object]) -> dict[str, object]:
+        session_id = str(req.get("session_id", ""))
+        todo_id = str(req.get("todo_id", ""))
+        if not todo_id:
+            return {"error": "missing todo_id"}
+        info = self.registry.get(session_id)
+        if not info:
+            return {"error": f"unknown session_id: {session_id}"}
+        expected_version_raw = req.get("expected_version")
+        expected_version = self._optional_int(expected_version_raw)
+        removed, version = self.registry.remove_todo(session_id, todo_id, expected_version=expected_version)
+        if version is None:
+            if info and expected_version is not None and expected_version != info.get("todos_version", 0):
+                return {"error": "todo version conflict", "current_version": info.get("todos_version", 0)}
+            return {"error": f"todo not found: {todo_id}"}
+        return {"ok": True, "removed": removed, "version": version}
+
+    def _handle_list_file_locks(self, req: dict[str, object]) -> dict[str, object]:
+        project = str(req.get("project", ""))
+        include_stale = bool(req.get("include_stale", True))
+        return {"ok": True, "locks": self._list_file_lock_payloads(project=project, include_stale=include_stale)}
+
+    def _handle_acquire_file_lock(self, req: dict[str, object]) -> dict[str, object]:
+        session_id = str(req.get("session_id", ""))
+        filepath = str(req.get("filepath", "")).strip()
+        if not filepath:
+            return {"error": "missing filepath"}
+        info = self.registry.get(session_id)
+        if not info:
+            return {"error": f"unknown session_id: {session_id}"}
+        acquired, lock, replaced_stale = self.registry.acquire_file_lock(
+            session_id,
+            filepath,
+            str(req.get("project", "")).strip() or info["project"],
+            str(req.get("reason", "")).strip() or None,
+        )
+        return {"ok": acquired, "lock": dict(lock), "replaced_stale": replaced_stale}
+
+    def _handle_release_file_lock(self, req: dict[str, object]) -> dict[str, object]:
+        session_id = str(req.get("session_id", ""))
+        filepath = str(req.get("filepath", "")).strip()
+        if not filepath:
+            return {"error": "missing filepath"}
+        released = self.registry.release_file_lock(session_id, filepath, force=bool(req.get("force", False)))
+        return {"ok": True, "released": released}
+
+    def _handle_cleanup_stale_locks(self, req: dict[str, object]) -> dict[str, object]:
+        project = str(req.get("project", ""))
+        removed = self._cleanup_stale_lock_payloads(project=project)
+        return {"ok": True, "removed": len(removed), "locks": removed}
 
     # --- Lifecycle ---
 
@@ -1240,7 +1544,7 @@ class XMPPBridge:
         if self.mcp_server is not None:
             await self.mcp_server.stop()
         await self.socket_server.stop()
-        self._xmpp_send(self.messages.bridge_stopped)
+        self._xmpp_send(f"{self.messages.bridge_stopped} (v{__version__})")
         await asyncio.sleep(1)
         self.xmpp.disconnect()
         self.registry.close()

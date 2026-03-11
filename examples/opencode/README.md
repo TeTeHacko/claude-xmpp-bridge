@@ -121,22 +121,28 @@ export BRIDGE_AGENT_LOCAL=🩵
 🟣🔴 my-project    ← plan agent, permission required
 ```
 
-## Agent State and Plugin Version
+## Agent State and Plugin Build
 
-The plugin reports its version (`plugin_version`) in the registration payload and keeps the bridge informed of agent state and active agent:
+The plugin reports a build-aware `plugin_version` in the registration payload and keeps the bridge informed of agent state and active agent:
 
 - **State**: `idle` — after registration and `session.idle`; `running` — when generating output or a tool starts
 - **Agent**: emoji circle sent as `mode` field — updated when `message.updated` fires with a new agent name
 
-This information appears in `/list` XMPP output as icons before the backend bracket and a version tag:
+This information appears in `/list` XMPP output as icons before the backend bracket and a compact build tag:
 
 ```
 Sessions:
-  /1  🧠🟠⏸  [screen #2]  v0.7.42  ~/projects/my-app  *
-  /2  🧠🔵▶  [screen #4]  v0.7.42  ~/projects/other
+  /1  🧠🟠⏸  [screen #2]  @abc1234  ~/projects/my-app  *
+  /2  🧠🔵▶  [screen #4]  @abc1234  ~/projects/other
 
 * = active session
 ```
+
+The plugin computes this ref from its own source file content, so local plugin-only
+changes still show up in `/list` even if the Python package version stays the same.
+
+Session context exposed through MCP now also includes `todos_version`, `todo_count`,
+`lock_count`, and `inbox_count`, so agents can coordinate without shell-side state.
 
 ## MCP Inbox Polling
 

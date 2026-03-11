@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -31,6 +33,7 @@ def _make_session_info(
     plugin_version: str | None = None,
     agent_state: str | None = None,
     agent_mode: str | None = None,
+    todos_version: int = 0,
 ) -> dict:
     return {
         "project": project,
@@ -42,6 +45,7 @@ def _make_session_info(
         "plugin_version": plugin_version,
         "agent_state": agent_state,
         "agent_mode": agent_mode,
+        "todos_version": todos_version,
     }
 
 
@@ -52,6 +56,7 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     bridge.registry.sessions = sessions or {}
     bridge.registry.get = MagicMock(side_effect=lambda sid: (sessions or {}).get(sid))
     file_locks: dict[str, dict] = {}
+    todos_by_session: dict[str, list[dict]] = {}
 
     def _acquire_file_lock(session_id: str, filepath: str, project: str, reason: str | None = None):
         existing = file_locks.get(filepath)
@@ -89,25 +94,247 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     def _list_file_locks():
         return [dict(v) for v in sorted(file_locks.values(), key=lambda item: item["filepath"])]
 
+    def _list_file_locks_for_session(session_id: str):
+        return [
+            dict(v)
+            for v in sorted(file_locks.values(), key=lambda item: item["filepath"])
+            if v["session_id"] == session_id
+        ]
+
+    def _file_lock_count(session_id: str):
+        return sum(1 for v in file_locks.values() if v["session_id"] == session_id)
+
     def _cleanup_stale_file_locks():
         removed = [dict(v) for v in file_locks.values() if v["session_id"] not in bridge.registry.sessions]
         for lock in removed:
             file_locks.pop(lock["filepath"], None)
         return sorted(removed, key=lambda item: item["filepath"])
 
+    def _replace_todos(session_id: str, todos: list[dict], expected_version: int | None = None):
+        current_version = int(bridge.registry.sessions[session_id].get("todos_version", 0))
+        if expected_version is not None and expected_version != current_version:
+            return None
+        todos_by_session[session_id] = [
+            {
+                "content": str(todo.get("content", "")).strip(),
+                "status": str(todo.get("status", "pending")),
+                "priority": str(todo.get("priority", "medium")),
+                "updated_at": "2026-03-11T01:00:00+01:00",
+            }
+            for todo in todos
+        ]
+        bridge.registry.sessions[session_id]["todos_version"] = current_version + 1
+        return current_version + 1
+
+    def _list_todos(session_id: str):
+        return [dict(todo) for todo in todos_by_session.get(session_id, [])]
+
+    def _todo_count(session_id: str):
+        return len(todos_by_session.get(session_id, []))
+
+    def _clear_todos(session_id: str):
+        return len(todos_by_session.pop(session_id, []))
+
+    def _add_todo(
+        session_id: str,
+        content: str,
+        status: str = "pending",
+        priority: str = "medium",
+        expected_version: int | None = None,
+    ):
+        current_version = int(bridge.registry.sessions[session_id].get("todos_version", 0))
+        if expected_version is not None and expected_version != current_version:
+            return None, None
+        todo = {
+            "todo_id": uuid.uuid4().hex[:12],
+            "content": content,
+            "status": status,
+            "priority": priority,
+            "updated_at": "2026-03-11T01:00:00+01:00",
+        }
+        todos_by_session.setdefault(session_id, []).append(todo)
+        bridge.registry.sessions[session_id]["todos_version"] = current_version + 1
+        return dict(todo), bridge.registry.sessions[session_id]["todos_version"]
+
+    def _update_todo(
+        session_id: str,
+        todo_id: str,
+        *,
+        content: str | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        expected_version: int | None = None,
+    ):
+        current_version = int(bridge.registry.sessions[session_id].get("todos_version", 0))
+        if expected_version is not None and expected_version != current_version:
+            return None, None
+        for todo in todos_by_session.get(session_id, []):
+            if todo["todo_id"] == todo_id:
+                if content is not None:
+                    todo["content"] = content
+                if status is not None:
+                    todo["status"] = status
+                if priority is not None:
+                    todo["priority"] = priority
+                todo["updated_at"] = "2026-03-11T01:00:01+01:00"
+                bridge.registry.sessions[session_id]["todos_version"] = current_version + 1
+                return dict(todo), bridge.registry.sessions[session_id]["todos_version"]
+        return None, None
+
+    def _remove_todo(session_id: str, todo_id: str, expected_version: int | None = None):
+        current_version = int(bridge.registry.sessions[session_id].get("todos_version", 0))
+        if expected_version is not None and expected_version != current_version:
+            return False, None
+        items = todos_by_session.get(session_id, [])
+        for idx, todo in enumerate(items):
+            if todo["todo_id"] == todo_id:
+                del items[idx]
+                bridge.registry.sessions[session_id]["todos_version"] = current_version + 1
+                return True, bridge.registry.sessions[session_id]["todos_version"]
+        return False, None
+
+    def _inbox_count(_session_id: str):
+        return 0
+
+    def _session_counts(session_id: str):
+        return {
+            "inbox_count": bridge.registry.inbox_count(session_id),
+            "todo_count": bridge.registry.todo_count(session_id),
+            "lock_count": bridge.registry.file_lock_count(session_id),
+        }
+
+    def _session_entry(
+        session_id: str,
+        info: dict,
+        *,
+        index: int | None = None,
+        include_registered_at: bool = False,
+        normalize_empty: bool = False,
+    ):
+        entry = {
+            "session_id": session_id,
+            "project": info["project"],
+            "backend": (info.get("backend") or "null") if normalize_empty else info.get("backend"),
+            "source": (info.get("source") or "") if normalize_empty else info.get("source"),
+            "window": info.get("window") or "",
+            "sty": info.get("sty") or "",
+            "plugin_version": (info.get("plugin_version") or "") if normalize_empty else info.get("plugin_version"),
+            "agent_state": (info.get("agent_state") or "") if normalize_empty else info.get("agent_state"),
+            "agent_mode": (info.get("agent_mode") or "") if normalize_empty else info.get("agent_mode"),
+            "todos_version": info.get("todos_version", 0),
+            **_session_counts(session_id),
+        }
+        if index is not None:
+            entry["index"] = index
+        if include_registered_at:
+            entry["registered_at"] = info["registered_at"]
+        return entry
+
+    def _session_context_payload(session_id: str, info: dict, *, normalize_empty: bool):
+        return {
+            "ok": True,
+            "session": _session_entry(session_id, info, normalize_empty=normalize_empty),
+            "todos": _list_todos(session_id),
+            "file_locks": _list_file_locks_for_session(session_id),
+        }
+
+    def _legacy_project_matches(lock_project: str, lock_filepath: str, project: str):
+        if not project:
+            return True
+        short = project.split("/")[-1]
+        return lock_project == project or lock_project.endswith(short) or lock_filepath.startswith(project)
+
+    def _read_legacy_lock_hints(project: str = ""):
+        working = Path(os.path.expanduser("~/.claude/working"))
+        if not working.is_dir():
+            return []
+        active_sessions = set(bridge.registry.sessions)
+        locks = []
+        for path in sorted(working.iterdir()):
+            if not path.is_file():
+                continue
+            data = json.loads(path.read_text())
+            session_id = str(data.get("session_id", "")).strip()
+            filepath = str(data.get("filepath", "")).strip()
+            lock_project = str(data.get("project", "")).strip()
+            if not session_id or not filepath:
+                continue
+            if not _legacy_project_matches(lock_project, filepath, project):
+                continue
+            locks.append(
+                {
+                    "session_id": session_id,
+                    "filepath": filepath,
+                    "project": lock_project,
+                    "locked_at": str(data.get("locked_at", "")).strip(),
+                    "stale": session_id not in active_sessions,
+                    "source": "legacy",
+                    "lockfile": str(path),
+                }
+            )
+        return locks
+
+    def _list_file_lock_payloads(*, project: str = "", include_stale: bool = True):
+        locks = [
+            {**dict(lock), "stale": lock["session_id"] not in bridge.registry.sessions, "source": "bridge"}
+            for lock in _list_file_locks()
+            if _legacy_project_matches(lock["project"], lock["filepath"], project)
+        ]
+        locks.extend(_read_legacy_lock_hints(project=project))
+        if not include_stale:
+            locks = [lock for lock in locks if not lock["stale"]]
+        for lock in locks:
+            lock.pop("lockfile", None)
+        locks.sort(key=lambda item: (str(item.get("locked_at", "")), str(item.get("filepath", ""))))
+        return locks
+
+    def _cleanup_stale_lock_payloads(*, project: str = ""):
+        removed = []
+        for lock in _list_file_locks():
+            if lock["session_id"] in bridge.registry.sessions:
+                continue
+            if not _legacy_project_matches(lock["project"], lock["filepath"], project):
+                continue
+            _release_file_lock(lock["session_id"], lock["filepath"], force=True)
+            removed.append({**dict(lock), "stale": True, "source": "bridge"})
+        for legacy_lock in _read_legacy_lock_hints(project=project):
+            if not legacy_lock["stale"]:
+                continue
+            Path(str(legacy_lock["lockfile"])).unlink(missing_ok=True)
+            result = dict(legacy_lock)
+            result.pop("lockfile", None)
+            removed.append(result)
+        return removed
+
     bridge.registry.acquire_file_lock = MagicMock(side_effect=_acquire_file_lock)
     bridge.registry.release_file_lock = MagicMock(side_effect=_release_file_lock)
     bridge.registry.list_file_locks = MagicMock(side_effect=_list_file_locks)
+    bridge.registry.list_file_locks_for_session = MagicMock(side_effect=_list_file_locks_for_session)
+    bridge.registry.file_lock_count = MagicMock(side_effect=_file_lock_count)
     bridge.registry.cleanup_stale_file_locks = MagicMock(side_effect=_cleanup_stale_file_locks)
+    bridge.registry.replace_todos = MagicMock(side_effect=_replace_todos)
+    bridge.registry.list_todos = MagicMock(side_effect=_list_todos)
+    bridge.registry.todo_count = MagicMock(side_effect=_todo_count)
+    bridge.registry.clear_todos = MagicMock(side_effect=_clear_todos)
+    bridge.registry.add_todo = MagicMock(side_effect=_add_todo)
+    bridge.registry.update_todo = MagicMock(side_effect=_update_todo)
+    bridge.registry.remove_todo = MagicMock(side_effect=_remove_todo)
+    bridge.registry.inbox_count = MagicMock(side_effect=_inbox_count)
     bridge._stuff_to_session = AsyncMock(return_value=True)
     bridge._xmpp_send = MagicMock(return_value=True)
     bridge._session_prefix = MagicMock(side_effect=lambda info: f"[{info['project'].split('/')[-1]}]")
+    bridge._session_counts = MagicMock(side_effect=_session_counts)
+    bridge._session_entry = MagicMock(side_effect=_session_entry)
+    bridge._session_context_payload = MagicMock(side_effect=_session_context_payload)
+    bridge._list_file_lock_payloads = MagicMock(side_effect=_list_file_lock_payloads)
+    bridge._cleanup_stale_lock_payloads = MagicMock(side_effect=_cleanup_stale_lock_payloads)
     bridge.audit = MagicMock()
     bridge.messages = MagicMock()
     bridge.messages.mcp_send_missing_to = "send_message requires 'to' (session_id)"
     bridge.messages.mcp_send_missing_message = "send_message requires 'message'"
     bridge.messages.mcp_send_target_not_found = "Target session not found: {to}"
     bridge.messages.mcp_send_no_backend = "Target session [{project}] has no multiplexer"
+    bridge.messages.mcp_send_queued = "Message queued for {target_prefix}"
     bridge.messages.mcp_send_failed = "Delivery to [{project}] failed"
     bridge.messages.mcp_send_ok = "Message delivered to {target_prefix}"
     bridge.messages.broadcast_no_message = "broadcast requires 'message'"
@@ -426,6 +653,113 @@ class TestListSessionsTool:
         result = server._tool_list_sessions()
         assert result[0]["plugin_version"] == ""
 
+    def test_list_includes_inbox_todo_and_lock_counts(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.inbox_count = MagicMock(return_value=2)
+        started_server._bridge.registry.todo_count = MagicMock(return_value=3)
+        started_server._bridge.registry.file_lock_count = MagicMock(return_value=4)
+        result = started_server._tool_list_sessions()
+        assert result[0]["inbox_count"] == 2
+        assert result[0]["todo_count"] == 3
+        assert result[0]["lock_count"] == 4
+
+
+class TestTodoContextTools:
+    def test_replace_todos_succeeds(self, started_server: BridgeMCPServer):
+        result = started_server._tool_replace_todos(
+            session_id="ses_AAA",
+            todos=[{"content": "first", "status": "pending", "priority": "high"}],
+        )
+        assert result == {"ok": True, "count": 1, "version": 1}
+
+    def test_replace_todos_detects_version_conflict(self, started_server: BridgeMCPServer):
+        started_server._tool_replace_todos(
+            session_id="ses_AAA",
+            todos=[{"content": "first", "status": "pending", "priority": "high"}],
+        )
+        result = started_server._tool_replace_todos(
+            session_id="ses_AAA",
+            todos=[{"content": "second", "status": "pending", "priority": "high"}],
+            expected_version=0,
+        )
+        assert result["ok"] is False
+        assert result["error"] == "todo version conflict"
+        assert result["current_version"] == 1
+
+    def test_list_todos_returns_saved_items(self, started_server: BridgeMCPServer):
+        started_server._tool_replace_todos(
+            session_id="ses_AAA",
+            todos=[{"content": "first", "status": "pending", "priority": "high"}],
+        )
+        todos = started_server._tool_list_todos(session_id="ses_AAA")
+        assert len(todos) == 1
+        assert todos[0]["content"] == "first"
+
+    def test_get_session_context_returns_counts_todos_and_locks(self, started_server: BridgeMCPServer):
+        started_server._tool_replace_todos(
+            session_id="ses_AAA",
+            todos=[{"content": "first", "status": "pending", "priority": "high"}],
+        )
+        started_server._tool_acquire_file_lock(session_id="ses_AAA", filepath="/tmp/a.py")
+        started_server._bridge.registry.inbox_count = MagicMock(return_value=2)
+
+        result = started_server._tool_get_session_context(session_id="ses_AAA")
+
+        assert result["ok"] is True
+        assert result["session"]["session_id"] == "ses_AAA"
+        assert result["session"]["inbox_count"] == 2
+        assert result["session"]["todo_count"] == 1
+        assert result["session"]["lock_count"] == 1
+        assert result["session"]["todos_version"] == 1
+        assert result["todos"][0]["content"] == "first"
+        assert result["file_locks"][0]["filepath"] == "/tmp/a.py"
+
+    def test_get_session_context_unknown_session(self, started_server: BridgeMCPServer):
+        result = started_server._tool_get_session_context(session_id="ses_UNKNOWN")
+        assert result["ok"] is False
+        assert "unknown session_id" in result["error"]
+
+    def test_add_update_remove_todo(self, started_server: BridgeMCPServer):
+        added = started_server._tool_add_todo(session_id="ses_AAA", content="first", priority="high")
+        assert added["ok"] is True
+        todo_id = added["todo"]["todo_id"]
+
+        updated = started_server._tool_update_todo(session_id="ses_AAA", todo_id=todo_id, status="completed")
+        assert updated["ok"] is True
+        assert updated["todo"]["status"] == "completed"
+
+        removed = started_server._tool_remove_todo(session_id="ses_AAA", todo_id=todo_id)
+        assert removed["ok"] is True
+        assert removed["removed"] is True
+
+    def test_atomic_todo_ops_respect_expected_version(self, started_server: BridgeMCPServer):
+        added = started_server._tool_add_todo(session_id="ses_AAA", content="first")
+        todo_id = added["todo"]["todo_id"]
+
+        conflict = started_server._tool_update_todo(
+            session_id="ses_AAA",
+            todo_id=todo_id,
+            status="completed",
+            expected_version=0,
+        )
+        assert conflict["ok"] is False
+        assert conflict["error"] == "todo version conflict"
+
+        conflict_remove = started_server._tool_remove_todo(
+            session_id="ses_AAA",
+            todo_id=todo_id,
+            expected_version=0,
+        )
+        assert conflict_remove["ok"] is False
+        assert conflict_remove["error"] == "todo version conflict"
+
+        conflict_add = started_server._tool_add_todo(
+            session_id="ses_AAA",
+            content="second",
+            expected_version=0,
+        )
+        assert conflict_add["ok"] is False
+        assert conflict_add["error"] == "todo version conflict"
+
 
 # ---------------------------------------------------------------------------
 # file lock tools
@@ -527,6 +861,45 @@ class TestFileLockTools:
         assert not stale.exists()
         started_server._bridge.audit.log.assert_called()
 
+    def test_cleanup_stale_locks_respects_project_filter(self, started_server: BridgeMCPServer, tmp_path):
+        started_server._bridge.registry.register("ses_STALE_A", "1", "1", "/tmp/proj-a")
+        started_server._bridge.registry.register("ses_STALE_B", "1", "1", "/tmp/proj-b")
+        started_server._bridge.registry.acquire_file_lock("ses_STALE_A", "/tmp/a.py", "/tmp/proj-a")
+        started_server._bridge.registry.acquire_file_lock("ses_STALE_B", "/tmp/b.py", "/tmp/proj-b")
+        started_server._bridge.registry.unregister("ses_STALE_A")
+        started_server._bridge.registry.unregister("ses_STALE_B")
+
+        working = tmp_path / ".claude" / "working"
+        working.mkdir(parents=True)
+        stale_a = working / "stale-a---a.py"
+        stale_b = working / "stale-b---b.py"
+        stale_a.write_text(
+            json.dumps(
+                {
+                    "session_id": "ses_STALE_A",
+                    "filepath": "/tmp/a-legacy.py",
+                    "project": "/tmp/proj-a",
+                    "locked_at": "2026-03-11T01:01:00+01:00",
+                }
+            )
+        )
+        stale_b.write_text(
+            json.dumps(
+                {
+                    "session_id": "ses_STALE_B",
+                    "filepath": "/tmp/b-legacy.py",
+                    "project": "/tmp/proj-b",
+                    "locked_at": "2026-03-11T01:01:01+01:00",
+                }
+            )
+        )
+
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            result = started_server._tool_cleanup_stale_locks(project="/tmp/proj-a")
+
+        assert {lock["filepath"] for lock in result["locks"]} == {"/tmp/a-legacy.py", "/tmp/a.py"}
+        assert stale_b.exists()
+
     def test_list_agent_state_none_returns_empty_string(self, server: BridgeMCPServer):
         sessions = {"ses_X": _make_session_info(agent_state=None)}
         server._bridge = _make_bridge(sessions=sessions)
@@ -551,6 +924,12 @@ class TestBuildMcp:
         assert "receive_messages" in tool_names
         assert "broadcast_message" in tool_names
         assert "list_sessions" in tool_names
+        assert "get_session_context" in tool_names
+        assert "list_todos" in tool_names
+        assert "replace_todos" in tool_names
+        assert "add_todo" in tool_names
+        assert "update_todo" in tool_names
+        assert "remove_todo" in tool_names
         assert "list_file_locks" in tool_names
         assert "acquire_file_lock" in tool_names
         assert "release_file_lock" in tool_names
@@ -766,8 +1145,10 @@ class TestSendMessageNudge:
         assert "[id:" in result
         assert "nudge" in result.lower()
 
-    async def test_send_nudge_true_no_backend_returns_error(self, started_server: BridgeMCPServer):
-        """nudge=True for a session without a backend must return an error."""
+    async def test_send_nudge_true_no_backend_queues_message(self, started_server: BridgeMCPServer):
+        """nudge=True for a session without a backend should still queue the
+        message instead of failing outright.
+        """
         started_server._bridge.registry.sessions["ses_NOBACK"] = _make_session_info(
             project="/home/user/noback", backend=None
         )
@@ -775,7 +1156,16 @@ class TestSendMessageNudge:
             side_effect=lambda sid: started_server._bridge.registry.sessions.get(sid)
         )
         result = await started_server._tool_send_message(to="ses_NOBACK", message="ping", nudge=True)
-        assert "multiplexer" in result.lower() or "no backend" in result.lower() or "noback" in result.lower()
+        assert "queued" in result.lower() or "nudge" in result.lower()
+        started_server._bridge._nudge_session.assert_not_called()
+
+    async def test_send_nudge_true_backend_does_not_double_enqueue(self, started_server: BridgeMCPServer):
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        started_server._bridge.registry.inbox_put = MagicMock()
+
+        await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True)
+
+        started_server._bridge.registry.inbox_put.assert_not_called()
 
     async def test_send_nudge_true_failure_returns_error(self, started_server: BridgeMCPServer):
         """nudge=True when CR send fails must return a failure message."""
@@ -851,3 +1241,36 @@ class TestBroadcastMessageNudge:
         started_server._bridge.audit.log.assert_called()
         event_arg = started_server._bridge.audit.log.call_args[0][0]
         assert event_arg == "MCP_BROADCAST"
+
+    async def test_broadcast_nudge_true_enqueues_for_no_backend_targets(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.sessions["ses_NOBACK"] = _make_session_info(
+            project="/home/user/noback", backend=None, sty="", window=""
+        )
+        started_server._bridge.registry.get = MagicMock(
+            side_effect=lambda sid: started_server._bridge.registry.sessions.get(sid)
+        )
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        started_server._bridge.registry.inbox_put = MagicMock()
+
+        result = await started_server._tool_broadcast_message(
+            message="nudge all", sender_session_id="ses_AAA", nudge=True
+        )
+
+        assert "2" in result
+        assert started_server._bridge._nudge_session.await_count == 1
+        started_server._bridge.registry.inbox_put.assert_called_once()
+        args = started_server._bridge.registry.inbox_put.call_args[0]
+        assert args[0] == "ses_NOBACK"
+        assert args[1].endswith("nudge all")
+
+
+class TestTodoToolErrors:
+    def test_update_todo_unknown_session(self, started_server: BridgeMCPServer):
+        result = started_server._tool_update_todo(session_id="ses_UNKNOWN", todo_id="todo-1", status="done")
+        assert result["ok"] is False
+        assert result["error"] == "unknown session_id: ses_UNKNOWN"
+
+    def test_remove_todo_unknown_session(self, started_server: BridgeMCPServer):
+        result = started_server._tool_remove_todo(session_id="ses_UNKNOWN", todo_id="todo-1")
+        assert result["ok"] is False
+        assert result["error"] == "unknown session_id: ses_UNKNOWN"

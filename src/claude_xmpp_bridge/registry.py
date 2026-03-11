@@ -6,6 +6,8 @@ import logging
 import re
 import sqlite3
 import time
+import uuid
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
@@ -36,6 +38,7 @@ class SessionInfo(TypedDict):
     agent_state: str | None  # last known state: "idle", "running", etc.
     agent_mode: str | None  # last known mode: "planning", "code", "build"
     last_seen: float | None  # timestamp of last successful "state" heartbeat
+    todos_version: int  # optimistic-lock version for bridge-native todos
 
 
 class FileLockInfo(TypedDict):
@@ -46,6 +49,16 @@ class FileLockInfo(TypedDict):
     project: str
     reason: str | None
     locked_at: str
+
+
+class TodoInfo(TypedDict):
+    """Type for per-session todo items stored in the registry."""
+
+    todo_id: str
+    content: str
+    status: str
+    priority: str
+    updated_at: str
 
 
 def _validate_session_id(session_id: str) -> None:
@@ -104,8 +117,21 @@ class SessionRegistry:
             "  locked_at  TEXT NOT NULL"
             ")"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS todos ("
+            "  session_id  TEXT NOT NULL,"
+            "  position    INTEGER NOT NULL,"
+            "  todo_id     TEXT NOT NULL,"
+            "  content     TEXT NOT NULL,"
+            "  status      TEXT NOT NULL,"
+            "  priority    TEXT NOT NULL,"
+            "  updated_at  TEXT NOT NULL,"
+            "  PRIMARY KEY (session_id, position)"
+            ")"
+        )
         self._db.execute("CREATE INDEX IF NOT EXISTS inbox_to_session ON inbox (to_session, id)")
         self._db.execute("CREATE INDEX IF NOT EXISTS file_locks_session_id ON file_locks (session_id)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS todos_session_id ON todos (session_id, position)")
         self._db.commit()
         # Migrations: add columns for existing databases that predate these fields
         cols = {row[1] for row in self._db.execute("PRAGMA table_info(sessions)")}
@@ -119,6 +145,16 @@ class SessionRegistry:
             self._db.execute("ALTER TABLE sessions ADD COLUMN agent_mode TEXT")
         if "last_seen" not in cols:
             self._db.execute("ALTER TABLE sessions ADD COLUMN last_seen REAL")
+        if "todos_version" not in cols:
+            self._db.execute("ALTER TABLE sessions ADD COLUMN todos_version INTEGER NOT NULL DEFAULT 0")
+        todo_cols = {row[1] for row in self._db.execute("PRAGMA table_info(todos)")}
+        if todo_cols and "todo_id" not in todo_cols:
+            self._db.execute("ALTER TABLE todos ADD COLUMN todo_id TEXT")
+            rows = self._db.execute("SELECT session_id, position FROM todos").fetchall()
+            self._db.executemany(
+                "UPDATE todos SET todo_id = ? WHERE session_id = ? AND position = ?",
+                [(uuid.uuid4().hex[:12], row[0], row[1]) for row in rows],
+            )
         self._db.commit()
         self._load_from_db()
 
@@ -126,7 +162,7 @@ class SessionRegistry:
         """Load sessions and state from SQLite on startup."""
         for row in self._db.execute(
             "SELECT session_id, sty, window, project, backend, source, registered_at,"
-            "       plugin_version, agent_state, agent_mode, last_seen FROM sessions"
+            "       plugin_version, agent_state, agent_mode, last_seen, todos_version FROM sessions"
         ):
             self.sessions[row[0]] = SessionInfo(
                 sty=row[1] or "",
@@ -139,6 +175,7 @@ class SessionRegistry:
                 agent_state=row[8],
                 agent_mode=row[9],
                 last_seen=float(row[10]) if row[10] is not None else None,
+                todos_version=int(row[11] or 0),
             )
         row = self._db.execute("SELECT value FROM state WHERE key = 'last_active'").fetchone()
         if row and row[0] in self.sessions:
@@ -150,8 +187,8 @@ class SessionRegistry:
         self._db.execute(
             "INSERT OR REPLACE INTO sessions"
             " (session_id, sty, window, project, backend, source,"
-            "  registered_at, plugin_version, agent_state, agent_mode, last_seen)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  registered_at, plugin_version, agent_state, agent_mode, last_seen, todos_version)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 info["sty"],
@@ -164,6 +201,7 @@ class SessionRegistry:
                 info.get("agent_state"),
                 info.get("agent_mode"),
                 info.get("last_seen"),
+                info.get("todos_version", 0),
             ),
         )
         self._save_last_active()
@@ -205,6 +243,7 @@ class SessionRegistry:
         prev_state = self.sessions[session_id].get("agent_state") if is_reregister else None
         prev_mode = self.sessions[session_id].get("agent_mode") if is_reregister else None
         prev_last_seen = self.sessions[session_id].get("last_seen") if is_reregister else None
+        prev_todos_version = self.sessions[session_id].get("todos_version", 0) if is_reregister else 0
         self.sessions[session_id] = SessionInfo(
             sty=sty,
             window=window,
@@ -216,6 +255,7 @@ class SessionRegistry:
             agent_state=prev_state,
             agent_mode=prev_mode,
             last_seen=prev_last_seen,
+            todos_version=prev_todos_version,
         )
         # Don't flip last_active when the same session re-registers — it would
         # hijack plain-text routing away from whatever the user targeted last.
@@ -228,6 +268,7 @@ class SessionRegistry:
         """Unregister a session."""
         if session_id in self.sessions:
             released = self.release_all_file_locks(session_id)
+            self.clear_todos(session_id)
             info = self.sessions.pop(session_id)
             log.info("Unregistered session %s (project=%s)", session_id, info["project"])
             if released:
@@ -365,6 +406,25 @@ class SessionRegistry:
         ).fetchall()
         return [self._row_to_file_lock(row) for row in rows]
 
+    def list_file_locks_for_session(self, session_id: str) -> list[FileLockInfo]:
+        """Return bridge-native file locks owned by *session_id*."""
+        rows = self._db.execute(
+            "SELECT filepath, session_id, project, reason, locked_at"
+            " FROM file_locks WHERE session_id = ? ORDER BY locked_at, filepath",
+            (session_id,),
+        ).fetchall()
+        return [self._row_to_file_lock(row) for row in rows]
+
+    def file_lock_count(self, session_id: str) -> int:
+        """Return the number of bridge-native file locks held by *session_id*."""
+        row = self._db.execute("SELECT COUNT(*) FROM file_locks WHERE session_id = ?", (session_id,)).fetchone()
+        return int(row[0])
+
+    @staticmethod
+    def _normalize_filepath(filepath: str) -> str:
+        """Normalize a file path for lock identity purposes."""
+        return str(Path(filepath).expanduser().resolve(strict=False))
+
     def acquire_file_lock(
         self, session_id: str, filepath: str, project: str, reason: str | None = None
     ) -> tuple[bool, FileLockInfo, bool]:
@@ -375,13 +435,29 @@ class SessionRegistry:
         If the previous owner session is no longer registered, the stale lock is
         replaced automatically and ``replaced_stale`` is True.
         """
+        filepath = self._normalize_filepath(filepath)
         now = self._now_iso()
         with self._db:
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO file_locks"
+                " (filepath, session_id, project, reason, locked_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (filepath, session_id, project, reason, now),
+            )
+            if cur.rowcount == 1:
+                return True, FileLockInfo(
+                    filepath=filepath,
+                    session_id=session_id,
+                    project=project,
+                    reason=reason,
+                    locked_at=now,
+                ), False
+
             row = self._db.execute(
                 "SELECT filepath, session_id, project, reason, locked_at FROM file_locks WHERE filepath = ?",
                 (filepath,),
             ).fetchone()
-            if row is None:
+            if row is None:  # pragma: no cover - defensive; INSERT OR IGNORE should have created/found a row
                 self._db.execute(
                     "INSERT INTO file_locks (filepath, session_id, project, reason, locked_at) VALUES (?, ?, ?, ?, ?)",
                     (filepath, session_id, project, reason, now),
@@ -416,6 +492,7 @@ class SessionRegistry:
         If ``force`` is True, removes the lock regardless of owner.
         Returns True if a row was deleted.
         """
+        filepath = self._normalize_filepath(filepath)
         with self._db:
             if force:
                 cur = self._db.execute("DELETE FROM file_locks WHERE filepath = ?", (filepath,))
@@ -432,14 +509,214 @@ class SessionRegistry:
             cur = self._db.execute("DELETE FROM file_locks WHERE session_id = ?", (session_id,))
         return int(cur.rowcount)
 
-    def cleanup_stale_file_locks(self) -> list[FileLockInfo]:
+    def cleanup_stale_file_locks(self, project: str | None = None) -> list[FileLockInfo]:
         """Remove file locks whose owner session is no longer registered."""
         stale = [lock for lock in self.list_file_locks() if lock["session_id"] not in self.sessions]
+        if project:
+            stale = [lock for lock in stale if lock["project"] == project]
         if not stale:
             return []
         with self._db:
             self._db.executemany("DELETE FROM file_locks WHERE filepath = ?", [(lock["filepath"],) for lock in stale])
         return stale
+
+    @staticmethod
+    def _row_to_todo(row: sqlite3.Row | tuple[object, ...]) -> TodoInfo:
+        return TodoInfo(
+            todo_id=str(row[0]),
+            content=str(row[1]),
+            status=str(row[2]),
+            priority=str(row[3]),
+            updated_at=str(row[4]),
+        )
+
+    def replace_todos(
+        self,
+        session_id: str,
+        todos: Sequence[TodoInfo | Mapping[str, object]],
+        expected_version: int | None = None,
+    ) -> int | None:
+        """Replace the todo list for *session_id* atomically.
+
+        Returns the new todo version on success, or None if ``expected_version``
+        was provided and did not match the current version.
+        """
+        now = self._now_iso()
+        rows: list[tuple[str, int, str, str, str, str, str]] = []
+        for idx, todo in enumerate(todos, start=1):
+            rows.append(
+                (
+                    session_id,
+                    idx,
+                    str(todo.get("todo_id", "")).strip() or uuid.uuid4().hex[:12],
+                    str(todo.get("content", "")).strip(),
+                    str(todo.get("status", "pending")).strip() or "pending",
+                    str(todo.get("priority", "medium")).strip() or "medium",
+                    now,
+                )
+            )
+        info = self.sessions.get(session_id)
+        if info is None:
+            return None
+        current_version = int(info.get("todos_version", 0))
+        if expected_version is not None and expected_version != current_version:
+            return None
+
+        new_version = current_version + 1
+        with self._db:
+            self._db.execute("DELETE FROM todos WHERE session_id = ?", (session_id,))
+            if rows:
+                self._db.executemany(
+                    "INSERT INTO todos"
+                    " (session_id, position, todo_id, content, status, priority, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+            self._db.execute("UPDATE sessions SET todos_version = ? WHERE session_id = ?", (new_version, session_id))
+        info["todos_version"] = new_version
+        return new_version
+
+    def list_todos(self, session_id: str) -> list[TodoInfo]:
+        """Return the todo list for *session_id* in order."""
+        rows = self._db.execute(
+            "SELECT todo_id, content, status, priority, updated_at FROM todos WHERE session_id = ? ORDER BY position",
+            (session_id,),
+        ).fetchall()
+        return [self._row_to_todo(row) for row in rows]
+
+    def todo_count(self, session_id: str) -> int:
+        """Return the number of todos stored for *session_id*."""
+        return int(self._db.execute("SELECT COUNT(*) FROM todos WHERE session_id = ?", (session_id,)).fetchone()[0])
+
+    def clear_todos(self, session_id: str) -> int:
+        """Delete all todos for *session_id* and return the number removed."""
+        with self._db:
+            cur = self._db.execute("DELETE FROM todos WHERE session_id = ?", (session_id,))
+            self._db.execute(
+                "UPDATE sessions SET todos_version = COALESCE(todos_version, 0) + 1 WHERE session_id = ?",
+                (session_id,),
+            )
+        if session_id in self.sessions:
+            self.sessions[session_id]["todos_version"] = int(self.sessions[session_id].get("todos_version", 0)) + 1
+        return int(cur.rowcount)
+
+    def add_todo(
+        self,
+        session_id: str,
+        content: str,
+        status: str = "pending",
+        priority: str = "medium",
+        expected_version: int | None = None,
+    ) -> tuple[TodoInfo | None, int | None]:
+        """Append a todo to the end of the session list and return it with new version."""
+        info = self.sessions.get(session_id)
+        if info is None:
+            return None, None
+        current_version = int(info.get("todos_version", 0))
+        if expected_version is not None and expected_version != current_version:
+            return None, None
+        todo_id = uuid.uuid4().hex[:12]
+        updated_at = self._now_iso()
+        position_row = self._db.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM todos WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        position = int(position_row[0])
+        new_version = current_version + 1
+        todo = TodoInfo(
+            todo_id=todo_id,
+            content=content.strip(),
+            status=status.strip() or "pending",
+            priority=priority.strip() or "medium",
+            updated_at=updated_at,
+        )
+        with self._db:
+            self._db.execute(
+                "INSERT INTO todos"
+                " (session_id, position, todo_id, content, status, priority, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, position, todo_id, todo["content"], todo["status"], todo["priority"], updated_at),
+            )
+            self._db.execute("UPDATE sessions SET todos_version = ? WHERE session_id = ?", (new_version, session_id))
+        info["todos_version"] = new_version
+        return todo, new_version
+
+    def update_todo(
+        self,
+        session_id: str,
+        todo_id: str,
+        *,
+        content: str | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        expected_version: int | None = None,
+    ) -> tuple[TodoInfo | None, int | None]:
+        """Update one todo item by id and return it with the new version."""
+        info = self.sessions.get(session_id)
+        if info is None:
+            return None, None
+        current_version = int(info.get("todos_version", 0))
+        if expected_version is not None and expected_version != current_version:
+            return None, None
+        row = self._db.execute(
+            "SELECT todo_id, content, status, priority, updated_at FROM todos WHERE session_id = ? AND todo_id = ?",
+            (session_id, todo_id),
+        ).fetchone()
+        if row is None:
+            return None, None
+        current = self._row_to_todo(row)
+        updated = TodoInfo(
+            todo_id=current["todo_id"],
+            content=content.strip() if content is not None else current["content"],
+            status=status.strip() if status is not None else current["status"],
+            priority=priority.strip() if priority is not None else current["priority"],
+            updated_at=self._now_iso(),
+        )
+        new_version = current_version + 1
+        with self._db:
+            self._db.execute(
+                "UPDATE todos SET content = ?, status = ?, priority = ?, updated_at = ?"
+                " WHERE session_id = ? AND todo_id = ?",
+                (
+                    updated["content"],
+                    updated["status"],
+                    updated["priority"],
+                    updated["updated_at"],
+                    session_id,
+                    todo_id,
+                ),
+            )
+            self._db.execute("UPDATE sessions SET todos_version = ? WHERE session_id = ?", (new_version, session_id))
+        info["todos_version"] = new_version
+        return updated, new_version
+
+    def remove_todo(
+        self, session_id: str, todo_id: str, expected_version: int | None = None
+    ) -> tuple[bool, int | None]:
+        """Remove one todo item by id and compact positions."""
+        info = self.sessions.get(session_id)
+        if info is None:
+            return False, None
+        current_version = int(info.get("todos_version", 0))
+        if expected_version is not None and expected_version != current_version:
+            return False, None
+        row = self._db.execute(
+            "SELECT position FROM todos WHERE session_id = ? AND todo_id = ?",
+            (session_id, todo_id),
+        ).fetchone()
+        if row is None:
+            return False, None
+        position = int(row[0])
+        new_version = current_version + 1
+        with self._db:
+            self._db.execute("DELETE FROM todos WHERE session_id = ? AND todo_id = ?", (session_id, todo_id))
+            self._db.execute(
+                "UPDATE todos SET position = position - 1 WHERE session_id = ? AND position > ?",
+                (session_id, position),
+            )
+            self._db.execute("UPDATE sessions SET todos_version = ? WHERE session_id = ?", (new_version, session_id))
+        info["todos_version"] = new_version
+        return True, new_version
 
     def close(self) -> None:
         """Close the database connection."""

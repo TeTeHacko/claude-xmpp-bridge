@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -262,6 +263,105 @@ def test_cleanup_stale_file_locks_removes_only_stale(db_path):
         assert len(removed) == 1
         assert removed[0]["filepath"] == "/tmp/stale.py"
         assert [lock["filepath"] for lock in reg.list_file_locks()] == ["/tmp/live.py"]
+    finally:
+        reg.close()
+
+
+def test_cleanup_stale_file_locks_respects_project_filter(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg._db.execute(
+            "INSERT INTO file_locks (filepath, session_id, project, reason, locked_at) VALUES (?, ?, ?, ?, ?)",
+            ("/tmp/stale-a.py", "stale-a", "/proj/a", None, "2026-03-11T01:00:00+01:00"),
+        )
+        reg._db.execute(
+            "INSERT INTO file_locks (filepath, session_id, project, reason, locked_at) VALUES (?, ?, ?, ?, ?)",
+            ("/tmp/stale-b.py", "stale-b", "/proj/b", None, "2026-03-11T01:00:01+01:00"),
+        )
+        reg._db.commit()
+        removed = reg.cleanup_stale_file_locks(project="/proj/a")
+        assert [lock["filepath"] for lock in removed] == ["/tmp/stale-a.py"]
+        assert [lock["filepath"] for lock in reg.list_file_locks()] == ["/tmp/stale-b.py"]
+    finally:
+        reg.close()
+
+
+def test_file_lock_normalizes_equivalent_paths(db_path, tmp_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("s1", "", "", str(tmp_path))
+        reg.register("s2", "", "", str(tmp_path))
+        file_path = tmp_path / "dir" / "a.py"
+        rel_path = tmp_path / "dir" / "." / "a.py"
+        acquired, lock, _ = reg.acquire_file_lock("s1", str(file_path), str(tmp_path))
+        assert acquired is True
+        acquired2, lock2, _ = reg.acquire_file_lock("s2", str(rel_path), str(tmp_path))
+        assert acquired2 is False
+        assert lock2["session_id"] == "s1"
+        assert lock["filepath"] == str(Path(file_path).resolve(strict=False))
+    finally:
+        reg.close()
+
+
+def test_replace_and_list_todos(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("s1", "", "", "/proj/1")
+        reg.replace_todos(
+            "s1",
+            [
+                {"content": "first", "status": "pending", "priority": "high"},
+                {"content": "second", "status": "completed", "priority": "low"},
+            ],
+        )
+        todos = reg.list_todos("s1")
+        assert [todo["content"] for todo in todos] == ["first", "second"]
+        assert todos[0]["status"] == "pending"
+        assert todos[1]["priority"] == "low"
+        assert reg.get("s1")["todos_version"] == 1
+    finally:
+        reg.close()
+
+
+def test_replace_todos_overwrites_previous_list(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("s1", "", "", "/proj/1")
+        reg.replace_todos("s1", [{"content": "first", "status": "pending", "priority": "high"}])
+        reg.replace_todos("s1", [{"content": "only", "status": "in_progress", "priority": "medium"}])
+        todos = reg.list_todos("s1")
+        assert len(todos) == 1
+        assert todos[0]["content"] == "only"
+        assert reg.todo_count("s1") == 1
+        assert reg.get("s1")["todos_version"] == 2
+    finally:
+        reg.close()
+
+
+def test_replace_todos_expected_version_conflict(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("s1", "", "", "/proj/1")
+        version1 = reg.replace_todos("s1", [{"content": "first", "status": "pending", "priority": "high"}])
+        assert version1 == 1
+        version2 = reg.replace_todos(
+            "s1",
+            [{"content": "second", "status": "pending", "priority": "high"}],
+            expected_version=0,
+        )
+        assert version2 is None
+        assert [todo["content"] for todo in reg.list_todos("s1")] == ["first"]
+    finally:
+        reg.close()
+
+
+def test_unregister_clears_todos(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("s1", "", "", "/proj/1")
+        reg.replace_todos("s1", [{"content": "first", "status": "pending", "priority": "high"}])
+        reg.unregister("s1")
+        assert reg.list_todos("s1") == []
     finally:
         reg.close()
 

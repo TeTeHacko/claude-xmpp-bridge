@@ -213,6 +213,78 @@ class BridgeMCPServer:
             return server._tool_list_sessions()
 
         @mcp.tool()
+        async def get_session_context(session_id: str) -> dict[str, Any]:
+            """Return the current coordination context for one session.
+
+            Includes session metadata, inbox/todo/lock counts, current todo list,
+            and bridge-native file locks held by the session.
+            """
+            return server._tool_get_session_context(session_id=session_id)
+
+        @mcp.tool()
+        async def list_todos(session_id: str) -> list[dict[str, Any]]:
+            """Return the stored todo list for one session."""
+            return server._tool_list_todos(session_id=session_id)
+
+        @mcp.tool()
+        async def replace_todos(
+            session_id: str, todos: list[dict[str, Any]], expected_version: int | None = None
+        ) -> dict[str, Any]:
+            """Replace the stored todo list for one session.
+
+            If ``expected_version`` is provided, the update only succeeds when it
+            matches the current todo version for that session.
+            """
+            return server._tool_replace_todos(
+                session_id=session_id, todos=todos, expected_version=expected_version
+            )
+
+        @mcp.tool()
+        async def add_todo(
+            session_id: str,
+            content: str,
+            status: str = "pending",
+            priority: str = "medium",
+            expected_version: int | None = None,
+        ) -> dict[str, Any]:
+            """Append one todo item to a session todo list."""
+            return server._tool_add_todo(
+                session_id=session_id,
+                content=content,
+                status=status,
+                priority=priority,
+                expected_version=expected_version,
+            )
+
+        @mcp.tool()
+        async def update_todo(
+            session_id: str,
+            todo_id: str,
+            content: str | None = None,
+            status: str | None = None,
+            priority: str | None = None,
+            expected_version: int | None = None,
+        ) -> dict[str, Any]:
+            """Update one todo item by id."""
+            return server._tool_update_todo(
+                session_id=session_id,
+                todo_id=todo_id,
+                content=content,
+                status=status,
+                priority=priority,
+                expected_version=expected_version,
+            )
+
+        @mcp.tool()
+        async def remove_todo(session_id: str, todo_id: str, expected_version: int | None = None) -> dict[str, Any]:
+            """Remove one todo item by id."""
+            return server._tool_remove_todo(
+                session_id=session_id,
+                todo_id=todo_id,
+                expected_version=expected_version,
+            )
+
+        @mcp.tool()
         async def list_file_locks(project: str = "", include_stale: bool = True) -> list[dict[str, Any]]:
             """List file lock hints from ``~/.claude/working``.
 
@@ -366,20 +438,14 @@ class BridgeMCPServer:
         )
 
         if nudge:
-            # nudge=True: store in inbox + send CR (preferred for inter-agent messaging)
-            if not target_info["backend"]:
-                bridge.audit.log(
-                    "MCP_SEND",
-                    message_id=message_id,
-                    to_session_id=to,
-                    nudge=True,
-                    ok=False,
-                    reason="no_backend",
-                    message=message[:100],
-                )
-                return bridge.messages.mcp_send_no_backend.format(project=self._short_path(target_info["project"]))
-
-            ok = await bridge._nudge_session(to, target_info, wrapped_message)
+            # nudge=True: prefer inbox + CR nudge for interactive sessions,
+            # but still queue for backend-less sessions so MCP-only agents can
+            # pick the message up on their next poll.
+            if target_info["backend"]:
+                ok = await bridge._nudge_session(to, target_info, wrapped_message)
+            else:
+                self.enqueue(to, wrapped_message)
+                ok = True
             bridge._xmpp_send(
                 json.dumps(
                     {
@@ -399,11 +465,13 @@ class BridgeMCPServer:
                 message_id=message_id,
                 to_session_id=to,
                 nudge=True,
+                backend=target_info.get("backend") or "none",
                 ok=ok,
                 message=message[:100],
             )
             if ok:
-                return bridge.messages.mcp_send_ok.format(target_prefix=target_prefix) + f" [id:{message_id}] (nudge)"
+                template = bridge.messages.mcp_send_ok if target_info["backend"] else bridge.messages.mcp_send_queued
+                return template.format(target_prefix=target_prefix) + f" [id:{message_id}] (nudge)"
             else:
                 return bridge.messages.mcp_send_failed.format(project=self._short_path(target_info["project"]))
 
@@ -498,7 +566,7 @@ class BridgeMCPServer:
         targets = {
             sid: info
             for sid, info in bridge.registry.sessions.items()
-            if sid != sender_session_id and info.get("backend")
+            if sid != sender_session_id and (nudge or info.get("backend"))
         }
 
         if not targets:
@@ -519,9 +587,13 @@ class BridgeMCPServer:
         )
 
         if nudge:
-            results = await asyncio.gather(
-                *(bridge._nudge_session(sid, info, wrapped_message) for sid, info in targets.items()),
-            )
+            results: list[bool] = []
+            for sid, info in targets.items():
+                if info.get("backend"):
+                    results.append(await bridge._nudge_session(sid, info, wrapped_message))
+                else:
+                    self.enqueue(sid, wrapped_message)
+                    results.append(True)
         else:
             results = await asyncio.gather(
                 *(bridge._stuff_to_session(sid, info, wrapped_message) for sid, info in targets.items()),
@@ -601,49 +673,188 @@ class BridgeMCPServer:
         )
         return {"ok": True, "released": released}
 
+    def _tool_list_todos(self, *, session_id: str) -> list[dict[str, Any]]:
+        """Implementation of ``list_todos``."""
+        bridge = self._bridge
+        if bridge is None:
+            return []
+        return [dict(todo) for todo in bridge.registry.list_todos(session_id)]
+
+    def _tool_replace_todos(
+        self, *, session_id: str, todos: list[dict[str, Any]], expected_version: int | None = None
+    ) -> dict[str, Any]:
+        """Implementation of ``replace_todos``."""
+        bridge = self._bridge
+        if bridge is None:
+            return {"ok": False, "error": "bridge not initialised"}
+        info = bridge.registry.get(session_id)
+        if info is None:
+            return {"ok": False, "error": f"unknown session_id: {session_id}"}
+        new_version = bridge.registry.replace_todos(session_id, todos, expected_version=expected_version)
+        if new_version is None:
+            return {
+                "ok": False,
+                "error": "todo version conflict",
+                "current_version": info.get("todos_version", 0),
+            }
+        bridge.audit.log(
+            "MCP_TODOS_REPLACE",
+            session_id=session_id,
+            count=len(todos),
+            version=new_version,
+            expected_version=expected_version,
+        )
+        return {"ok": True, "count": len(todos), "version": new_version}
+
+    def _tool_add_todo(
+        self,
+        *,
+        session_id: str,
+        content: str,
+        status: str = "pending",
+        priority: str = "medium",
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Implementation of ``add_todo``."""
+        bridge = self._bridge
+        if bridge is None:
+            return {"ok": False, "error": "bridge not initialised"}
+        info = bridge.registry.get(session_id)
+        if info is None:
+            return {"ok": False, "error": f"unknown session_id: {session_id}"}
+        todo, version = bridge.registry.add_todo(
+            session_id,
+            content,
+            status=status,
+            priority=priority,
+            expected_version=expected_version,
+        )
+        if todo is None or version is None:
+            return {
+                "ok": False,
+                "error": "todo version conflict",
+                "current_version": info.get("todos_version", 0),
+            }
+        bridge.audit.log(
+            "MCP_TODO_ADD",
+            session_id=session_id,
+            todo_id=todo["todo_id"],
+            version=version,
+            expected_version=expected_version,
+        )
+        return {"ok": True, "todo": dict(todo), "version": version}
+
+    def _tool_update_todo(
+        self,
+        *,
+        session_id: str,
+        todo_id: str,
+        content: str | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Implementation of ``update_todo``."""
+        bridge = self._bridge
+        if bridge is None:
+            return {"ok": False, "error": "bridge not initialised"}
+        info = bridge.registry.get(session_id)
+        if info is None:
+            return {"ok": False, "error": f"unknown session_id: {session_id}"}
+        todo, version = bridge.registry.update_todo(
+            session_id,
+            todo_id,
+            content=content,
+            status=status,
+            priority=priority,
+            expected_version=expected_version,
+        )
+        if todo is None or version is None:
+            if expected_version is not None and expected_version != info.get("todos_version", 0):
+                return {
+                    "ok": False,
+                    "error": "todo version conflict",
+                    "current_version": info.get("todos_version", 0),
+                }
+            return {"ok": False, "error": f"todo not found: {todo_id}"}
+        bridge.audit.log(
+            "MCP_TODO_UPDATE",
+            session_id=session_id,
+            todo_id=todo_id,
+            version=version,
+            expected_version=expected_version,
+        )
+        return {"ok": True, "todo": dict(todo), "version": version}
+
+    def _tool_remove_todo(
+        self, *, session_id: str, todo_id: str, expected_version: int | None = None
+    ) -> dict[str, Any]:
+        """Implementation of ``remove_todo``."""
+        bridge = self._bridge
+        if bridge is None:
+            return {"ok": False, "error": "bridge not initialised"}
+        info = bridge.registry.get(session_id)
+        if info is None:
+            return {"ok": False, "error": f"unknown session_id: {session_id}"}
+        removed, version = bridge.registry.remove_todo(session_id, todo_id, expected_version=expected_version)
+        if version is None:
+            if expected_version is not None and expected_version != info.get("todos_version", 0):
+                return {
+                    "ok": False,
+                    "error": "todo version conflict",
+                    "current_version": info.get("todos_version", 0),
+                }
+            return {"ok": False, "error": f"todo not found: {todo_id}"}
+        bridge.audit.log(
+            "MCP_TODO_REMOVE",
+            session_id=session_id,
+            todo_id=todo_id,
+            removed=removed,
+            version=version,
+            expected_version=expected_version,
+        )
+        return {"ok": True, "removed": removed, "version": version}
+
+    def _tool_get_session_context(self, *, session_id: str) -> dict[str, Any]:
+        """Implementation of ``get_session_context``."""
+        bridge = self._bridge
+        if bridge is None:
+            return {"ok": False, "error": "bridge not initialised"}
+        info = bridge.registry.get(session_id)
+        if info is None:
+            return {"ok": False, "error": f"unknown session_id: {session_id}"}
+        return bridge._session_context_payload(session_id, info, normalize_empty=True)
+
     def _tool_list_file_locks(self, *, project: str = "", include_stale: bool = True) -> list[dict[str, Any]]:
         """Implementation of ``list_file_locks``."""
         bridge = self._bridge
-        active_sessions = set(bridge.registry.sessions) if bridge is not None else set()
-        locks: list[dict[str, Any]] = []
-        if bridge is not None:
-            for raw_lock in bridge.registry.list_file_locks():
-                if not self._project_matches(raw_lock["project"], raw_lock["filepath"], project):
-                    continue
-                locks.append(
-                    {
-                        **dict(raw_lock),
-                        "stale": raw_lock["session_id"] not in active_sessions,
-                        "source": "bridge",
-                    }
-                )
-        locks.extend(self._read_file_locks(project=project))
-        if not include_stale:
-            locks = [lock for lock in locks if not lock["stale"]]
-        for lock in locks:
-            lock.pop("lockfile", None)
-        locks.sort(key=lambda item: (item["locked_at"], item["filepath"], item.get("source", "")))
-        return locks
+        if bridge is None:
+            locks = self._read_file_locks(project=project)
+            if not include_stale:
+                locks = [lock for lock in locks if not lock["stale"]]
+            for lock in locks:
+                lock.pop("lockfile", None)
+            locks.sort(key=lambda item: (item["locked_at"], item["filepath"], item.get("source", "")))
+            return locks
+        return bridge._list_file_lock_payloads(project=project, include_stale=include_stale)
 
     def _tool_cleanup_stale_locks(self, *, project: str = "") -> dict[str, Any]:
         """Implementation of ``cleanup_stale_locks``."""
         removed: list[dict[str, Any]] = []
         bridge = self._bridge
         if bridge is not None:
-            for raw_lock in bridge.registry.cleanup_stale_file_locks():
-                if not self._project_matches(raw_lock["project"], raw_lock["filepath"], project):
+            removed = bridge._cleanup_stale_lock_payloads(project=project)
+        else:
+            for lock in self._read_file_locks(project=project):
+                if not lock["stale"]:
                     continue
-                removed.append({**dict(raw_lock), "stale": True, "source": "bridge"})
-        for lock in self._read_file_locks(project=project):
-            if not lock["stale"]:
-                continue
-            lockfile = lock.get("lockfile")
-            if isinstance(lockfile, str):
-                with contextlib.suppress(OSError):
-                    Path(lockfile).unlink()
-            result = dict(lock)
-            result.pop("lockfile", None)
-            removed.append(result)
+                lockfile = lock.get("lockfile")
+                if isinstance(lockfile, str):
+                    with contextlib.suppress(OSError):
+                        Path(lockfile).unlink()
+                result = dict(lock)
+                result.pop("lockfile", None)
+                removed.append(result)
 
         if bridge is not None and removed:
             bridge.audit.log(
@@ -674,16 +885,5 @@ class BridgeMCPServer:
             return []
         result = []
         for sid, info in bridge.registry.sessions.items():
-            result.append(
-                {
-                    "session_id": sid,
-                    "project": info["project"],
-                    "backend": info.get("backend") or "null",
-                    "source": info.get("source") or "",
-                    "window": info.get("window") or "",
-                    "sty": info.get("sty") or "",
-                    "plugin_version": info.get("plugin_version") or "",
-                    "agent_state": info.get("agent_state") or "",
-                }
-            )
+            result.append(bridge._session_entry(sid, info, normalize_empty=True))
         return result

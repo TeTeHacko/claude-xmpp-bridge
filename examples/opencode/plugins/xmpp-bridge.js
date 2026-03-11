@@ -47,7 +47,20 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.42"
+  const PLUGIN_VERSION = "0.7.43"
+  const pluginRef = (() => {
+    try {
+      // eslint-disable-next-line no-undef
+      const fs = require("fs")
+      // eslint-disable-next-line no-undef
+      const crypto = require("crypto")
+      const selfPath = import.meta.path ?? new URL(import.meta.url).pathname
+      const hash = crypto.createHash("sha1").update(fs.readFileSync(selfPath)).digest("hex").slice(0, 7)
+      return `${PLUGIN_VERSION}+${hash}`
+    } catch (_) {
+      return PLUGIN_VERSION
+    }
+  })()
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
@@ -520,7 +533,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     project:        projectDir ?? directory,
     backend:        BACKEND,
     source:         "opencode",
-    plugin_version: PLUGIN_VERSION,
+    plugin_version: pluginRef,
   })
 
   // ---------------------------------------------------------------------------
