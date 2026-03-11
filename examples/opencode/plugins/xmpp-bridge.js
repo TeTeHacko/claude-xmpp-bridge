@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.50"
+  const PLUGIN_VERSION = "0.8.0"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -105,7 +105,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         bridgeDisabled = true
         stopActiveBridgeTimers()
         if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null }
-        await dbg("bridge missing at startup/runtime; switching plugin to title-only mode")
+        await warn("bridge missing at startup/runtime; switching plugin to title-only mode", "bridge-disabled")
       }
     } else if (res.exitCode === 0) {
       clearBridgeUnavailable()
@@ -241,7 +241,22 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Funguje jen pro screen sessions (STY musí být nastaveno).
   // Guard: `polling` flag zabrání concurrent spuštění (session.idle + interval).
   // ---------------------------------------------------------------------------
-  const dbg = (msg) => client.app.log({ body: { service: "xmpp-bridge", level: "info", message: msg } }).catch(() => {})
+  const LOG_THROTTLE_MS = parseInt(process.env.XMPP_BRIDGE_LOG_THROTTLE_MS ?? "30000")
+  const lastLogAt = new Map()
+
+  const logPlugin = (level, msg, key = "") => {
+    if (key) {
+      const now = Date.now()
+      const prev = lastLogAt.get(key) ?? 0
+      if ((now - prev) < LOG_THROTTLE_MS) return Promise.resolve()
+      lastLogAt.set(key, now)
+    }
+    return client.app.log({ body: { service: "xmpp-bridge", level, message: msg } }).catch(() => {})
+  }
+
+  const dbg = (msg, key = "") => logPlugin("info", msg, key)
+  const warn = (msg, key = "") => logPlugin("warn", msg, key)
+  const errlog = (msg, key = "") => logPlugin("error", msg, key)
 
   // ---------------------------------------------------------------------------
   // rawRelay(): posílá zprávu přes claude-xmpp-client relay BEZ bun shell.
@@ -284,7 +299,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
   const markBridgeUnavailable = async (reason) => {
     bridgeUnavailableUntil = Date.now() + BRIDGE_RETRY_MS
-    await dbg(`bridge unavailable (${reason}); suppressing bridge calls for ${BRIDGE_RETRY_MS} ms`)
+    await warn(
+      `bridge unavailable (${reason}); suppressing bridge calls for ${BRIDGE_RETRY_MS} ms`,
+      `bridge-unavailable:${reason}`
+    )
   }
 
   const clearBridgeUnavailable = () => {
@@ -300,7 +318,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     if (recoveryTimer) return
     recoveryTimer = setInterval(async () => {
       if (!desiredBridgeSessionID || registeredSessionID || bridgeSuppressed()) return
-      await dbg("bridge recovery tick for " + desiredBridgeSessionID)
+      await dbg("bridge recovery tick for " + desiredBridgeSessionID, "bridge-recovery-tick")
       const regRes = await runBridgeClient("register", makeRegPayload(desiredBridgeSessionID, desiredProjectDir))
       if (regRes.exitCode === 0) {
         registeredSessionID = desiredBridgeSessionID
@@ -339,7 +357,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const msg = messageBuffer.shift()
         const relayRes = await rawRelay(registeredSessionID, msg)
         if (relayRes.exitCode !== 0 && relayRes.exitCode !== 125 && relayRes.exitCode !== 127 && !isSessionNotFoundError(relayRes)) {
-          await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
+            await warn(
+              "relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200),
+              "relay-failed"
+            )
         }
         return
       }
@@ -354,7 +375,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         }),
       }).catch(async (e) => {
         await markBridgeUnavailable("mcp-init")
-        await dbg("MCP init fetch error: " + e)
+        await errlog("MCP init fetch error: " + e, "mcp-init-error")
         return null
       })
 
@@ -383,7 +404,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         }),
       }).catch(async (e) => {
         await markBridgeUnavailable("mcp-tools-call")
-        await dbg("MCP tools/call fetch error: " + e)
+        await errlog("MCP tools/call fetch error: " + e, "mcp-tools-call-error")
         return null
       })
 
@@ -406,14 +427,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
             // Inject into session via raw exec (ne bun shell — chrání metaznaky ve zprávách)
             const relayRes = await rawRelay(registeredSessionID, first)
             if (relayRes.exitCode !== 0 && relayRes.exitCode !== 125 && relayRes.exitCode !== 127 && !isSessionNotFoundError(relayRes)) {
-              await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
+              await warn(
+                "relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200),
+                "relay-failed"
+              )
             }
           }
         }
       }
     } catch (err) {
       await markBridgeUnavailable("mcp-poll")
-      await dbg("MCP poll error: " + err)
+      await errlog("MCP poll error: " + err, "mcp-poll-error")
     } finally {
       polling = false
     }
@@ -569,7 +593,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     // nebo exit code nenulový (fallback)
     const failed = (res.stderr && res.stderr.includes("Error:")) || (res.exitCode !== null && res.exitCode !== 0)
     if (failed && res.exitCode !== 125 && !isSessionNotFoundError(res) && !isBridgeUnavailableError(res)) {
-      await dbg("reportState(" + state + ") exit=" + res.exitCode + " failed=" + failed + (res.stderr ? " stderr=" + res.stderr.slice(0, 100) : ""))
+      await warn(
+        "reportState(" + state + ") exit=" + res.exitCode + " failed=" + failed + (res.stderr ? " stderr=" + res.stderr.slice(0, 100) : ""),
+        `report-state-failed:${state}`
+      )
     }
     return failed
   }
@@ -600,7 +627,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       registeredSessionID = desiredBridgeSessionID
       process.env.BRIDGE_SESSION_ID = desiredBridgeSessionID
     } else if (regRes.exitCode !== 125 && !isBridgeUnavailableError(regRes)) {
-      await dbg("register result: exit=" + regRes.exitCode + (regRes.stderr ? " stderr=" + regRes.stderr.slice(0, 100) : ""))
+      await warn(
+        "register result: exit=" + regRes.exitCode + (regRes.stderr ? " stderr=" + regRes.stderr.slice(0, 100) : ""),
+        "register-failed"
+      )
     }
   }
 

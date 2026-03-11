@@ -156,6 +156,15 @@ class TestPluginClientBinFallback:
         assert "BRIDGE_RECOVERY_POLL_MS" in text, "plugin must define a slow recovery poll interval"
         assert "ensureRecoveryTimer" in text, "plugin must define a degraded-mode recovery timer"
         assert "bridgeDisabled" in text, "plugin must support full bridge-disabled mode"
+        assert "client.app.log" in text, "plugin should use structured OpenCode logging instead of raw terminal output"
+
+    def test_plugin_uses_structured_log_levels_and_throttling(self):
+        text = _plugin_text()
+        assert "const logPlugin = (level, msg, key = \"\") =>" in text, "plugin must centralize logging"
+        assert "const warn = (msg, key = \"\") => logPlugin(\"warn\", msg, key)" in text
+        assert "const errlog = (msg, key = \"\") => logPlugin(\"error\", msg, key)" in text
+        assert "const lastLogAt = new Map()" in text, "plugin logs should be throttled by key"
+        assert "XMPP_BRIDGE_LOG_THROTTLE_MS" in text, "plugin must expose log throttle env var"
 
     def test_runBridgeClient_short_circuits_when_bridge_disabled(self):
         text = _plugin_text()

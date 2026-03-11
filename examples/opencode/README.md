@@ -96,6 +96,10 @@ plugin to switch permanently to title-only mode when bridge startup fails, set:
 export XMPP_BRIDGE_DISABLE_WHEN_MISSING=1
 ```
 
+Bridge/plugin diagnostics are written via OpenCode's structured plugin log API,
+not dumped directly into the terminal. Repeated warning/error entries with the
+same key are throttled by `XMPP_BRIDGE_LOG_THROTTLE_MS` (default: `30000`).
+
 ### Agent circles
 
 Each circle colour matches the agent's colour in the OpenCode TUI:
