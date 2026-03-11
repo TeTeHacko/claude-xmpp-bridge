@@ -164,6 +164,9 @@ inbox via `receive_messages(session_id)`. The receiving agent can then call
 `reply_to_last_sender(session_id, message)` instead of manually copying the
 session ID out of the relay metadata.
 
+The same reply flow is also available over the local bridge socket/CLI as
+`claude-xmpp-client reply-last SESSION_ID MESSAGE`.
+
 ## Coexistence with Claude Code
 
 Claude Code and OpenCode sessions in the **same project directory coexist** — the bridge tracks them separately by `source`. Neither tool's session evicts the other's.

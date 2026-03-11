@@ -4464,6 +4464,58 @@ class TestStateCommand:
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_get_context_includes_last_seen_and_idle_seconds(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "sty", "1", "/proj", backend="screen")
+        with patch("time.time", return_value=200.0):
+            bridge.registry.update_state("s1", "idle")
+        with patch("time.time", return_value=212.9):
+            result = bridge._handle_get_context({"session_id": "s1"})
+
+        assert result["ok"] is True
+        assert result["session"]["last_seen"] == 200.0
+        assert result["session"]["idle_seconds"] == 12
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_list_includes_last_agent_sender(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "sty", "1", "/proj-a", backend="screen")
+        bridge.registry.set_last_agent_sender("s1", "s2")
+
+        result = bridge._handle_list({})
+
+        assert result["ok"] is True
+        assert result["sessions"][0]["last_agent_sender"] == "s2"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_handle_list_includes_idle_seconds(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "sty", "1", "/proj-a", backend="screen")
+        with patch("time.time", return_value=100.0):
+            bridge.registry.update_state("s1", "idle")
+        with patch("time.time", return_value=109.4):
+            result = bridge._handle_list({})
+
+        assert result["ok"] is True
+        assert result["sessions"][0]["last_seen"] == 100.0
+        assert result["sessions"][0]["idle_seconds"] == 9
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     def test_handle_add_todo_returns_version(self, MockXMPP, tmp_path):
         conn = MagicMock()
         conn.on_message.side_effect = lambda cb: None
@@ -4496,6 +4548,37 @@ class TestStateCommand:
         bridge = XMPPBridge(_make_config(tmp_path))
         result = bridge._handle_remove_todo({"session_id": "missing", "todo_id": "todo-1"})
         assert result == {"error": "unknown session_id: missing"}
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_handle_reply_to_last_sender_returns_target(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "sty", "1", "/proj-a", backend="screen")
+        bridge.registry.register("s2", "sty", "2", "/proj-b", backend="screen")
+        bridge.registry.set_last_agent_sender("s1", "s2")
+        bridge._nudge_session = AsyncMock(return_value=True)
+
+        result = await bridge._handle_reply_to_last_sender({"session_id": "s1", "message": "ack", "nudge": True})
+
+        assert result == {"ok": True, "to": "s2", "mode": "nudge"}
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_handle_reply_to_last_sender_without_known_sender_errors(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("s1", "sty", "1", "/proj-a", backend="screen")
+
+        result = await bridge._handle_reply_to_last_sender({"session_id": "s1", "message": "ack", "nudge": True})
+
+        assert result == {"error": "no known sender to reply to for s1"}
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")

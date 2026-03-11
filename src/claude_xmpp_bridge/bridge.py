@@ -805,6 +805,8 @@ class XMPPBridge:
             response = self._handle_update_todo(req)
         elif cmd == "remove_todo":
             response = self._handle_remove_todo(req)
+        elif cmd == "reply_to_last_sender":
+            response = await self._handle_reply_to_last_sender(req)
         elif cmd == "list_file_locks":
             response = self._handle_list_file_locks(req)
         elif cmd == "acquire_file_lock":
@@ -1266,6 +1268,13 @@ class XMPPBridge:
             "lock_count": self.registry.file_lock_count(session_id),
         }
 
+    @staticmethod
+    def _idle_seconds(info: SessionInfo) -> int | None:
+        last_seen = info.get("last_seen")
+        if last_seen is None:
+            return None
+        return max(0, int(time.time() - last_seen))
+
     def _session_entry(
         self,
         session_id: str,
@@ -1285,7 +1294,12 @@ class XMPPBridge:
             "plugin_version": (info.get("plugin_version") or "") if normalize_empty else info.get("plugin_version"),
             "agent_state": (info.get("agent_state") or "") if normalize_empty else info.get("agent_state"),
             "agent_mode": (info.get("agent_mode") or "") if normalize_empty else info.get("agent_mode"),
+            "last_seen": info.get("last_seen"),
+            "idle_seconds": self._idle_seconds(info),
             "todos_version": info.get("todos_version", 0),
+            "last_agent_sender": (
+                (info.get("last_agent_sender") or "") if normalize_empty else info.get("last_agent_sender")
+            ),
             **self._session_counts(session_id),
         }
         if index is not None:
@@ -1463,6 +1477,81 @@ class XMPPBridge:
                 return {"error": "todo version conflict", "current_version": info.get("todos_version", 0)}
             return {"error": f"todo not found: {todo_id}"}
         return {"ok": True, "removed": removed, "version": version}
+
+    async def _handle_reply_to_last_sender(self, req: dict[str, object]) -> dict[str, object]:
+        session_id = str(req.get("session_id", "")).strip()
+        message = str(req.get("message", "")).strip()
+        if not session_id:
+            return {"error": "missing session_id"}
+        if not message:
+            return {"error": "missing message"}
+        info = self.registry.get(session_id)
+        if not info:
+            return {"error": f"unknown session_id: {session_id}"}
+        last_sender = self.registry.get_last_agent_sender(session_id)
+        if not last_sender:
+            return {"error": f"no known sender to reply to for {session_id}"}
+        target_info = self.registry.get(last_sender)
+        if not target_info:
+            return {"error": f"reply target not found: {last_sender}"}
+        nudge = bool(req.get("nudge", True))
+        wrapped_message = format_generated_agent_message(
+            msg_type="relay",
+            message=message,
+            from_session_id=session_id,
+            to_session_id=last_sender,
+            mode="nudge" if nudge else "screen",
+        )
+        if nudge:
+            if target_info.get("backend"):
+                ok = await self._nudge_session(
+                    last_sender,
+                    target_info,
+                    wrapped_message,
+                    from_session=session_id,
+                )
+            else:
+                self._enqueue_for_mcp(last_sender, wrapped_message, from_session=session_id)
+                ok = True
+        else:
+            if not target_info.get("backend"):
+                return {
+                    "error": self.messages.relay_no_backend.format(project=self._short_path(target_info["project"]))
+                }
+            ok = await self._stuff_to_session(last_sender, target_info, wrapped_message)
+        mode = "nudge" if nudge else "screen"
+        if ok:
+            self._xmpp_send(
+                json.dumps(
+                    {
+                        "type": "relay",
+                        "mode": mode,
+                        "from": session_id,
+                        "to": last_sender,
+                        "message": message,
+                        "ts": time.time(),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            self.audit.log(
+                "RELAY_SENT",
+                from_session_id=session_id,
+                to_session_id=last_sender,
+                message=message,
+                message_len=len(message),
+                via="reply_to_last_sender",
+            )
+            return {"ok": True, "to": last_sender, "mode": mode}
+        self.audit.log(
+            "RELAY_FAILED",
+            from_session_id=session_id,
+            to_session_id=last_sender,
+            message=message,
+            message_len=len(message),
+            via="reply_to_last_sender",
+        )
+        return {"error": self.messages.relay_failed.format(project=self._short_path(target_info["project"]))}
 
     def _handle_list_file_locks(self, req: dict[str, object]) -> dict[str, object]:
         project = str(req.get("project", ""))

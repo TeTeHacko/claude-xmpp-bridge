@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.47] - 2026-03-11
+
+### Changed
+- **Session overview now exposes liveness and reply telemetry** — `list`,
+  `list_sessions`, and `get_session_context` now include `last_seen`,
+  derived `idle_seconds`, and `last_agent_sender`, making it easier to spot
+  idle/stuck agents and see the current reply target without an extra lookup.
+
+## [0.7.46] - 2026-03-11
+
+### Added
+- **Socket/CLI parity for reply-to-sender flow** — local bridge clients can now
+  use `reply_to_last_sender` via the socket API and `claude-xmpp-client reply-last`
+  instead of relying on MCP-only access for direct agent replies.
+
 ## [0.7.44] - 2026-03-11
 
 ### Changed

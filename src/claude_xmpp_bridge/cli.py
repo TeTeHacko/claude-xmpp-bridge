@@ -160,6 +160,11 @@ def client_main() -> None:
     p_remove_todo.add_argument("todo_id", help="Todo ID")
     p_remove_todo.add_argument("--expected-version", type=int)
 
+    p_reply_last = sub.add_parser("reply-last", help="Reply to the last remembered agent sender")
+    p_reply_last.add_argument("session_id", help="Your session ID")
+    p_reply_last.add_argument("message", nargs="*", help="Reply text (reads stdin if omitted)")
+    p_reply_last.add_argument("--screen", action="store_true", help="Use direct screen relay instead of nudge")
+
     # locks
     p_list_locks = sub.add_parser("list-locks", help="List file locks as JSON")
     p_list_locks.add_argument("--project", default="")
@@ -359,6 +364,33 @@ def client_main() -> None:
         if args.expected_version is not None:
             remove_req["expected_version"] = args.expected_version
         result = send_to_bridge(remove_req, socket_path)
+        if result and result.get("ok"):
+            print(json.dumps(result))
+        else:
+            _print_bridge_error(result)
+
+    elif args.command == "reply-last":
+        reply_parts: list[str] = args.message or []
+        if reply_parts:
+            message = " ".join(reply_parts)
+        elif not sys.stdin.isatty():
+            message = sys.stdin.read().strip()
+        else:
+            print("Error: no message provided", file=sys.stderr)
+            print("Usage: claude-xmpp-client reply-last SESSION_ID MESSAGE", file=sys.stderr)
+            print("       echo MESSAGE | claude-xmpp-client reply-last SESSION_ID", file=sys.stderr)
+            sys.exit(1)
+        if not message:
+            sys.exit(0)
+        result = send_to_bridge(
+            {
+                "cmd": "reply_to_last_sender",
+                "session_id": args.session_id,
+                "message": message,
+                "nudge": not args.screen,
+            },
+            socket_path,
+        )
         if result and result.get("ok"):
             print(json.dumps(result))
         else:

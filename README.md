@@ -306,6 +306,9 @@ claude-xmpp-client get-context ses_abc123_w4
 # Report agent state (idle / running)
 claude-xmpp-client state '{"session_id":"abc","state":"idle"}'
 
+# Reply to the last remembered agent sender for your session
+claude-xmpp-client reply-last ses_abc123_w4 "ACK"
+
 # List, add, update, remove todos
 claude-xmpp-client list-todos ses_abc123_w4
 claude-xmpp-client replace-todos '{"session_id":"ses_abc123_w4","todos":[{"content":"Refactor parser","status":"pending","priority":"high"}]}'
@@ -330,9 +333,9 @@ The bridge also exposes an HTTP MCP server on port 7878 (streamable-HTTP transpo
 | `send_message(to, message, screen=True, nudge=False, sender_session_id="")` | Deliver a message to a session; `screen=False` enqueues to inbox only; `nudge=True` sends only a CR to wake the agent (message stored in inbox, delivered on next `session.idle`); pass `sender_session_id` so the recipient can reply directly to the originating agent |
 | `broadcast_message(message, sender_session_id)` | Deliver to all sessions except sender |
 | `receive_messages(session_id)` | Drain inbox — returns messages sent to this session |
-| `list_sessions()` | Enumerate all sessions with metadata, state/mode, plugin version, sty/window, and inbox/todo/lock counts |
+| `list_sessions()` | Enumerate all sessions with metadata, state/mode, last_seen/idle_seconds, last_agent_sender, plugin version, sty/window, and inbox/todo/lock counts |
 | `reply_to_last_sender(session_id, message, nudge=True)` | Reply to the last non-null relay sender remembered for this session; the bridge learns it from `receive_messages(session_id)` and sends the reply back agent-to-agent |
-| `get_session_context(session_id)` | Return one session's metadata, todos, bridge-native file locks, and coordination counters, including `todos_version` and `last_agent_sender` |
+| `get_session_context(session_id)` | Return one session's metadata, todos, bridge-native file locks, and coordination counters, including `todos_version`, `last_agent_sender`, `last_seen`, and `idle_seconds` |
 | `list_todos(session_id)` | Return the stored todo list for one session |
 | `replace_todos(session_id, todos, expected_version=None)` | Atomically replace the stored todo list for one session; pass `expected_version` from `get_session_context`/`list_sessions` to reject stale writes |
 | `add_todo(session_id, content, status="pending", priority="medium", expected_version=None)` | Append one todo item and return its `todo_id` and new `todos_version`; optional optimistic-lock version check |

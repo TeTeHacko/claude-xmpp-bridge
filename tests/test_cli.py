@@ -238,6 +238,17 @@ class TestClientSubcommands:
         assert exc_info.value.code == 1
         assert "unknown session_id: sess-1" in capsys.readouterr().err
 
+    def test_reply_last_prints_json(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "reply-last", "sess-1", "hello", "there"])
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {"ok": True, "to": "sess-2", "mode": "nudge"},
+        )
+        client_main()
+        out = capsys.readouterr().out
+        assert '"to": "sess-2"' in out
+        assert '"mode": "nudge"' in out
+
 
 class TestAskMissingMessage:
     """ask without message and with a tty should exit non-zero."""

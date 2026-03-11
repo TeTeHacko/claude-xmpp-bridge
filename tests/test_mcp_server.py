@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -232,7 +233,12 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
             "plugin_version": (info.get("plugin_version") or "") if normalize_empty else info.get("plugin_version"),
             "agent_state": (info.get("agent_state") or "") if normalize_empty else info.get("agent_state"),
             "agent_mode": (info.get("agent_mode") or "") if normalize_empty else info.get("agent_mode"),
+            "last_seen": info.get("last_seen"),
+            "idle_seconds": max(0, int(time.time() - info["last_seen"])) if info.get("last_seen") is not None else None,
             "todos_version": info.get("todos_version", 0),
+            "last_agent_sender": (
+                (info.get("last_agent_sender") or "") if normalize_empty else info.get("last_agent_sender")
+            ),
             **_session_counts(session_id),
         }
         if index is not None:
@@ -707,6 +713,22 @@ class TestListSessionsTool:
         assert result[0]["inbox_count"] == 2
         assert result[0]["todo_count"] == 3
         assert result[0]["lock_count"] == 4
+
+    def test_list_includes_last_agent_sender(self, server: BridgeMCPServer):
+        sessions = {"ses_X": _make_session_info()}
+        server._bridge = _make_bridge(sessions=sessions)
+        server._bridge.registry.set_last_agent_sender("ses_X", "ses_Y")
+        result = server._tool_list_sessions()
+        assert result[0]["last_agent_sender"] == "ses_Y"
+
+    def test_list_includes_last_seen_and_idle_seconds(self, server: BridgeMCPServer):
+        sessions = {"ses_X": _make_session_info()}
+        server._bridge = _make_bridge(sessions=sessions)
+        server._bridge.registry.sessions["ses_X"]["last_seen"] = 100.0
+        with patch("time.time", return_value=108.8):
+            result = server._tool_list_sessions()
+        assert result[0]["last_seen"] == 100.0
+        assert result[0]["idle_seconds"] == 8
 
 
 class TestTodoContextTools:
