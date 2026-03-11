@@ -451,6 +451,8 @@ See [`examples/opencode/`](examples/opencode/) for an OpenCode plugin that provi
 - Sends informative XMPP notification when AI requests permission (`permission.asked`) — approval still happens in the TUI (switch: `ask-enabled`)
 - Reports agent state (`idle`/`running`) to the bridge for `/list` display
 - Polls MCP inbox on `session.idle` and every 30 s — injects pending inter-agent messages into the session
+- Falls back to a quiet degraded mode when the bridge is down — suppresses repeated failed bridge calls during idle events and retries recovery in the background
+- Supports `XMPP_BRIDGE_MODE=title-only` for title/status indicators without any bridge/MCP traffic
 
 Window title traffic-light states:
 
@@ -467,6 +469,8 @@ OpenCode plugin environment variables:
 | `XMPP_BRIDGE_REREG_INTERVAL_MS` | Override periodic re-register interval (default: 90000 ms) |
 | `XMPP_BRIDGE_TITLE_DEBOUNCE_MS` | Debounce Screen title updates to reduce redraw artefacts (default: 750 ms) |
 | `XMPP_BRIDGE_RETRY_MS` | Cooldown after bridge/MCP outages to suppress repeated expected errors (default: 60000 ms) |
+| `XMPP_BRIDGE_MODE` | Set to `title-only` to disable all bridge/MCP traffic and keep only title indicators |
+| `XMPP_BRIDGE_DISABLE_WHEN_MISSING` | Set to `1` to auto-switch into `title-only` mode if bridge startup calls fail |
 
 ### Install
 

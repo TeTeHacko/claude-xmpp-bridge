@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.47"
+  const PLUGIN_VERSION = "0.7.49"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -79,6 +79,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     }
   }
   const CLIENT_BIN = resolveClientBin()
+  const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "auto"
+  const DISABLE_WHEN_MISSING = process.env.XMPP_BRIDGE_DISABLE_WHEN_MISSING === "1"
+  let bridgeDisabled = BRIDGE_MODE === "title-only"
 
   // Wrapper: spustí claude-xmpp-client pouze pokud je dostupný.
   // Tiše vrátí { exitCode: 127 } pokud není — žádný výpis do terminálu.
@@ -93,10 +96,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   const runBridgeClient = async (...args) => {
+    if (bridgeDisabled) return { exitCode: 126, stdout: "", stderr: "bridge disabled" }
     if (bridgeSuppressed()) return { exitCode: 125, stdout: "", stderr: "bridge suppressed" }
     const res = await runClient(...args)
     if (isBridgeUnavailableError(res)) {
       await markBridgeUnavailable(args[0])
+      if (DISABLE_WHEN_MISSING) {
+        bridgeDisabled = true
+        stopActiveBridgeTimers()
+        if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null }
+        await dbg("bridge missing at startup/runtime; switching plugin to title-only mode")
+      }
     } else if (res.exitCode === 0) {
       clearBridgeUnavailable()
     }
@@ -163,10 +173,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Interval 90s — nezávislý na session.idle, zajistí obnovu i pokud agent je long-running.
   // Přepis přes env: XMPP_BRIDGE_REREG_INTERVAL_MS (pro testy nastavit na nízkou hodnotu).
   const REREG_INTERVAL_MS = parseInt(process.env.XMPP_BRIDGE_REREG_INTERVAL_MS ?? "90000")
+  const BRIDGE_RECOVERY_POLL_MS = parseInt(process.env.XMPP_BRIDGE_RECOVERY_POLL_MS ?? "300000")
   const BRIDGE_RETRY_MS = parseInt(process.env.XMPP_BRIDGE_RETRY_MS ?? "60000")
   let isIdle = false
   let pollTimer = null
   let reregTimer = null
+  let recoveryTimer = null
   let polling = false  // guard against concurrent pollInbox calls
   let bridgeUnavailableUntil = 0
   let desiredBridgeSessionID = null
@@ -279,8 +291,46 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     bridgeUnavailableUntil = 0
   }
 
+  const stopActiveBridgeTimers = () => {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+    if (reregTimer) { clearInterval(reregTimer); reregTimer = null }
+  }
+
+  const ensureRecoveryTimer = () => {
+    if (recoveryTimer) return
+    recoveryTimer = setInterval(async () => {
+      if (!desiredBridgeSessionID || registeredSessionID || bridgeSuppressed()) return
+      await dbg("bridge recovery tick for " + desiredBridgeSessionID)
+      const regRes = await runBridgeClient("register", makeRegPayload(desiredBridgeSessionID, desiredProjectDir))
+      if (regRes.exitCode === 0) {
+        registeredSessionID = desiredBridgeSessionID
+        process.env.BRIDGE_SESSION_ID = desiredBridgeSessionID
+        if (CLIENT_BIN) {
+          await $`${process.env.HOME}/claude-home/agent-notify.sh start ${desiredBridgeSessionID} ${desiredProjectDir}`.nothrow()
+        }
+        await reportState(isIdle ? "idle" : "running")
+        if (STY && !pollTimer) {
+          pollTimer = setInterval(async () => {
+            if (isIdle) await pollInbox()
+          }, IDLE_POLL_INTERVAL_MS)
+        }
+        if (!reregTimer) {
+          reregTimer = setInterval(async () => {
+            if (!registeredSessionID) return
+            const failed = await reportState(isIdle ? "idle" : "running")
+            if (failed) {
+              await reregisterIfNeeded(true)
+            }
+          }, REREG_INTERVAL_MS)
+        }
+        clearInterval(recoveryTimer)
+        recoveryTimer = null
+      }
+    }, BRIDGE_RECOVERY_POLL_MS)
+  }
+
   const pollInbox = async () => {
-    if (!registeredSessionID || !STY || polling || bridgeSuppressed()) return
+    if (bridgeDisabled || !registeredSessionID || !STY || polling || bridgeSuppressed()) return
     polling = true
     try {
       // Nejdřív zkusit lokální buffer — pokud tam je zpráva, injektovat ji
@@ -511,6 +561,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // ---------------------------------------------------------------------------
   const reportState = async (state) => {
     if (!registeredSessionID) return true
+    if (bridgeDisabled) return true
     if (bridgeSuppressed()) return true
     const payload = JSON.stringify({ session_id: registeredSessionID, state, mode: agentIcon(currentAgent) })
     const res = await runBridgeClient("state", payload)
@@ -542,6 +593,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Register je idempotentní — bridge zachová agent_state/agent_mode.
   // ---------------------------------------------------------------------------
   const reregisterIfNeeded = async (failed) => {
+    if (bridgeDisabled) return
     if (!failed || !desiredBridgeSessionID || bridgeSuppressed()) return
     const regRes = await runBridgeClient("register", makeRegPayload(desiredBridgeSessionID, desiredProjectDir))
     if (regRes.exitCode === 0) {
@@ -582,6 +634,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // ---------------------------------------------------------------------------
   setImmediate(async () => {
     try {
+      if (bridgeDisabled) return
       const sessionsRes = await client.session.list()
       if (!sessionsRes.data || sessionsRes.data.length === 0) return
 
@@ -633,8 +686,15 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         registeredSessionID = bid
         // Export identity do env — bash tools agenta vidí $BRIDGE_SESSION_ID
         process.env.BRIDGE_SESSION_ID = bid
+      } else {
+        registeredSessionID = null
+        process.env.BRIDGE_SESSION_ID = ""
+        stopActiveBridgeTimers()
+        if (!bridgeDisabled) ensureRecoveryTimer()
       }
-      await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${active.directory}`.nothrow()
+      if (registeredSessionID && CLIENT_BIN) {
+        await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${active.directory}`.nothrow()
+      }
       // Report initial state (agent is idle at startup, mode = planning)
       if (registeredSessionID) await reportState("idle")
 
@@ -681,12 +741,14 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // --- SERVER INSTANCE DISPOSED: OpenCode se ukončuje ---
       if (event.type === "server.instance.disposed") {
         isIdle = false
-        if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-        if (reregTimer) { clearInterval(reregTimer); reregTimer = null }
+        stopActiveBridgeTimers()
+        if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null }
         clearHstatusPulseTimers()
         messageBuffer = []
         if (registeredSessionID) {
-          await $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow()
+          if (CLIENT_BIN) {
+            await $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow()
+          }
           await runBridgeClient("unregister", registeredSessionID)
         }
         clearTitleTimer()
@@ -713,11 +775,22 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const bid = bridgeID(info.id)
         desiredBridgeSessionID = bid
         desiredProjectDir = info.directory
+        if (bridgeDisabled) {
+          registeredSessionID = null
+          process.env.BRIDGE_SESSION_ID = ""
+          return
+        }
         const regRes = await runBridgeClient("register", makeRegPayload(bid, info.directory))
-        await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${info.directory}`.nothrow()
+        if (regRes.exitCode === 0 && CLIENT_BIN) {
+          await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${info.directory}`.nothrow()
+        }
         registeredSessionID = regRes.exitCode === 0 ? bid : null
         ocToBridge.set(info.id, bid)
         process.env.BRIDGE_SESSION_ID = regRes.exitCode === 0 ? bid : ""
+        if (!registeredSessionID && !bridgeDisabled) {
+          stopActiveBridgeTimers()
+          ensureRecoveryTimer()
+        }
         if (registeredSessionID) await reportState("idle")
         return
       }
@@ -727,7 +800,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const info = event.properties.info
         if (info.parentID) return
         const bid = ocToBridge.get(info.id) ?? bridgeID(info.id)
-        await $`${process.env.HOME}/claude-home/agent-notify.sh end ${bid} ${info.directory}`.nothrow()
+        if (CLIENT_BIN) {
+          await $`${process.env.HOME}/claude-home/agent-notify.sh end ${bid} ${info.directory}`.nothrow()
+        }
         await runBridgeClient("unregister", bid)
         ocToBridge.delete(info.id)
         // Resetovat registeredSessionID a zastavit reregTimer — jinak by timer
@@ -737,7 +812,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           process.env.BRIDGE_SESSION_ID = ""
         }
         if (desiredBridgeSessionID === bid) desiredBridgeSessionID = null
-        if (reregTimer) { clearInterval(reregTimer); reregTimer = null }
+        stopActiveBridgeTimers()
+        ensureRecoveryTimer()
         return
       }
 
@@ -756,12 +832,13 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       }
 
       // --- SESSION IDLE: semafor 🟢 + XMPP notifikace + MCP inbox poll ---
-       if (event.type === "session.idle") {
-        isIdle = true
-        // Titulek: zachovat agent ikonu (ukazuje posledního aktivního agenta) + 🟢
-        scheduleTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
-        const stateFailed = await reportState("idle")
-        await reregisterIfNeeded(stateFailed)
+        if (event.type === "session.idle") {
+          isIdle = true
+          // Titulek: zachovat agent ikonu (ukazuje posledního aktivního agenta) + 🟢
+          scheduleTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
+          if (bridgeDisabled) return
+          const stateFailed = await reportState("idle")
+          await reregisterIfNeeded(stateFailed)
 
         const sessionID = event.properties.sessionID
 
@@ -829,12 +906,13 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // OpenCode nečeká na výsledek event handlerů — TUI dialog nelze zavřít
       // z pluginu přes permission.asked event. Posíláme tedy jen notifikaci
       // co se chystá spustit; potvrzení musí jít přes TUI.
-      if (event.type === "permission.asked") {
-        // Titulek: zachovat agent ikonu, přepnout stav na 🔴
-        scheduleTitle(buildTitle("🔴"), buildAscii("AI!", projectName), { immediate: true })
+        if (event.type === "permission.asked") {
+          // Titulek: zachovat agent ikonu, přepnout stav na 🔴
+          scheduleTitle(buildTitle("🔴"), buildAscii("AI!", projectName), { immediate: true })
+          if (bridgeDisabled) return
 
-        const askEnabled =
-          await $`test -f ${process.env.HOME}/.config/xmpp-notify/ask-enabled`.nothrow()
+          const askEnabled =
+            await $`test -f ${process.env.HOME}/.config/xmpp-notify/ask-enabled`.nothrow()
         if (askEnabled.exitCode !== 0) return
 
         const perm = event.properties

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.49] - 2026-03-11
+
+### Added
+- **Title-only OpenCode plugin mode** — set `XMPP_BRIDGE_MODE=title-only` to keep
+  Screen/tmux title indicators while disabling all bridge/MCP traffic.
+- **Auto-disable when bridge is missing** — set
+  `XMPP_BRIDGE_DISABLE_WHEN_MISSING=1` to let the plugin switch permanently into
+  title-only mode when startup bridge calls fail.
+
+## [0.7.48] - 2026-03-11
+
+### Changed
+- **OpenCode plugin now degrades quietly without a bridge** — when the local
+  bridge/MCP server is unavailable, the plugin stops fast polling/re-register
+  loops, suppresses repeated failed bridge calls during idle events, skips helper
+  scripts until registration succeeds, and retries recovery in the background on
+  a slower timer.
+
 ## [0.7.47] - 2026-03-11
 
 ### Changed

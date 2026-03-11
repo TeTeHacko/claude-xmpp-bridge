@@ -82,6 +82,20 @@ When the bridge/MCP server is down, the plugin enters a temporary cooldown
 (`XMPP_BRIDGE_RETRY_MS`, default: `60000`) and suppresses repeated bridge calls
 instead of hammering `claude-xmpp-client` / MCP on every idle or state event.
 
+For machines where you want only Screen/tmux title indicators and no bridge
+integration at all, set:
+
+```bash
+export XMPP_BRIDGE_MODE=title-only
+```
+
+If you still want normal bridge behavior on systems where it exists, but want the
+plugin to switch permanently to title-only mode when bridge startup fails, set:
+
+```bash
+export XMPP_BRIDGE_DISABLE_WHEN_MISSING=1
+```
+
 ### Agent circles
 
 Each circle colour matches the agent's colour in the OpenCode TUI:
@@ -150,6 +164,13 @@ The plugin polls the MCP server (`http://127.0.0.1:7878`) for messages sent by o
 
 - Immediately on each `session.idle` event
 - Every 30 s while the session is idle
+
+If the bridge/MCP server is unavailable, the plugin enters a quiet degraded mode:
+
+- bridge calls are suppressed during cooldown instead of retrying on every idle event
+- idle polling and fast re-register timers are stopped while the bridge is down
+- a slow recovery timer retries registration in the background
+- helper scripts are only called after bridge registration succeeds
 
 Received messages are injected into the terminal via `claude-xmpp-client relay`.
 Inter-agent messages are wrapped by the bridge as a generated block with a JSON

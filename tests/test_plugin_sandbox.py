@@ -153,18 +153,49 @@ class TestPluginClientBinFallback:
         assert "const runBridgeClient = async" in text, "runBridgeClient helper must exist"
         assert "bridgeSuppressed()" in text, "runBridgeClient must consult bridgeSuppressed()"
         assert "markBridgeUnavailable" in text, "plugin must mark bridge unavailable on expected bridge errors"
+        assert "BRIDGE_RECOVERY_POLL_MS" in text, "plugin must define a slow recovery poll interval"
+        assert "ensureRecoveryTimer" in text, "plugin must define a degraded-mode recovery timer"
+        assert "bridgeDisabled" in text, "plugin must support full bridge-disabled mode"
+
+    def test_runBridgeClient_short_circuits_when_bridge_disabled(self):
+        text = _plugin_text()
+        body = _function_body(text, "const runBridgeClient = async")
+        assert body, "runBridgeClient function not found in plugin"
+        assert "if (bridgeDisabled) return { exitCode: 126" in body, (
+            "runBridgeClient must short-circuit immediately in title-only mode"
+        )
 
     def test_pollInbox_skips_when_bridge_suppressed(self):
         text = _plugin_text()
         body = _function_body(text, "const pollInbox = async")
         assert body, "pollInbox function not found in plugin"
         assert "bridgeSuppressed()" in body, "pollInbox must skip MCP polling during bridge cooldown"
+        assert "bridgeDisabled" in body, "pollInbox must skip all work in title-only mode"
 
     def test_reportState_skips_when_bridge_suppressed(self):
         text = _plugin_text()
         body = _function_body(text, "const reportState = async")
         assert body, "reportState function not found in plugin"
         assert "bridgeSuppressed()" in body, "reportState must not call bridge while cooldown is active"
+        assert "if (bridgeDisabled) return true" in body, "reportState must short-circuit in title-only mode"
+
+    def test_failed_registration_enters_recovery_mode(self):
+        text = _plugin_text()
+        assert "stopActiveBridgeTimers()" in text, "plugin must stop active bridge timers when registration fails"
+        assert "ensureRecoveryTimer()" in text, "plugin must start recovery timer when registration fails"
+
+    def test_agent_notify_helpers_run_only_with_registered_session(self):
+        text = _plugin_text()
+        assert "if (registeredSessionID && CLIENT_BIN)" in text, (
+            "startup/session-created notify helper must only run when bridge registration succeeded"
+        )
+
+    def test_title_only_mode_can_disable_bridge_when_missing(self):
+        text = _plugin_text()
+        assert "XMPP_BRIDGE_MODE" in text, "plugin must support explicit bridge mode override"
+        assert "XMPP_BRIDGE_DISABLE_WHEN_MISSING" in text, (
+            "plugin must support auto-disabling bridge logic when bridge is missing at startup"
+        )
 
     def test_plugin_registers_build_aware_plugin_ref(self):
         """The registration payload should use a build-aware plugin ref, not only
