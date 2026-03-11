@@ -82,6 +82,10 @@ claude-xmpp-bridge-setup
 
 The wizard walks through all configuration steps: credentials, config file, XMPP test, Claude Code hook installation, OpenCode plugin installation, systemd service, and notification switches.
 
+If you install the OpenCode plugin without selecting `bridge-daemon`, the wizard
+installs it in `title-only` mode automatically, so you keep Screen/tmux title
+indicators without any bridge/MCP traffic.
+
 Use `--test-only` to just verify XMPP connectivity:
 
 ```bash

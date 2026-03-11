@@ -13,10 +13,13 @@ from claude_xmpp_bridge.setup import (
     COMPONENT_SANDBOX,
     HOOK_FILES_BRIDGE,
     HOOK_FILES_LOCAL,
+    PLUGIN_MODE_NORMAL,
+    PLUGIN_MODE_TITLE_ONLY,
     _ask_components,
     _confirm,
     _find_hooks_dir,
     _find_opencode_dir,
+    _render_opencode_plugin,
     _step_config,
     _step_credentials,
     _step_hooks,
@@ -349,6 +352,35 @@ class TestStepOpencode:
 
         plugin_text = (plugins_dir / "xmpp-bridge.js").read_text()
         assert 'source:     "opencode"' in plugin_text
+
+    def test_installs_title_only_plugin_when_requested(self, monkeypatch, tmp_path):
+        plugins_dir = tmp_path / "plugins"
+        settings_path = tmp_path / "opencode.json"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+
+        ok = _step_opencode(yes_mode=True, plugin_mode=PLUGIN_MODE_TITLE_ONLY)
+
+        assert ok is True
+        plugin_text = (plugins_dir / "xmpp-bridge.js").read_text()
+        assert 'const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "title-only"' in plugin_text
+
+    def test_installs_normal_plugin_mode_when_bridge_selected(self, monkeypatch, tmp_path):
+        plugins_dir = tmp_path / "plugins"
+        settings_path = tmp_path / "opencode.json"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+
+        ok = _step_opencode(yes_mode=True, plugin_mode=PLUGIN_MODE_NORMAL)
+
+        assert ok is True
+        plugin_text = (plugins_dir / "xmpp-bridge.js").read_text()
+        assert 'const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "auto"' in plugin_text
+
+    def test_render_opencode_plugin_rewrites_bridge_mode(self):
+        source = _find_opencode_dir() / "plugins" / "xmpp-bridge.js"  # type: ignore[operator]
+        plugin_text = _render_opencode_plugin(source, plugin_mode=PLUGIN_MODE_TITLE_ONLY)
+        assert 'const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "title-only"' in plugin_text
 
     def test_merges_opencode_json(self, monkeypatch, tmp_path):
         plugins_dir = tmp_path / "plugins"

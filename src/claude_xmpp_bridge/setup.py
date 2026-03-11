@@ -73,6 +73,9 @@ COMPONENT_BRIDGE = "bridge-daemon"
 
 ALL_COMPONENTS = [COMPONENT_SANDBOX, COMPONENT_HOOKS, COMPONENT_OPENCODE, COMPONENT_BRIDGE]
 
+PLUGIN_MODE_NORMAL = "normal"
+PLUGIN_MODE_TITLE_ONLY = "title-only"
+
 
 def _find_opencode_dir() -> Path | None:
     """Find the directory containing OpenCode plugin sources."""
@@ -417,7 +420,20 @@ def _step_hooks(yes_mode: bool, upgrade: bool = False, with_bridge: bool = True)
     return True
 
 
-def _step_opencode(yes_mode: bool, upgrade: bool = False) -> bool:
+def _render_opencode_plugin(source: Path, *, plugin_mode: str) -> str:
+    """Return OpenCode plugin text customized for the requested default mode."""
+    text = source.read_text()
+    marker = '  const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "auto"\n'
+    if plugin_mode == PLUGIN_MODE_TITLE_ONLY:
+        replacement = '  const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "title-only"\n'
+    else:
+        replacement = marker
+    if marker not in text:
+        raise ValueError("plugin source missing BRIDGE_MODE marker")
+    return text.replace(marker, replacement, 1)
+
+
+def _step_opencode(yes_mode: bool, upgrade: bool = False, plugin_mode: str = PLUGIN_MODE_NORMAL) -> bool:
     """Step: Install OpenCode plugin and config."""
     print("\n--- opencode-plugin: OpenCode plugin ---")
 
@@ -433,13 +449,19 @@ def _step_opencode(yes_mode: bool, upgrade: bool = False) -> bool:
 
     src = opencode_source / "plugins" / "xmpp-bridge.js"
     dst = OPENCODE_PLUGINS_DIR / "xmpp-bridge.js"
-    if not _needs_update(src, dst):
+    rendered_plugin = _render_opencode_plugin(src, plugin_mode=plugin_mode)
+    needs_plugin_update = True
+    if dst.is_file():
+        needs_plugin_update = dst.read_text() != rendered_plugin
+    if not needs_plugin_update:
         if upgrade:
             print("  xmpp-bridge.js: up to date")
     elif upgrade or yes_mode or not dst.is_file() or _confirm("    Overwrite xmpp-bridge.js?", default=False):
-        shutil.copy2(src, dst)
+        dst.write_text(rendered_plugin)
         dst.chmod(dst.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR)
         print(f"  xmpp-bridge.js: {'updated' if upgrade else 'installed'}")
+        if plugin_mode == PLUGIN_MODE_TITLE_ONLY:
+            print("  Default OpenCode bridge mode: title-only (bridge-daemon not selected)")
 
     # Merge permission config into opencode.json
     config_src = opencode_source / "opencode.json"
@@ -864,7 +886,12 @@ def setup_main() -> None:
         install_steps.append(("hooks", _install_hooks))
 
     if COMPONENT_OPENCODE in components:
-        install_steps.append(("opencode", lambda: _step_opencode(yes_mode)))
+        _plugin_mode = PLUGIN_MODE_NORMAL if COMPONENT_BRIDGE in components else PLUGIN_MODE_TITLE_ONLY
+
+        def _install_opencode(mode: str = _plugin_mode) -> bool:
+            return _step_opencode(yes_mode, plugin_mode=mode)
+
+        install_steps.append(("opencode", _install_opencode))
 
     if COMPONENT_BRIDGE in components:
         install_steps.extend(
