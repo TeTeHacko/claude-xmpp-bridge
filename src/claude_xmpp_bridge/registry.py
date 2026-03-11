@@ -6,6 +6,7 @@ import logging
 import re
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
 
@@ -35,6 +36,16 @@ class SessionInfo(TypedDict):
     agent_state: str | None  # last known state: "idle", "running", etc.
     agent_mode: str | None  # last known mode: "planning", "code", "build"
     last_seen: float | None  # timestamp of last successful "state" heartbeat
+
+
+class FileLockInfo(TypedDict):
+    """Type for file-lock records stored in the registry."""
+
+    session_id: str
+    filepath: str
+    project: str
+    reason: str | None
+    locked_at: str
 
 
 def _validate_session_id(session_id: str) -> None:
@@ -84,7 +95,17 @@ class SessionRegistry:
             "  created_at   REAL    NOT NULL"
             ")"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS file_locks ("
+            "  filepath   TEXT PRIMARY KEY,"
+            "  session_id TEXT NOT NULL,"
+            "  project    TEXT NOT NULL,"
+            "  reason     TEXT,"
+            "  locked_at  TEXT NOT NULL"
+            ")"
+        )
         self._db.execute("CREATE INDEX IF NOT EXISTS inbox_to_session ON inbox (to_session, id)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS file_locks_session_id ON file_locks (session_id)")
         self._db.commit()
         # Migrations: add columns for existing databases that predate these fields
         cols = {row[1] for row in self._db.execute("PRAGMA table_info(sessions)")}
@@ -206,8 +227,11 @@ class SessionRegistry:
     def unregister(self, session_id: str) -> None:
         """Unregister a session."""
         if session_id in self.sessions:
+            released = self.release_all_file_locks(session_id)
             info = self.sessions.pop(session_id)
             log.info("Unregistered session %s (project=%s)", session_id, info["project"])
+            if released:
+                log.info("Released %d file lock(s) for session %s", released, session_id)
             if self.last_active == session_id:
                 if self.sessions:
                     self.last_active = max(
@@ -319,6 +343,103 @@ class SessionRegistry:
     def inbox_count(self, session_id: str) -> int:
         """Return the number of pending messages for *session_id*."""
         return int(self._db.execute("SELECT COUNT(*) FROM inbox WHERE to_session = ?", (session_id,)).fetchone()[0])
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    @staticmethod
+    def _row_to_file_lock(row: sqlite3.Row | tuple[object, ...]) -> FileLockInfo:
+        return FileLockInfo(
+            filepath=str(row[0]),
+            session_id=str(row[1]),
+            project=str(row[2]),
+            reason=str(row[3]) if row[3] is not None else None,
+            locked_at=str(row[4]),
+        )
+
+    def list_file_locks(self) -> list[FileLockInfo]:
+        """Return all bridge-native file locks sorted by timestamp/path."""
+        rows = self._db.execute(
+            "SELECT filepath, session_id, project, reason, locked_at FROM file_locks ORDER BY locked_at, filepath"
+        ).fetchall()
+        return [self._row_to_file_lock(row) for row in rows]
+
+    def acquire_file_lock(
+        self, session_id: str, filepath: str, project: str, reason: str | None = None
+    ) -> tuple[bool, FileLockInfo, bool]:
+        """Acquire a bridge-native file lock.
+
+        Returns ``(acquired, lock, replaced_stale)``. If another active session
+        owns the lock, ``acquired`` is False and ``lock`` describes the current owner.
+        If the previous owner session is no longer registered, the stale lock is
+        replaced automatically and ``replaced_stale`` is True.
+        """
+        now = self._now_iso()
+        with self._db:
+            row = self._db.execute(
+                "SELECT filepath, session_id, project, reason, locked_at FROM file_locks WHERE filepath = ?",
+                (filepath,),
+            ).fetchone()
+            if row is None:
+                self._db.execute(
+                    "INSERT INTO file_locks (filepath, session_id, project, reason, locked_at) VALUES (?, ?, ?, ?, ?)",
+                    (filepath, session_id, project, reason, now),
+                )
+                return True, FileLockInfo(
+                    filepath=filepath,
+                    session_id=session_id,
+                    project=project,
+                    reason=reason,
+                    locked_at=now,
+                ), False
+
+            existing = self._row_to_file_lock(row)
+            if existing["session_id"] == session_id or existing["session_id"] not in self.sessions:
+                self._db.execute(
+                    "UPDATE file_locks SET session_id = ?, project = ?, reason = ?, locked_at = ? WHERE filepath = ?",
+                    (session_id, project, reason, now, filepath),
+                )
+                return True, FileLockInfo(
+                    filepath=filepath,
+                    session_id=session_id,
+                    project=project,
+                    reason=reason,
+                    locked_at=now,
+                ), existing["session_id"] != session_id
+
+            return False, existing, False
+
+    def release_file_lock(self, session_id: str, filepath: str, force: bool = False) -> bool:
+        """Release a bridge-native file lock by owner session.
+
+        If ``force`` is True, removes the lock regardless of owner.
+        Returns True if a row was deleted.
+        """
+        with self._db:
+            if force:
+                cur = self._db.execute("DELETE FROM file_locks WHERE filepath = ?", (filepath,))
+            else:
+                cur = self._db.execute(
+                    "DELETE FROM file_locks WHERE filepath = ? AND session_id = ?",
+                    (filepath, session_id),
+                )
+        return cur.rowcount > 0
+
+    def release_all_file_locks(self, session_id: str) -> int:
+        """Release all bridge-native file locks held by *session_id*."""
+        with self._db:
+            cur = self._db.execute("DELETE FROM file_locks WHERE session_id = ?", (session_id,))
+        return int(cur.rowcount)
+
+    def cleanup_stale_file_locks(self) -> list[FileLockInfo]:
+        """Remove file locks whose owner session is no longer registered."""
+        stale = [lock for lock in self.list_file_locks() if lock["session_id"] not in self.sessions]
+        if not stale:
+            return []
+        with self._db:
+            self._db.executemany("DELETE FROM file_locks WHERE filepath = ?", [(lock["filepath"],) for lock in stale])
+        return stale
 
     def close(self) -> None:
         """Close the database connection."""

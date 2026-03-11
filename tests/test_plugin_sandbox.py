@@ -1,4 +1,4 @@
-"""Sandbox-safety invariants for the OpenCode plugin (xmpp-bridge.js).
+"""Sandbox-safety and redraw-safety invariants for the OpenCode plugin.
 
 These tests verify that the plugin is safe to run in a restricted environment
 (bwrap sandbox, corporate network without bridge) by checking structural
@@ -13,13 +13,14 @@ Why static analysis instead of running the plugin:
 Invariants checked:
   1. CLIENT_BIN fallback — runClient and rawRelay return immediately without
      any subprocess or console output when CLIENT_BIN is null.
-  2. setTitle stdout fallback — title updates work via process.stdout.write
-     even when screen socket is unavailable (bwrap --new-session).
-  3. screenTitleWorks cache — after the first screen -X failure the flag is
-     set to false and subsequent setTitle calls skip screen -X entirely.
-  4. .nothrow() on every bun shell $`...` call — no unhandled exceptions from
+  2. scheduleTitle/applyTitleNow — sandbox fallback uses process.stdout.write,
+     while non-sandbox updates go through screen -X title with debounce.
+  3. Startup title setup is deferred (setImmediate), avoiding redraws during
+     OpenCode TUI initialisation.
+  4. tool.execute.before must NOT update the title — only report running state.
+  5. .nothrow() on every bun shell $`...` call — no unhandled exceptions from
      missing external tools (agent-notify.sh, test -f, screen -X).
-  5. registeredSessionID guards — pollInbox, reregTimer callback, and
+  6. registeredSessionID guards — pollInbox, reregTimer callback, and
      reportState all return immediately when no session is registered, so no
      HTTP or socket calls are made in sandbox mode.
 """
@@ -142,6 +143,29 @@ class TestPluginClientBinFallback:
             f"rawRelay first statement must be 'if (!CLIENT_BIN)', got: {inner_no_comments[:80]!r}"
         )
 
+    def test_runBridgeClient_suppresses_calls_when_bridge_unavailable(self):
+        """When bridge is down, plugin must enter a cooldown instead of hammering
+        the client binary / MCP endpoint and spamming SIEM with expected errors.
+        """
+        text = _plugin_text()
+        assert "BRIDGE_RETRY_MS" in text, "bridge retry cooldown constant must exist"
+        assert "bridgeUnavailableUntil" in text, "bridge availability cooldown state must exist"
+        assert "const runBridgeClient = async" in text, "runBridgeClient helper must exist"
+        assert "bridgeSuppressed()" in text, "runBridgeClient must consult bridgeSuppressed()"
+        assert "markBridgeUnavailable" in text, "plugin must mark bridge unavailable on expected bridge errors"
+
+    def test_pollInbox_skips_when_bridge_suppressed(self):
+        text = _plugin_text()
+        body = _function_body(text, "const pollInbox = async")
+        assert body, "pollInbox function not found in plugin"
+        assert "bridgeSuppressed()" in body, "pollInbox must skip MCP polling during bridge cooldown"
+
+    def test_reportState_skips_when_bridge_suppressed(self):
+        text = _plugin_text()
+        body = _function_body(text, "const reportState = async")
+        assert body, "reportState function not found in plugin"
+        assert "bridgeSuppressed()" in body, "reportState must not call bridge while cooldown is active"
+
 
 # ---------------------------------------------------------------------------
 # TestPluginTitleFallback
@@ -149,32 +173,32 @@ class TestPluginClientBinFallback:
 
 
 class TestPluginTitleFallback:
-    """setTitle must write to process.stdout only in bwrap sandbox (inSandbox=true)."""
+    """Title updates must be scheduled and sandbox-safe."""
 
-    def test_setTitle_has_stdout_escape_sequence_fallback(self):
-        """setTitle must write ESC k ... ESC \\ to stdout as fallback for bwrap
+    def test_applyTitleNow_has_stdout_escape_sequence_fallback(self):
+        """applyTitleNow must write ESC k ... ESC \\ to stdout as fallback for bwrap
         sandboxes where screen socket is inaccessible.
         """
         text = _plugin_text()
-        body = _function_body(text, "const setTitle = async")
-        assert body, "setTitle function not found in plugin"
+        body = _function_body(text, "const applyTitleNow = async")
+        assert body, "applyTitleNow function not found in plugin"
 
-        assert "process.stdout.write" in body, "setTitle must write to process.stdout as sandbox fallback"
+        assert "process.stdout.write" in body, "applyTitleNow must write to process.stdout as sandbox fallback"
         # Screen title escape: ESC k ... ESC backslash
-        assert r"\x1bk" in body, r"setTitle stdout fallback must use \x1bk (Screen title escape sequence)"
-        assert r"\x1b\\" in body, r"setTitle stdout fallback must close with \x1b\\ (Screen title terminator)"
+        assert r"\x1bk" in body, r"applyTitleNow stdout fallback must use \x1bk (Screen title escape sequence)"
+        assert r"\x1b\\" in body, r"applyTitleNow stdout fallback must close with \x1b\\ (Screen title terminator)"
 
-    def test_setTitle_stdout_path_reachable_only_in_sandbox(self):
+    def test_applyTitleNow_stdout_path_reachable_only_in_sandbox(self):
         """The stdout.write path must be guarded by inSandbox — it must only run
         when the bwrap sandbox is detected, never outside it.
 
         Logic must be:
           if (STY && !inSandbox) { screen -X ... }
-          if (STY && inSandbox)  { stdout.write ... }   ← sandbox only
+          if (STY && inSandbox)  { stdout.write ... }
         """
         text = _plugin_text()
-        body = _function_body(text, "const setTitle = async")
-        assert body, "setTitle function not found in plugin"
+        body = _function_body(text, "const applyTitleNow = async")
+        assert body, "applyTitleNow function not found in plugin"
 
         lines = body.splitlines()
         stdout_line_idx = next(
@@ -210,13 +234,12 @@ class TestPluginTitleFallback:
             "inSandbox must be set once via 'detectSandbox()' (synchronous)"
         )
 
-    def test_screen_title_called_without_sandbox_guard(self):
-        """Outside sandbox, screen -X title must always be attempted — no
-        screenTitleWorks cache that permanently disables it after one failure.
+    def test_applyTitleNow_uses_screen_title_outside_sandbox(self):
+        """Outside sandbox, applyTitleNow must use screen -X title.
         """
         text = _plugin_text()
-        body = _function_body(text, "const setTitle = async")
-        assert body, "setTitle function not found in plugin"
+        body = _function_body(text, "const applyTitleNow = async")
+        assert body, "applyTitleNow function not found in plugin"
 
         # Old cache variable must not exist
         assert "screenTitleWorks" not in body, (
@@ -225,27 +248,109 @@ class TestPluginTitleFallback:
         )
 
         # screen -X title must be called when !inSandbox
-        assert "!inSandbox" in body, "setTitle must call screen -X title when !inSandbox"
+        assert "!inSandbox" in body, "applyTitleNow must call screen -X title when !inSandbox"
+        assert "clearScreenHstatus()" in body, (
+            "applyTitleNow must clear per-window hstatus before screen -X title to avoid shell prompt garbage"
+        )
 
-    def test_setTitle_skips_when_title_unchanged(self):
-        """setTitle must cache the last title and skip screen -X title when
-        the title has not changed — prevents race conditions with backtick
-        hardstatus redraws (1s interval in .screenrc).
+    def test_clearScreenHstatus_uses_nonempty_argument(self):
+        """`screen -X hstatus` requires exactly one argument; empty string fails with
+        'one argument required'. Use a single blank placeholder instead.
+        """
+        text = _plugin_text()
+        body = _function_body(text, "const clearScreenHstatus = async")
+        assert body, "clearScreenHstatus function not found in plugin"
+        assert 'hstatus ${" "}' in body, (
+            "clearScreenHstatus must pass a non-empty blank placeholder to screen -X hstatus"
+        )
+
+    def test_scheduleTitle_uses_debounce_and_last_title_cache(self):
+        """scheduleTitle must use debounce and lastTitle cache to avoid redraw
+        storms from frequent event bursts.
         """
         text = _plugin_text()
 
         # lastTitle cache variable must exist
         assert "lastTitle" in text, "lastTitle cache variable must exist in plugin"
+        assert "TITLE_DEBOUNCE_MS" in text, "title debounce constant must exist in plugin"
+        assert "titleTimer" in text, "title scheduler timer must exist in plugin"
+        assert "HSTATUS_SCRUB_DELAY_MS" in text, "hstatus scrub delay constant must exist in plugin"
+        assert "HSTATUS_SCRUB_PASSES" in text, "hstatus scrub pass count must exist in plugin"
 
-        body = _function_body(text, "const setTitle = async")
-        assert body, "setTitle function not found in plugin"
-
-        # Must compare current title to lastTitle before calling screen -X
-        assert "lastTitle" in body, "setTitle must check lastTitle cache before updating"
-        # Must return early if title unchanged
-        assert "=== lastTitle" in body or "lastTitle ===" in body, (
-            "setTitle must return early when title equals lastTitle"
+        assert "const scheduleTitle = (emojiTitle, asciiTitle, { immediate = false } = {}) => {" in text, (
+            "scheduleTitle function must exist in plugin"
         )
+        assert "current === lastTitle" in text, "scheduleTitle must check lastTitle cache before scheduling"
+        assert "setTimeout" in text, "scheduleTitle must debounce updates via setTimeout"
+        assert "TITLE_DEBOUNCE_MS" in text, "scheduleTitle must use TITLE_DEBOUNCE_MS"
+
+    def test_hstatus_cleanup_uses_short_pulses_not_permanent_interval(self):
+        """Hstatus cleanup should be a short burst around title changes, not a
+        permanent per-second interval that makes the status line visibly jump.
+        """
+        text = _plugin_text()
+        assert "const pulseScreenHstatusCleanup = () => {" in text, (
+            "pulseScreenHstatusCleanup function must exist in plugin"
+        )
+        assert "hstatusTimer" not in text, "plugin must not keep a permanent hstatus interval timer"
+        assert "clearHstatusPulseTimers()" in text, "plugin must clear pending hstatus pulse timers"
+
+    def test_startup_title_setup_is_deferred(self):
+        """Startup title work must be done inside setImmediate, not synchronously
+        during plugin initialisation.
+        """
+        text = _plugin_text()
+        assert "setImmediate(async () => {" in text, "startup title setup must be deferred via setImmediate"
+        assert "dynamictitle off" in text, "startup setup must disable dynamictitle outside sandbox"
+        assert "clearScreenHstatus()" in text, "startup setup must clear per-window hstatus garbage in Screen"
+        assert "pulseScreenHstatusCleanup()" in text, "startup setup must schedule hstatus cleanup pulses"
+
+    def test_tool_execute_before_does_not_schedule_title(self):
+        """tool.execute.before must not touch the title — only report state.
+        This avoids screen redraws during active TUI rendering.
+        """
+        text = _plugin_text()
+        body = _function_body(text, '"tool.execute.before": async')
+        assert body, "tool.execute.before handler not found in plugin"
+        assert "scheduleTitle" not in body, "tool.execute.before must not schedule title updates"
+        assert "applyTitleNow" not in body, "tool.execute.before must not update title directly"
+        assert 'reportState("running")' in body, "tool.execute.before must still report running state"
+
+    def test_dispose_clears_pending_title_timer(self):
+        """server.instance.disposed must clear any pending title timer before cleanup."""
+        text = _plugin_text()
+        assert "clearTitleTimer()" in text, "dispose path must clear pending title timer"
+        assert "desiredTitle = null" in text, "dispose path must discard pending title request"
+        assert "clearHstatusPulseTimers()" in text, "dispose path must clear pending hstatus cleanup pulses"
+
+    def test_message_updated_no_longer_updates_title_immediately(self):
+        """message.updated should only update currentAgent and rely on later state
+        transitions for the title update.
+        """
+        text = _plugin_text()
+        body = _function_body(text, 'if (event.type === "message.updated")')
+        assert body, "message.updated branch not found in plugin"
+        assert "scheduleTitle" not in body, (
+            "message.updated must not schedule title directly — avoid extra redraws during render burst"
+        )
+
+    def test_session_status_busy_uses_immediate_title(self):
+        """Busy state must update the title immediately so short tool calls still
+        become visible to the user.
+        """
+        text = _plugin_text()
+        body = _function_body(text, 'if (event.type === "session.status")')
+        assert body, "session.status branch not found in plugin"
+        assert 'immediate: true' in body, "session.status busy must use immediate title update"
+
+    def test_permission_asked_uses_immediate_title(self):
+        """Permission dialog must flip to red immediately — delayed debounce would
+        hide or postpone the security signal.
+        """
+        text = _plugin_text()
+        body = _function_body(text, 'if (event.type === "permission.asked")')
+        assert body, "permission.asked branch not found in plugin"
+        assert 'immediate: true' in body, "permission.asked must use immediate title update"
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +470,6 @@ class TestPluginNoopWhenNoSession:
         assert "!registeredSessionID" in callback_body, (
             f"reregTimer callback must check !registeredSessionID and return early\nCallback body: {callback_body!r}"
         )
-        assert "return" in callback_body, "reregTimer callback must return early when registeredSessionID is null"
         assert "return" in callback_body, "reregTimer callback must return early when registeredSessionID is null"
 
     def test_reportState_returns_immediately_without_session(self):

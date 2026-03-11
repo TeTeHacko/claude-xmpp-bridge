@@ -187,6 +187,86 @@ def test_get_active_empty_registry(db_path):
 
 
 # ---------------------------------------------------------------------------
+# 5b. bridge-native file locks
+# ---------------------------------------------------------------------------
+
+
+def test_acquire_file_lock_succeeds_for_new_file(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("s1", "", "", "/proj/1")
+        acquired, lock, replaced_stale = reg.acquire_file_lock("s1", "/tmp/a.py", "/proj/1", "edit")
+        assert acquired is True
+        assert replaced_stale is False
+        assert lock["session_id"] == "s1"
+        assert lock["filepath"] == "/tmp/a.py"
+        assert lock["reason"] == "edit"
+    finally:
+        reg.close()
+
+
+def test_acquire_file_lock_rejects_other_active_session(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("s1", "", "", "/proj/1")
+        reg.register("s2", "", "", "/proj/2")
+        reg.acquire_file_lock("s1", "/tmp/a.py", "/proj/1")
+        acquired, lock, replaced_stale = reg.acquire_file_lock("s2", "/tmp/a.py", "/proj/2")
+        assert acquired is False
+        assert replaced_stale is False
+        assert lock["session_id"] == "s1"
+    finally:
+        reg.close()
+
+
+def test_acquire_file_lock_replaces_stale_owner(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg._db.execute(
+            "INSERT INTO file_locks (filepath, session_id, project, reason, locked_at) VALUES (?, ?, ?, ?, ?)",
+            ("/tmp/a.py", "s1", "/proj/1", None, "2026-03-11T01:00:00+01:00"),
+        )
+        reg._db.commit()
+        reg.register("s2", "", "", "/proj/2")
+        acquired, lock, replaced_stale = reg.acquire_file_lock("s2", "/tmp/a.py", "/proj/2")
+        assert acquired is True
+        assert replaced_stale is True
+        assert lock["session_id"] == "s2"
+    finally:
+        reg.close()
+
+
+def test_release_all_file_locks_on_unregister(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("s1", "", "", "/proj/1")
+        reg.acquire_file_lock("s1", "/tmp/a.py", "/proj/1")
+        reg.acquire_file_lock("s1", "/tmp/b.py", "/proj/1")
+        reg.unregister("s1")
+        assert reg.list_file_locks() == []
+    finally:
+        reg.close()
+
+
+def test_cleanup_stale_file_locks_removes_only_stale(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.register("live", "", "", "/proj/live")
+        reg.acquire_file_lock("live", "/tmp/live.py", "/proj/live")
+        reg._db.execute(
+            "INSERT INTO file_locks (filepath, session_id, project, reason, locked_at) VALUES (?, ?, ?, ?, ?)",
+            ("/tmp/stale.py", "stale", "/proj/stale", None, "2026-03-11T01:00:00+01:00"),
+        )
+        reg._db.commit()
+        removed = reg.cleanup_stale_file_locks()
+        assert len(removed) == 1
+        assert removed[0]["filepath"] == "/tmp/stale.py"
+        assert [lock["filepath"] for lock in reg.list_file_locks()] == ["/tmp/live.py"]
+    finally:
+        reg.close()
+
+
+# ---------------------------------------------------------------------------
 # 5. last_active fallback — unregister active → most recent remaining
 # ---------------------------------------------------------------------------
 

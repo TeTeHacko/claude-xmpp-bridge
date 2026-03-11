@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import fields
 
-from claude_xmpp_bridge.messages import Messages, load_messages
+from claude_xmpp_bridge.messages import Messages, format_generated_agent_message, load_messages
 
 
 class TestMessagesDefaults:
@@ -159,3 +160,41 @@ class TestFormatStrings:
         msgs = load_messages(toml_file)
         result = msgs.delivery_failed.format(project="test")
         assert result == "Doručení do [test] selhalo"
+
+
+class TestGeneratedAgentMessage:
+    def test_format_generated_agent_message_has_marker_and_json_meta(self):
+        wrapped = format_generated_agent_message(
+            msg_type="relay",
+            message="hello from window 2",
+            from_session_id="ses_A",
+            to_session_id="ses_B",
+            mode="screen",
+            message_id="abc123def456",
+        )
+
+        lines = wrapped.splitlines()
+        assert lines[0] == "[bridge-generated message]"
+        meta = json.loads(lines[1])
+        assert meta["type"] == "relay"
+        assert meta["generated"] is True
+        assert meta["from"] == "ses_A"
+        assert meta["to"] == "ses_B"
+        assert meta["mode"] == "screen"
+        assert meta["message_id"] == "abc123def456"
+        assert wrapped.endswith("hello from window 2")
+
+    def test_format_generated_agent_message_supports_null_fields(self):
+        wrapped = format_generated_agent_message(msg_type="broadcast", message="hello all")
+        meta = json.loads(wrapped.splitlines()[1])
+        assert meta["type"] == "broadcast"
+        assert meta["from"] is None
+        assert meta["to"] is None
+        assert meta["mode"] is None
+        assert meta["message_id"] is None
+
+    def test_format_generated_agent_message_does_not_double_wrap(self):
+        once = format_generated_agent_message(msg_type="relay", message="hello")
+        twice = format_generated_agent_message(msg_type="relay", message=once)
+        assert twice == once
+        assert twice.count("[bridge-generated message]") == 1

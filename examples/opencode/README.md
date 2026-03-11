@@ -17,7 +17,7 @@ This plugin integrates `claude-xmpp-bridge` with [OpenCode](https://opencode.ai)
 - `permission.asked`: sends an informative XMPP notification showing what the AI wants to run — the actual approval/denial still happens in the OpenCode TUI (switch: `ask-enabled`)
 - `permission.replied`: sets title to `{agent}🔵` (model continues after permission)
 - Reports agent state `running` when the model starts generating output
-- `tool.execute.before`: updates the state circle to 🔵 immediately before each tool call
+- `tool.execute.before`: reports agent state `running` to the bridge, but does not touch the Screen title (prevents redraw artefacts during active TUI rendering)
 
 ## Setup
 
@@ -70,6 +70,18 @@ Disable: `rm ~/.config/xmpp-notify/<file>`
 
 The plugin sets the GNU Screen/tmux window title with two icons: an **agent circle** (which agent is active) and a **state circle** (whether it is running):
 
+To avoid GNU Screen redraw artefacts, title updates are **debounced** and happen
+only on coarse state transitions (`startup`, `session.created`, `session.status`,
+`session.idle`, `permission.*`) — not on every tool call.
+
+The debounce interval is configurable via `XMPP_BRIDGE_TITLE_DEBOUNCE_MS`
+(default: `750`). Critical visual states still update immediately: `busy` turns
+the state circle blue right away, and `permission.asked` turns it red right away.
+
+When the bridge/MCP server is down, the plugin enters a temporary cooldown
+(`XMPP_BRIDGE_RETRY_MS`, default: `60000`) and suppresses repeated bridge calls
+instead of hammering `claude-xmpp-client` / MCP on every idle or state event.
+
 ### Agent circles
 
 Each circle colour matches the agent's colour in the OpenCode TUI:
@@ -113,15 +125,15 @@ export BRIDGE_AGENT_LOCAL=🩵
 
 The plugin reports its version (`plugin_version`) in the registration payload and keeps the bridge informed of agent state and active agent:
 
-- **State**: `idle` — after registration and `session.idle`; `running` — when generating output
+- **State**: `idle` — after registration and `session.idle`; `running` — when generating output or a tool starts
 - **Agent**: emoji circle sent as `mode` field — updated when `message.updated` fires with a new agent name
 
 This information appears in `/list` XMPP output as icons before the backend bracket and a version tag:
 
 ```
 Sessions:
-  /1  🧠🟠⏸  [screen #2]  v0.7.19  ~/projects/my-app  *
-  /2  🧠🔵▶  [screen #4]  v0.7.19  ~/projects/other
+  /1  🧠🟠⏸  [screen #2]  v0.7.42  ~/projects/my-app  *
+  /2  🧠🔵▶  [screen #4]  v0.7.42  ~/projects/other
 
 * = active session
 ```
@@ -134,6 +146,9 @@ The plugin polls the MCP server (`http://127.0.0.1:7878`) for messages sent by o
 - Every 30 s while the session is idle
 
 Received messages are injected into the terminal via `claude-xmpp-client relay`.
+Inter-agent messages are wrapped by the bridge as a generated block with a JSON
+metadata line, so it is immediately visible in shared Screen/tmux windows that
+the text was injected by the bridge rather than typed manually.
 
 ## Coexistence with Claude Code
 

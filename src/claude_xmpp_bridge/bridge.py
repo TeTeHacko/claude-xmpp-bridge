@@ -20,7 +20,7 @@ from .audit import AuditLogger
 from .config import DEFAULT_SOURCE_ICONS, MAX_SOURCE_LEN, Config
 from .email_notify import send_email
 from .mcp_server import BridgeMCPServer
-from .messages import Messages, load_messages
+from .messages import Messages, format_generated_agent_message, load_messages
 from .multiplexer import get_multiplexer
 from .registry import SessionInfo, SessionRegistry
 from .socket_server import SocketServer
@@ -1009,11 +1009,18 @@ class XMPPBridge:
 
         # Build XMPP observer label
         sender_id = str(req.get("session_id", ""))
+        wrapped_message = format_generated_agent_message(
+            msg_type="relay",
+            message=message,
+            from_session_id=sender_id or None,
+            to_session_id=target_id,
+            mode="nudge" if nudge else "screen",
+        )
 
         if nudge:
-            ok = await self._nudge_session(target_id, target_info, message)
+            ok = await self._nudge_session(target_id, target_info, wrapped_message)
         else:
-            ok = await self._stuff_to_session(target_id, target_info, message)
+            ok = await self._stuff_to_session(target_id, target_info, wrapped_message)
 
         self.audit.log(
             "RELAY_SENT" if ok else "RELAY_FAILED",
@@ -1073,13 +1080,20 @@ class XMPPBridge:
         if not targets:
             return {"ok": True, "delivered": 0}
 
+        wrapped_message = format_generated_agent_message(
+            msg_type="broadcast",
+            message=message,
+            from_session_id=sender_id or None,
+            mode="nudge" if nudge else "screen",
+        )
+
         if nudge:
             results = await asyncio.gather(
-                *(self._nudge_session(sid, info, message) for sid, info in targets.items()),
+                *(self._nudge_session(sid, info, wrapped_message) for sid, info in targets.items()),
             )
         else:
             results = await asyncio.gather(
-                *(self._stuff_to_session(sid, info, message) for sid, info in targets.items()),
+                *(self._stuff_to_session(sid, info, wrapped_message) for sid, info in targets.items()),
             )
 
         delivered: list[str] = []
@@ -1095,7 +1109,7 @@ class XMPPBridge:
                 failed.append(self._session_prefix(info))
                 if not nudge:
                     # Screen relay failed — enqueue as fallback for pollInbox().
-                    self._enqueue_for_mcp(_sid, message)
+                    self._enqueue_for_mcp(_sid, wrapped_message)
 
         self.audit.log(
             "BROADCAST_SENT",

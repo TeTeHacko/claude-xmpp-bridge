@@ -41,9 +41,12 @@ import logging
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import FastMCP
+
+from .messages import format_generated_agent_message
 
 if TYPE_CHECKING:
     from .bridge import XMPPBridge
@@ -209,6 +212,56 @@ class BridgeMCPServer:
             """
             return server._tool_list_sessions()
 
+        @mcp.tool()
+        async def list_file_locks(project: str = "", include_stale: bool = True) -> list[dict[str, Any]]:
+            """List file lock hints from ``~/.claude/working``.
+
+            Args:
+                project: Optional project filter. Matches either the stored short
+                    project path (``~/foo``) or an absolute filepath prefix.
+                include_stale: If False, omit locks whose ``session_id`` is not
+                    currently registered in the bridge.
+
+            Returns:
+                List of lock dicts with ``session_id``, ``filepath``, ``project``,
+                ``locked_at`` and ``stale``.
+            """
+            return server._tool_list_file_locks(project=project, include_stale=include_stale)
+
+        @mcp.tool()
+        async def acquire_file_lock(
+            session_id: str, filepath: str, project: str = "", reason: str = ""
+        ) -> dict[str, Any]:
+            """Acquire a bridge-native file lock for a session.
+
+            If the file is already locked by another active session, returns the
+            current owner instead of replacing it.
+            """
+            return server._tool_acquire_file_lock(
+                session_id=session_id, filepath=filepath, project=project, reason=reason
+            )
+
+        @mcp.tool()
+        async def release_file_lock(session_id: str, filepath: str, force: bool = False) -> dict[str, Any]:
+            """Release a bridge-native file lock for a session."""
+            return server._tool_release_file_lock(session_id=session_id, filepath=filepath, force=force)
+
+        @mcp.tool()
+        async def cleanup_stale_locks(project: str = "") -> dict[str, Any]:
+            """Remove stale file lock hints from ``~/.claude/working``.
+
+            A lock is stale when its ``session_id`` is no longer present in the
+            bridge session registry.
+
+            Args:
+                project: Optional project filter. If set, only stale locks for
+                    that project/path are removed.
+
+            Returns:
+                Summary dict with removed count and removed lock entries.
+            """
+            return server._tool_cleanup_stale_locks(project=project)
+
         return mcp
 
     async def _serve(self) -> None:
@@ -236,6 +289,58 @@ class BridgeMCPServer:
             return "~"
         return path.replace(home + "/", "~/", 1) if path.startswith(home + "/") else path
 
+    @staticmethod
+    def _lock_dir() -> Path:
+        """Return the directory that stores file-lock hint files."""
+        return Path.home() / ".claude" / "working"
+
+    def _project_matches(self, lock_project: str, lock_filepath: str, project: str) -> bool:
+        """Return True if *lock* belongs to the requested project filter."""
+        if not project:
+            return True
+        short = self._short_path(project)
+        return lock_project in {project, short} or lock_filepath.startswith(project)
+
+    def _read_file_locks(self, *, project: str = "") -> list[dict[str, Any]]:
+        """Read legacy file-lock hint files from ``~/.claude/working``."""
+        bridge = self._bridge
+        active_sessions = set(bridge.registry.sessions) if bridge is not None else set()
+        lock_dir = self._lock_dir()
+        if not lock_dir.is_dir():
+            return []
+
+        locks: list[dict[str, Any]] = []
+        for path in sorted(lock_dir.iterdir()):
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            session_id = str(data.get("session_id", "")).strip()
+            filepath = str(data.get("filepath", "")).strip()
+            lock_project = str(data.get("project", "")).strip()
+            locked_at = str(data.get("locked_at", "")).strip()
+            if not session_id or not filepath:
+                continue
+            if not self._project_matches(lock_project, filepath, project):
+                continue
+            locks.append(
+                {
+                    "session_id": session_id,
+                    "filepath": filepath,
+                    "project": lock_project,
+                    "locked_at": locked_at,
+                    "stale": session_id not in active_sessions,
+                    "source": "legacy",
+                    "lockfile": str(path),
+                }
+            )
+        locks.sort(key=lambda item: (item["locked_at"], item["filepath"]))
+        return locks
+
     async def _tool_send_message(self, *, to: str, message: str, screen: bool = True, nudge: bool = False) -> str:
         """Implementation of the send_message tool."""
         bridge = self._bridge
@@ -252,6 +357,13 @@ class BridgeMCPServer:
 
         target_prefix = bridge._session_prefix(target_info)
         message_id = uuid.uuid4().hex[:12]
+        wrapped_message = format_generated_agent_message(
+            msg_type="relay",
+            message=message,
+            to_session_id=to,
+            mode="nudge" if nudge else ("screen" if screen else "inbox"),
+            message_id=message_id,
+        )
 
         if nudge:
             # nudge=True: store in inbox + send CR (preferred for inter-agent messaging)
@@ -267,7 +379,7 @@ class BridgeMCPServer:
                 )
                 return bridge.messages.mcp_send_no_backend.format(project=self._short_path(target_info["project"]))
 
-            ok = await bridge._nudge_session(to, target_info, message)
+            ok = await bridge._nudge_session(to, target_info, wrapped_message)
             bridge._xmpp_send(
                 json.dumps(
                     {
@@ -309,7 +421,7 @@ class BridgeMCPServer:
                 )
                 return bridge.messages.mcp_send_no_backend.format(project=self._short_path(target_info["project"]))
 
-            ok = await bridge._stuff_to_session(to, target_info, message)
+            ok = await bridge._stuff_to_session(to, target_info, wrapped_message)
 
             if ok:
                 # screen=True delivers immediately to terminal — no inbox queuing needed.
@@ -350,7 +462,7 @@ class BridgeMCPServer:
                 return bridge.messages.mcp_send_failed.format(project=self._short_path(target_info["project"]))
         else:
             # screen=False: only enqueue in MCP inbox, no terminal relay
-            self.enqueue(to, message)
+            self.enqueue(to, wrapped_message)
             bridge._xmpp_send(
                 json.dumps(
                     {
@@ -399,13 +511,20 @@ class BridgeMCPServer:
             )
             return bridge.messages.broadcast_sent.format(count=0)
 
+        wrapped_message = format_generated_agent_message(
+            msg_type="broadcast",
+            message=message,
+            from_session_id=sender_session_id or None,
+            mode="nudge" if nudge else "screen",
+        )
+
         if nudge:
             results = await asyncio.gather(
-                *(bridge._nudge_session(sid, info, message) for sid, info in targets.items()),
+                *(bridge._nudge_session(sid, info, wrapped_message) for sid, info in targets.items()),
             )
         else:
             results = await asyncio.gather(
-                *(bridge._stuff_to_session(sid, info, message) for sid, info in targets.items()),
+                *(bridge._stuff_to_session(sid, info, wrapped_message) for sid, info in targets.items()),
             )
 
         delivered = 0
@@ -417,7 +536,7 @@ class BridgeMCPServer:
             elif not nudge:
                 # Screen relay failed — enqueue in MCP inbox as fallback so
                 # the plugin can pick it up on the next session.idle poll.
-                self.enqueue(sid, message)
+                self.enqueue(sid, wrapped_message)
 
         mode = "nudge" if nudge else "screen"
         bridge._xmpp_send(
@@ -441,6 +560,98 @@ class BridgeMCPServer:
             message=message[:100],
         )
         return bridge.messages.broadcast_sent.format(count=delivered)
+
+    def _tool_acquire_file_lock(
+        self, *, session_id: str, filepath: str, project: str = "", reason: str = ""
+    ) -> dict[str, Any]:
+        """Implementation of ``acquire_file_lock``."""
+        bridge = self._bridge
+        if bridge is None:
+            return {"ok": False, "error": "bridge not initialised"}
+        info = bridge.registry.get(session_id)
+        if info is None:
+            return {"ok": False, "error": f"unknown session_id: {session_id}"}
+        acquired, lock, replaced_stale = bridge.registry.acquire_file_lock(
+            session_id=session_id,
+            filepath=filepath,
+            project=project or info["project"],
+            reason=reason or None,
+        )
+        bridge.audit.log(
+            "MCP_LOCK_ACQUIRE",
+            session_id=session_id,
+            filepath=filepath,
+            ok=acquired,
+            replaced_stale=replaced_stale,
+        )
+        return {"ok": acquired, "lock": dict(lock), "replaced_stale": replaced_stale}
+
+    def _tool_release_file_lock(self, *, session_id: str, filepath: str, force: bool = False) -> dict[str, Any]:
+        """Implementation of ``release_file_lock``."""
+        bridge = self._bridge
+        if bridge is None:
+            return {"ok": False, "released": False, "error": "bridge not initialised"}
+        released = bridge.registry.release_file_lock(session_id, filepath, force=force)
+        bridge.audit.log(
+            "MCP_LOCK_RELEASE",
+            session_id=session_id,
+            filepath=filepath,
+            force=force,
+            released=released,
+        )
+        return {"ok": True, "released": released}
+
+    def _tool_list_file_locks(self, *, project: str = "", include_stale: bool = True) -> list[dict[str, Any]]:
+        """Implementation of ``list_file_locks``."""
+        bridge = self._bridge
+        active_sessions = set(bridge.registry.sessions) if bridge is not None else set()
+        locks: list[dict[str, Any]] = []
+        if bridge is not None:
+            for raw_lock in bridge.registry.list_file_locks():
+                if not self._project_matches(raw_lock["project"], raw_lock["filepath"], project):
+                    continue
+                locks.append(
+                    {
+                        **dict(raw_lock),
+                        "stale": raw_lock["session_id"] not in active_sessions,
+                        "source": "bridge",
+                    }
+                )
+        locks.extend(self._read_file_locks(project=project))
+        if not include_stale:
+            locks = [lock for lock in locks if not lock["stale"]]
+        for lock in locks:
+            lock.pop("lockfile", None)
+        locks.sort(key=lambda item: (item["locked_at"], item["filepath"], item.get("source", "")))
+        return locks
+
+    def _tool_cleanup_stale_locks(self, *, project: str = "") -> dict[str, Any]:
+        """Implementation of ``cleanup_stale_locks``."""
+        removed: list[dict[str, Any]] = []
+        bridge = self._bridge
+        if bridge is not None:
+            for raw_lock in bridge.registry.cleanup_stale_file_locks():
+                if not self._project_matches(raw_lock["project"], raw_lock["filepath"], project):
+                    continue
+                removed.append({**dict(raw_lock), "stale": True, "source": "bridge"})
+        for lock in self._read_file_locks(project=project):
+            if not lock["stale"]:
+                continue
+            lockfile = lock.get("lockfile")
+            if isinstance(lockfile, str):
+                with contextlib.suppress(OSError):
+                    Path(lockfile).unlink()
+            result = dict(lock)
+            result.pop("lockfile", None)
+            removed.append(result)
+
+        if bridge is not None and removed:
+            bridge.audit.log(
+                "MCP_LOCK_CLEANUP",
+                removed=len(removed),
+                project=project or None,
+            )
+        return {"removed": len(removed), "locks": removed}
 
     def _tool_receive_messages(self, *, session_id: str) -> list[str]:
         """Implementation of the receive_messages tool — drains the SQLite inbox."""

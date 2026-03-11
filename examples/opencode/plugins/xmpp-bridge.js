@@ -8,7 +8,7 @@
  *  - session.idle             → XMPP notifikace s poslední odpovědí + MCP inbox poll
  *  - session.status (busy)    → model začal generovat (stav 🔵, agent se nemění)
  *  - message.updated          → detekce aktivního agenta (pole info.agent)
- *  - tool.execute.before      → okamžitý update titulku na 🔵 (agent se nemění)
+ *  - tool.execute.before      → report state=running do bridge (bez title update)
  *  - permission.asked         → informativní XMPP notifikace (co se chystá spustit); potvrzení přes TUI
  *  - permission.replied       → aktualizace titulu
  *  - server.instance.disposed → unregister + reset titulu
@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.7.40"
+  const PLUGIN_VERSION = "0.7.42"
 
   // ---------------------------------------------------------------------------
   // Zjistit absolutní cestu k claude-xmpp-client jednou při startu.
@@ -77,6 +77,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     } catch (_) {
       return { exitCode: 1, stdout: "", stderr: "" }
     }
+  }
+
+  const runBridgeClient = async (...args) => {
+    if (bridgeSuppressed()) return { exitCode: 125, stdout: "", stderr: "bridge suppressed" }
+    const res = await runClient(...args)
+    if (isBridgeUnavailableError(res)) {
+      await markBridgeUnavailable(args[0])
+    } else if (res.exitCode === 0) {
+      clearBridgeUnavailable()
+    }
+    return res
   }
 
   const STY     = process.env.STY    ?? ""
@@ -139,10 +150,14 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Interval 90s — nezávislý na session.idle, zajistí obnovu i pokud agent je long-running.
   // Přepis přes env: XMPP_BRIDGE_REREG_INTERVAL_MS (pro testy nastavit na nízkou hodnotu).
   const REREG_INTERVAL_MS = parseInt(process.env.XMPP_BRIDGE_REREG_INTERVAL_MS ?? "90000")
+  const BRIDGE_RETRY_MS = parseInt(process.env.XMPP_BRIDGE_RETRY_MS ?? "60000")
   let isIdle = false
   let pollTimer = null
   let reregTimer = null
   let polling = false  // guard against concurrent pollInbox calls
+  let bridgeUnavailableUntil = 0
+  let desiredBridgeSessionID = null
+  let desiredProjectDir = directory
 
   // ---------------------------------------------------------------------------
   // messageBuffer: lokální fronta zpráv čekajících na doručení.
@@ -212,29 +227,57 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // ---------------------------------------------------------------------------
   const rawRelay = async (to, msg) => {
     if (!CLIENT_BIN) return { exitCode: 127, stderr: "claude-xmpp-client not available" }
+    if (bridgeSuppressed()) return { exitCode: 125, stderr: "bridge suppressed" }
     try {
       const proc = Bun.spawn([CLIENT_BIN, "relay", "--to", to, "--", msg], {
         stdout: "ignore", stderr: "pipe",
       })
       const exitCode = await proc.exited
       const stderr = await new Response(proc.stderr).text()
+      const res = { exitCode, stderr, stdout: "" }
+      if (isBridgeUnavailableError(res)) {
+        await markBridgeUnavailable("relay")
+      } else if (exitCode === 0) {
+        clearBridgeUnavailable()
+      }
       return { exitCode, stderr }
     } catch (err) {
       return { exitCode: -1, stderr: String(err) }
     }
   }
 
+  const bridgeErrorText = (res) => `${res?.stdout ?? ""}\n${res?.stderr ?? ""}`
+
+  const isBridgeUnavailableError = (res) => {
+    const text = bridgeErrorText(res)
+    return text.includes("bridge not running") || text.includes("Another bridge is already running")
+  }
+
+  const isSessionNotFoundError = (res) => bridgeErrorText(res).includes("session not found")
+
+  const bridgeSuppressed = () => bridgeUnavailableUntil > Date.now()
+
+  const markBridgeUnavailable = async (reason) => {
+    bridgeUnavailableUntil = Date.now() + BRIDGE_RETRY_MS
+    await dbg(`bridge unavailable (${reason}); suppressing bridge calls for ${BRIDGE_RETRY_MS} ms`)
+  }
+
+  const clearBridgeUnavailable = () => {
+    bridgeUnavailableUntil = 0
+  }
+
   const pollInbox = async () => {
-    if (!registeredSessionID || !STY || polling) return
+    if (!registeredSessionID || !STY || polling || bridgeSuppressed()) return
     polling = true
     try {
       // Nejdřív zkusit lokální buffer — pokud tam je zpráva, injektovat ji
       // a nechodit vůbec na MCP (model ještě zpracovává předchozí).
       if (messageBuffer.length > 0) {
         const msg = messageBuffer.shift()
-        await dbg("relaying buffered msg to " + registeredSessionID + ": " + msg.slice(0, 80))
         const relayRes = await rawRelay(registeredSessionID, msg)
-        await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
+        if (relayRes.exitCode !== 0 && relayRes.exitCode !== 125 && relayRes.exitCode !== 127 && !isSessionNotFoundError(relayRes)) {
+          await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
+        }
         return
       }
 
@@ -246,11 +289,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           jsonrpc: "2.0", id: 1, method: "initialize",
           params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "opencode-plugin", version: "1.0" } },
         }),
-      }).catch((e) => { dbg("MCP init fetch error: " + e); return null })
+      }).catch(async (e) => {
+        await markBridgeUnavailable("mcp-init")
+        await dbg("MCP init fetch error: " + e)
+        return null
+      })
 
       const mcpSessionId = initRes?.headers?.get("mcp-session-id")
-      await dbg("MCP init status=" + initRes?.status + " mcp-session-id=" + mcpSessionId)
-      if (!mcpSessionId) throw new Error("no mcp-session-id")
+      if (!mcpSessionId) {
+        await markBridgeUnavailable("mcp-init-no-session")
+        return
+      }
 
       // Step 2: tools/call with session header
       const mcpRes = await fetch("http://127.0.0.1:7878/mcp", {
@@ -269,14 +318,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
             arguments: { session_id: registeredSessionID },
           },
         }),
-      }).catch((e) => { dbg("MCP tools/call fetch error: " + e); return null })
+      }).catch(async (e) => {
+        await markBridgeUnavailable("mcp-tools-call")
+        await dbg("MCP tools/call fetch error: " + e)
+        return null
+      })
 
-      await dbg("MCP tools/call status=" + mcpRes?.status + " ok=" + mcpRes?.ok)
+      if (!mcpRes) return
       if (mcpRes && mcpRes.ok) {
         const text = await mcpRes.text().catch(() => null)
         const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
         const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null
-        await dbg("MCP body contentItems=" + JSON.stringify(body?.result?.content))
         // receive_messages returns each message as a separate content item (type=text)
         const contentItems = body?.result?.content
         if (Array.isArray(contentItems) && contentItems.length > 0) {
@@ -288,15 +340,16 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
             for (const item of contentItems.slice(1)) {
               if (item?.text) messageBuffer.push(item.text)
             }
-            await dbg("relaying msg to " + registeredSessionID + ": " + first.slice(0, 80)
-              + (messageBuffer.length ? " (+" + messageBuffer.length + " buffered)" : ""))
             // Inject into session via raw exec (ne bun shell — chrání metaznaky ve zprávách)
             const relayRes = await rawRelay(registeredSessionID, first)
-            await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
+            if (relayRes.exitCode !== 0 && relayRes.exitCode !== 125 && relayRes.exitCode !== 127 && !isSessionNotFoundError(relayRes)) {
+              await dbg("relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200))
+            }
           }
         }
       }
     } catch (err) {
+      await markBridgeUnavailable("mcp-poll")
       await dbg("MCP poll error: " + err)
     } finally {
       polling = false
@@ -341,51 +394,100 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   const inSandbox = detectSandbox()
 
   // ---------------------------------------------------------------------------
-  // Pomocník pro nastavení titulu okna.
-  // emojiTitle — použit přes `screen -X title` (mimo sandbox, plná podpora UTF-8)
-  // asciiTitle  — fallback: zapsán přímo na stdout (fd 1, zděděný Screen pty fd).
-  //               Použit POUZE v bwrap sandboxu (viz detectSandbox výše).
+  // Title scheduler.
   //
-  // Cache: pokud se titulek nezměnil, screen -X title se nevolá. Důvod:
-  //   backtick s intervalem 1s v .screenrc způsobuje překreslování hardstatus
-  //   každou sekundu. Souběžné volání screen -X title (při každém tool callu)
-  //   způsobuje race condition → artefakty (zdvojené okno listy, blikání).
-  //   Cache eliminuje zbytečná volání — titulek se mění jen při změně stavu.
+  // OpenCode/Ink překresluje TUI často. Přímé `screen -X title` z každé události
+  // (zejména tool.execute.before) koliduje s překreslováním Screen caption/
+  // hardstatus a vede k artefaktům. Proto title aktualizujeme přes debounce:
+  //   1. událost jen zapíše desiredTitle
+  //   2. skutečný update proběhne později, jednou
   //
-  // Proč stdout místo /dev/tty v sandboxu:
-  //   bwrap --new-session volá setsid() → proces nemá kontrolující terminál →
-  //   open("/dev/tty") vrátí ENXIO i přes bind-mount. Stdout (fd 1) je však
-  //   zděděný file descriptor stále napojený na Screen pseudo-tty; Screen
-  //   zachytí ESC k ... ESC \ a nastaví název okna bez nutnosti socket přístupu.
-  //
-  // Proč ne $`printf '\x1bk...'`:
-  //   Bun's $ template zachycuje stdout subprocesu do bufferu (jako shell $(...)).
-  //   printf zapíše escape sekvenci do pipe, ne do terminálu — Screen ji nikdy nevidí.
+  // Startup je zvlášť citlivý: první update je deferred přes setImmediate(), aby
+  // neproběhl během inicializace OpenCode TUI.
   // ---------------------------------------------------------------------------
+  const TITLE_DEBOUNCE_MS = parseInt(process.env.XMPP_BRIDGE_TITLE_DEBOUNCE_MS ?? "750")
+  const HSTATUS_SCRUB_DELAY_MS = parseInt(process.env.XMPP_BRIDGE_HSTATUS_SCRUB_DELAY_MS ?? "250")
+  const HSTATUS_SCRUB_PASSES = parseInt(process.env.XMPP_BRIDGE_HSTATUS_SCRUB_PASSES ?? "3")
   let lastTitle = ""
+  let desiredTitle = null
+  let titleTimer = null
+  let hstatusPulseTimers = []
 
-  const setTitle = async (emojiTitle, asciiTitle) => {
+  const applyTitleNow = async (emojiTitle, asciiTitle) => {
     if (STY && !inSandbox) {
-      // Mimo sandbox: použít screen -X title (přes socket).
-      // Cache: přeskočit pokud se titulek nezměnil — zabrání race condition
-      // s backtick překreslováním hardstatus (interval 1s v .screenrc).
       if (emojiTitle === lastTitle) return
       lastTitle = emojiTitle
+      await clearScreenHstatus()
       await $`screen -S ${STY} -p ${WINDOW} -X title ${emojiTitle}`.nothrow()
+      pulseScreenHstatusCleanup()
       return
     }
     if (STY && inSandbox) {
-      // Sandbox fallback: zápis přímo na stdout → Screen pty → Screen nastaví window title.
-      // Funguje i uvnitř bwrap --new-session (zděděný fd, ne /dev/tty).
       if (asciiTitle === lastTitle) return
       lastTitle = asciiTitle
       process.stdout.write('\x1bk' + asciiTitle + '\x1b\\')
       return
     }
-    // tmux nebo bez multiplexeru: OSC 0 (xterm title)
     if (emojiTitle === lastTitle) return
     lastTitle = emojiTitle
     process.stdout.write('\x1b]0;' + emojiTitle + '\x07')
+  }
+
+  const clearTitleTimer = () => {
+    if (titleTimer) {
+      clearTimeout(titleTimer)
+      titleTimer = null
+    }
+  }
+
+  const flushScheduledTitle = async () => {
+    clearTitleTimer()
+    if (!desiredTitle) return
+    const next = desiredTitle
+    desiredTitle = null
+    await applyTitleNow(next.emojiTitle, next.asciiTitle)
+  }
+
+  const scheduleTitle = (emojiTitle, asciiTitle, { immediate = false } = {}) => {
+    const target = { emojiTitle, asciiTitle }
+    const current = STY && inSandbox ? asciiTitle : emojiTitle
+    if (current === lastTitle) {
+      desiredTitle = null
+      clearTitleTimer()
+      return
+    }
+    desiredTitle = target
+    clearTitleTimer()
+    if (immediate) {
+      setImmediate(() => {
+        flushScheduledTitle().catch(err => { dbg("flushScheduledTitle error: " + err) })
+      })
+      return
+    }
+    titleTimer = setTimeout(() => {
+      flushScheduledTitle().catch(err => { dbg("flushScheduledTitle error: " + err) })
+    }, TITLE_DEBOUNCE_MS)
+  }
+
+  const clearScreenHstatus = async () => {
+    if (!STY || inSandbox) return
+    await $`screen -S ${STY} -p ${WINDOW} -X hstatus ${" "}`.nothrow()
+  }
+
+  const clearHstatusPulseTimers = () => {
+    for (const timer of hstatusPulseTimers) clearTimeout(timer)
+    hstatusPulseTimers = []
+  }
+
+  const pulseScreenHstatusCleanup = () => {
+    if (!STY || inSandbox) return
+    clearHstatusPulseTimers()
+    for (let i = 0; i < HSTATUS_SCRUB_PASSES; i += 1) {
+      const timer = setTimeout(() => {
+        clearScreenHstatus().catch(err => { dbg("clearScreenHstatus error: " + err) })
+      }, i * HSTATUS_SCRUB_DELAY_MS)
+      hstatusPulseTimers.push(timer)
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -396,12 +498,15 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // ---------------------------------------------------------------------------
   const reportState = async (state) => {
     if (!registeredSessionID) return true
+    if (bridgeSuppressed()) return true
     const payload = JSON.stringify({ session_id: registeredSessionID, state, mode: agentIcon(currentAgent) })
-    const res = await runClient("state", payload)
+    const res = await runBridgeClient("state", payload)
     // Detekce selhání: stderr obsahuje "Error:" (robustní — nezávisí na exit code)
     // nebo exit code nenulový (fallback)
     const failed = (res.stderr && res.stderr.includes("Error:")) || (res.exitCode !== null && res.exitCode !== 0)
-    await dbg("reportState(" + state + ") exit=" + res.exitCode + " failed=" + failed + (res.stderr ? " stderr=" + res.stderr.slice(0, 100) : ""))
+    if (failed && res.exitCode !== 125 && !isSessionNotFoundError(res) && !isBridgeUnavailableError(res)) {
+      await dbg("reportState(" + state + ") exit=" + res.exitCode + " failed=" + failed + (res.stderr ? " stderr=" + res.stderr.slice(0, 100) : ""))
+    }
     return failed
   }
 
@@ -424,31 +529,36 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // Register je idempotentní — bridge zachová agent_state/agent_mode.
   // ---------------------------------------------------------------------------
   const reregisterIfNeeded = async (failed) => {
-    if (!failed || !registeredSessionID) return
-    await dbg("bridge session unknown, re-registering " + registeredSessionID)
-    const regRes = await runClient("register", makeRegPayload(registeredSessionID))
-    await dbg("register result: exit=" + regRes.exitCode + (regRes.stderr ? " stderr=" + regRes.stderr.slice(0, 100) : ""))
+    if (!failed || !desiredBridgeSessionID || bridgeSuppressed()) return
+    const regRes = await runBridgeClient("register", makeRegPayload(desiredBridgeSessionID, desiredProjectDir))
+    if (regRes.exitCode === 0) {
+      registeredSessionID = desiredBridgeSessionID
+      process.env.BRIDGE_SESSION_ID = desiredBridgeSessionID
+    } else if (regRes.exitCode !== 125 && !isBridgeUnavailableError(regRes)) {
+      await dbg("register result: exit=" + regRes.exitCode + (regRes.stderr ? " stderr=" + regRes.stderr.slice(0, 100) : ""))
+    }
   }
 
   // ---------------------------------------------------------------------------
-  // 1. Zakázat dynamické přepisování titulku okna aplikacemi (dynamictitle off).
-  //    OpenCode TUI posílá \033]0;OpenCode\007 (OSC 0) při každém překreslení,
-  //    což způsobuje překreslení Screen caption/hardstatus a vizuální artefakty
-  //    (zdvojené okno listy, blikání) — zejména s backtick intervalem v .screenrc.
-  //    dynamictitle off říká Screenu: ignoruj title escape sekvence z pty tohoto
-  //    okna. Titulek pak řídí výhradně plugin přes screen -X title (socket).
-  //    Obnoví se na dynamictitle on při server.instance.disposed.
+  // 1. Startup title setup je deferred, aby neproběhl během inicializace TUI.
+  //    tool.execute.before title update záměrně NEDĚLÁME — je příliš častý a
+  //    triggeruje Screen redraw uprostřed render stormu. Titulek se mění jen na
+  //    hrubých stavových přechodech (startup, session.created, session.status,
+  //    session.idle, permission.*). Kritické vizuální stavy (busy, permission)
+  //    se plánují immediate, ostatní procházejí debounce schedulerem.
   // ---------------------------------------------------------------------------
-  if (STY && !inSandbox) {
-    await $`screen -S ${STY} -p ${WINDOW} -X dynamictitle off`.nothrow()
-  }
-
-  // ---------------------------------------------------------------------------
-  // 2. Přejmenovat okno při startu.
-  //    Agent = null (neznámý, zobrazí se ⚪ dokud model poprvé neodpoví).
-  //    Stavový kruh = 🟢 (idle).
-  // ---------------------------------------------------------------------------
-  await setTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
+  setImmediate(async () => {
+    try {
+      if (STY && !inSandbox) {
+        await $`screen -S ${STY} -p ${WINDOW} -X dynamictitle off`.nothrow()
+        await clearScreenHstatus()
+      }
+      pulseScreenHstatusCleanup()
+      scheduleTitle(buildTitle("🟢"), buildAscii("AI.", projectName), { immediate: true })
+    } catch (_) {
+      // Tiše přeskočit — title update nesmí rozbít startup pluginu.
+    }
+  })
 
   // ---------------------------------------------------------------------------
   // 2. Registrace aktivní session do bridge — ODLOŽENA přes setImmediate()
@@ -482,8 +592,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // window má jaké session_id.
       // ---------------------------------------------------------------------------
       let bid = bridgeID(active.id)
-      if (STY) {
-        const listRes = await runClient("list")
+      if (STY && !bridgeSuppressed()) {
+        const listRes = await runBridgeClient("list")
         if (listRes.exitCode === 0 && listRes.stdout) {
           try {
             const sessions = JSON.parse(listRes.stdout)
@@ -502,15 +612,18 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         }
       }
 
-      registeredSessionID = bid
+      desiredBridgeSessionID = bid
+      desiredProjectDir = active.directory
       ocToBridge.set(active.id, bid)
-      // Export identity do env — bash tools agenta vidí $BRIDGE_SESSION_ID
-      process.env.BRIDGE_SESSION_ID = bid
-
-      await runClient("register", makeRegPayload(bid, active.directory))
+      const regRes = await runBridgeClient("register", makeRegPayload(bid, active.directory))
+      if (regRes.exitCode === 0) {
+        registeredSessionID = bid
+        // Export identity do env — bash tools agenta vidí $BRIDGE_SESSION_ID
+        process.env.BRIDGE_SESSION_ID = bid
+      }
       await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${active.directory}`.nothrow()
       // Report initial state (agent is idle at startup, mode = planning)
-      await reportState("idle")
+      if (registeredSessionID) await reportState("idle")
 
       // Spustit periodický inbox polling po registraci
       if (STY && !pollTimer) {
@@ -527,8 +640,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           if (!registeredSessionID) return
           const failed = await reportState(isIdle ? "idle" : "running")
           if (failed) {
-            await dbg("periodic rereg: bridge session unknown, re-registering " + registeredSessionID)
-            await runClient("register", makeRegPayload(registeredSessionID))
+            await reregisterIfNeeded(true)
           }
         }, REREG_INTERVAL_MS)
       }
@@ -539,12 +651,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
   return {
     // -------------------------------------------------------------------------
-    // tool.execute.before: okamžitý update titulku při každém tool callu.
-    // Agent se zde nemění — detekuje se z message.updated (pole info.agent).
+    // tool.execute.before: úmyslně BEZ title update.
+    // Dříve jsme zde přepínali title na 🔵 při každém tool callu, ale to vedlo
+    // k častým `screen -X title` redrawům uprostřed OpenCode TUI renderu.
+    // Stav `running` do bridge reportujeme dál; title se změní při session.status.
     // -------------------------------------------------------------------------
     "tool.execute.before": async (_input, _output) => {
-      // Vždy aktualizovat titulek — agent je zaneprázdněn (🔵)
-      await setTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
       await reportState("running")
     },
 
@@ -558,13 +670,15 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         isIdle = false
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
         if (reregTimer) { clearInterval(reregTimer); reregTimer = null }
+        clearHstatusPulseTimers()
         messageBuffer = []
         if (registeredSessionID) {
           await $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow()
-          await runClient("unregister", registeredSessionID)
+          await runBridgeClient("unregister", registeredSessionID)
         }
-        // Resetovat titul okna a obnovit dynamické přepisování titulku
-        await setTitle("", projectName)
+        clearTitleTimer()
+        desiredTitle = null
+        await applyTitleNow("", projectName)
         if (STY && !inSandbox) {
           await $`screen -S ${STY} -p ${WINDOW} -X dynamictitle on`.nothrow()
         }
@@ -580,15 +694,18 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const name = info.directory.split("/").pop() || info.directory
         // Reset agenta na null — nová session, neznámý agent dokud model neodpoví
         currentAgent = null
-        await setTitle(buildTitle("🟢", name), buildAscii("AI.", name))
+        await clearScreenHstatus()
+        scheduleTitle(buildTitle("🟢", name), buildAscii("AI.", name))
 
         const bid = bridgeID(info.id)
-        await runClient("register", makeRegPayload(bid, info.directory))
+        desiredBridgeSessionID = bid
+        desiredProjectDir = info.directory
+        const regRes = await runBridgeClient("register", makeRegPayload(bid, info.directory))
         await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${info.directory}`.nothrow()
-        registeredSessionID = bid
+        registeredSessionID = regRes.exitCode === 0 ? bid : null
         ocToBridge.set(info.id, bid)
-        process.env.BRIDGE_SESSION_ID = bid
-        await reportState("idle")
+        process.env.BRIDGE_SESSION_ID = regRes.exitCode === 0 ? bid : ""
+        if (registeredSessionID) await reportState("idle")
         return
       }
 
@@ -598,7 +715,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (info.parentID) return
         const bid = ocToBridge.get(info.id) ?? bridgeID(info.id)
         await $`${process.env.HOME}/claude-home/agent-notify.sh end ${bid} ${info.directory}`.nothrow()
-        await runClient("unregister", bid)
+        await runBridgeClient("unregister", bid)
         ocToBridge.delete(info.id)
         // Resetovat registeredSessionID a zastavit reregTimer — jinak by timer
         // dál volal reportState pro smazanou session a okamžitě ji znovu registroval.
@@ -606,6 +723,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           registeredSessionID = null
           process.env.BRIDGE_SESSION_ID = ""
         }
+        if (desiredBridgeSessionID === bid) desiredBridgeSessionID = null
         if (reregTimer) { clearInterval(reregTimer); reregTimer = null }
         return
       }
@@ -618,7 +736,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (statusType === "busy") {
           isIdle = false
           // currentAgent se nemění — zachováme posledního známého agenta
-          await setTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
+          scheduleTitle(buildTitle("🔵"), buildAscii("AI*", projectName), { immediate: true })
           await reportState("running")
         }
         return
@@ -628,7 +746,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
        if (event.type === "session.idle") {
         isIdle = true
         // Titulek: zachovat agent ikonu (ukazuje posledního aktivního agenta) + 🟢
-        await setTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
+        scheduleTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
         const stateFailed = await reportState("idle")
         await reregisterIfNeeded(stateFailed)
 
@@ -671,7 +789,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           project:    lastAssistant.info.path?.cwd ?? directory,
           message:    text,
         })
-        await runClient("response", payload)
+        await runBridgeClient("response", payload)
         return
       }
 
@@ -686,10 +804,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           if (newAgent !== currentAgent) {
             currentAgent = newAgent
             await dbg("agent → " + currentAgent + " (" + agentIcon(currentAgent) + ")")
-            // Aktualizovat titulek s novou agent ikonou (stav se nemění)
-            // Pokud je agent idle, zobrazíme 🟢; pokud running, 🔵.
-            // Bezpečná volba: neměnit stav kruh, jen agent ikonu — titulek
-            // se stejně aktualizuje při příštím session.idle / tool.execute.before.
+            // Titulek neaktualizujeme hned — message.updated může přicházet uprostřed
+            // render burstu. Nová agent ikona se promítne při nejbližším hrubém
+            // stavovém přechodu (session.status/session.idle/permission.*).
           }
         }
         return
@@ -701,7 +818,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // co se chystá spustit; potvrzení musí jít přes TUI.
       if (event.type === "permission.asked") {
         // Titulek: zachovat agent ikonu, přepnout stav na 🔴
-        await setTitle(buildTitle("🔴"), buildAscii("AI!", projectName))
+        scheduleTitle(buildTitle("🔴"), buildAscii("AI!", projectName), { immediate: true })
 
         const askEnabled =
           await $`test -f ${process.env.HOME}/.config/xmpp-notify/ask-enabled`.nothrow()
@@ -742,13 +859,13 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           project:    directory,
           message:    `${perm.permission}\n${detail}`,
         })
-        await runClient("notify", payload)
+        await runBridgeClient("notify", payload)
         return
       }
 
       // --- PERMISSION REPLIED: obnovit 🔵 (dialog uzavřen, model pokračuje) ---
       if (event.type === "permission.replied") {
-        await setTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
+        scheduleTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
         return
       }
     },

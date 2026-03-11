@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import time
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -62,3 +64,45 @@ def load_messages(path: Path | None = None) -> Messages:
     msg_fields = {f.name for f in fields(Messages)}
     overrides = {k: v for k, v in data.items() if k in msg_fields and isinstance(v, str)}
     return Messages(**overrides)
+
+
+def format_generated_agent_message(
+    *,
+    msg_type: str,
+    message: str,
+    from_session_id: str | None = None,
+    to_session_id: str | None = None,
+    mode: str | None = None,
+    message_id: str | None = None,
+) -> str:
+    """Wrap inter-agent text in a clearly generated envelope with JSON metadata.
+
+    The wrapper serves two purposes:
+      1. Human readers in shared terminal windows can immediately see that the
+         text was injected by the bridge rather than typed by a human.
+      2. Agents can parse the JSON line if they need structured metadata such as
+         relay/broadcast mode or sender session ID.
+
+    If *message* is already wrapped in this format, it is returned unchanged so
+    relay+nudge/inbox paths do not double-wrap the payload.
+    """
+    if message.startswith("[bridge-generated message]\n"):
+        lines = message.splitlines()
+        if len(lines) >= 2:
+            try:
+                meta = json.loads(lines[1])
+            except json.JSONDecodeError:
+                meta = None
+            if isinstance(meta, dict) and meta.get("generated") is True:
+                return message
+
+    meta = {
+        "type": msg_type,
+        "generated": True,
+        "from": from_session_id,
+        "to": to_session_id,
+        "mode": mode,
+        "message_id": message_id,
+        "ts": time.time(),
+    }
+    return "[bridge-generated message]\n" + json.dumps(meta, ensure_ascii=False) + "\n\n" + message

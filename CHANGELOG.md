@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.42] - 2026-03-10
+
+### Added
+- **Bridge-native MCP file locks** — the bridge now stores file locks in SQLite
+  and exposes them via MCP: `acquire_file_lock`, `release_file_lock`,
+  `list_file_locks`, and `cleanup_stale_locks`. This is the first major step
+  toward MCP-only multi-agent coordination without shell-side lock helpers.
+
+### Changed
+- **`list_file_locks` / `cleanup_stale_locks` merge native and legacy locks** —
+  MCP now returns both bridge-native locks (`source: "bridge"`) and legacy
+  lock-hint files from `~/.claude/working` (`source: "legacy"`), so agents can
+  migrate gradually while still seeing the full coordination picture.
+- **Inter-agent terminal injections are explicitly marked as generated** —
+  relay/broadcast deliveries are wrapped in a `[bridge-generated message]` block
+  with a JSON metadata line, making it obvious in shared Screen/tmux windows
+  that the text came from the bridge and not a human.
+- **OpenCode plugin reduces no-bridge noise** — when the bridge/MCP server is
+  down, the plugin enters a retry cooldown (`XMPP_BRIDGE_RETRY_MS`) and stops
+  hammering bridge calls on every idle/state event, which reduces expected error
+  spam in logs/SIEM.
+
+### Fixed
+- **Screen integration stabilised further** — title updates are debounced,
+  startup title work is deferred, `tool.execute.before` no longer triggers
+  Screen redraws, and per-window `hstatus` cleanup avoids prompt garbage in
+  hardstatus/caption without corrupting the terminal.
+- **Generated relay messages no longer double-wrap** — nudge/inbox delivery
+  paths detect an already wrapped bridge-generated payload and leave it intact.
+
+### Tests
+- Added and extended coverage for generated-message formatting, Screen title
+  behavior, no-bridge plugin cooldown, native file lock registry, and MCP file
+  lock tools.
+
+## [0.7.41] - 2026-03-10
+
+### Fixed
+- **Screen/OpenCode redraw artefacts — stop updating Screen title from `tool.execute.before`**.
+  The previous implementation still called `screen -X title` from very frequent
+  runtime events while OpenCode TUI was actively rendering, which could collide
+  with GNU Screen caption/hardstatus redraws in some setups and produce repeated
+  status lines, flicker, and window-list garbage.
+
+  The plugin now:
+  - removes title updates from `tool.execute.before` entirely (it still reports
+    `running` state to the bridge)
+  - debounces all title writes via a scheduler (`XMPP_BRIDGE_TITLE_DEBOUNCE_MS`,
+    default 750 ms)
+  - defers startup title setup via `setImmediate()` so it does not run during
+    the most fragile part of OpenCode TUI initialisation
+  - keeps title changes only on coarse state transitions (`startup`,
+    `session.created`, `session.status`, `session.idle`, `permission.*`)
+  - clears pending title timers during shutdown cleanup
+
+### Added
+- **Plugin redraw-safety tests** — structural tests now verify that title updates
+  are scheduled/debounced, that `tool.execute.before` no longer changes the
+  title, and that shutdown clears pending title timers.
+- **Screen title integration smoke test** — new integration coverage exercises
+  real `screen -X title`, `screen -X dynamictitle`, and `screen -Q title`
+  against an isolated Screen session with aggressive `caption`/`hardstatus` /
+  `backtick` settings.
+
 ## [0.7.40] - 2026-03-10
 
 ### Fixed

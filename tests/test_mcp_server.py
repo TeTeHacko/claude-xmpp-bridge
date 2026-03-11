@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -50,6 +51,54 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     bridge.registry = MagicMock()
     bridge.registry.sessions = sessions or {}
     bridge.registry.get = MagicMock(side_effect=lambda sid: (sessions or {}).get(sid))
+    file_locks: dict[str, dict] = {}
+
+    def _acquire_file_lock(session_id: str, filepath: str, project: str, reason: str | None = None):
+        existing = file_locks.get(filepath)
+        if existing is None:
+            lock = {
+                "session_id": session_id,
+                "filepath": filepath,
+                "project": project,
+                "reason": reason,
+                "locked_at": "2026-03-11T01:00:00+01:00",
+            }
+            file_locks[filepath] = lock
+            return True, lock, False
+        if existing["session_id"] == session_id or existing["session_id"] not in bridge.registry.sessions:
+            lock = {
+                "session_id": session_id,
+                "filepath": filepath,
+                "project": project,
+                "reason": reason,
+                "locked_at": "2026-03-11T01:00:01+01:00",
+            }
+            file_locks[filepath] = lock
+            return True, lock, existing["session_id"] != session_id
+        return False, existing, False
+
+    def _release_file_lock(session_id: str, filepath: str, force: bool = False):
+        existing = file_locks.get(filepath)
+        if existing is None:
+            return False
+        if force or existing["session_id"] == session_id:
+            del file_locks[filepath]
+            return True
+        return False
+
+    def _list_file_locks():
+        return [dict(v) for v in sorted(file_locks.values(), key=lambda item: item["filepath"])]
+
+    def _cleanup_stale_file_locks():
+        removed = [dict(v) for v in file_locks.values() if v["session_id"] not in bridge.registry.sessions]
+        for lock in removed:
+            file_locks.pop(lock["filepath"], None)
+        return sorted(removed, key=lambda item: item["filepath"])
+
+    bridge.registry.acquire_file_lock = MagicMock(side_effect=_acquire_file_lock)
+    bridge.registry.release_file_lock = MagicMock(side_effect=_release_file_lock)
+    bridge.registry.list_file_locks = MagicMock(side_effect=_list_file_locks)
+    bridge.registry.cleanup_stale_file_locks = MagicMock(side_effect=_cleanup_stale_file_locks)
     bridge._stuff_to_session = AsyncMock(return_value=True)
     bridge._xmpp_send = MagicMock(return_value=True)
     bridge._session_prefix = MagicMock(side_effect=lambda info: f"[{info['project'].split('/')[-1]}]")
@@ -229,7 +278,10 @@ class TestSendMessageTool:
     async def test_send_screen_false_enqueues(self, started_server: BridgeMCPServer):
         started_server._bridge.registry.inbox_put = MagicMock()
         await started_server._tool_send_message(to="ses_AAA", message="ping", screen=False)
-        started_server._bridge.registry.inbox_put.assert_called_once_with("ses_AAA", "ping")
+        args = started_server._bridge.registry.inbox_put.call_args[0]
+        assert args[0] == "ses_AAA"
+        assert "[bridge-generated message]" in args[1]
+        assert args[1].endswith("ping")
 
     async def test_send_screen_false_no_backend_ok(self, started_server: BridgeMCPServer):
         """screen=False should succeed even for sessions without a backend."""
@@ -283,7 +335,10 @@ class TestBroadcastMessageTool:
         started_server._bridge.registry.inbox_put = MagicMock()
         await started_server._tool_broadcast_message(message="broadcast msg", sender_session_id="ses_AAA")
         # relay failed → inbox_put should have been called for ses_BBB
-        started_server._bridge.registry.inbox_put.assert_called_once_with("ses_BBB", "broadcast msg")
+        args = started_server._bridge.registry.inbox_put.call_args[0]
+        assert args[0] == "ses_BBB"
+        assert "[bridge-generated message]" in args[1]
+        assert args[1].endswith("broadcast msg")
 
     async def test_broadcast_missing_message(self, started_server: BridgeMCPServer):
         result = await started_server._tool_broadcast_message(message="", sender_session_id="")
@@ -371,6 +426,107 @@ class TestListSessionsTool:
         result = server._tool_list_sessions()
         assert result[0]["plugin_version"] == ""
 
+
+# ---------------------------------------------------------------------------
+# file lock tools
+# ---------------------------------------------------------------------------
+
+
+class TestFileLockTools:
+    def test_acquire_file_lock_succeeds(self, started_server: BridgeMCPServer):
+        result = started_server._tool_acquire_file_lock(
+            session_id="ses_AAA", filepath="/tmp/a.py", project="", reason="edit"
+        )
+        assert result["ok"] is True
+        assert result["lock"]["session_id"] == "ses_AAA"
+        assert result["lock"]["filepath"] == "/tmp/a.py"
+        assert result["lock"]["reason"] == "edit"
+
+    def test_acquire_file_lock_reports_conflict(self, started_server: BridgeMCPServer):
+        started_server._tool_acquire_file_lock(session_id="ses_AAA", filepath="/tmp/a.py")
+        result = started_server._tool_acquire_file_lock(session_id="ses_BBB", filepath="/tmp/a.py")
+        assert result["ok"] is False
+        assert result["lock"]["session_id"] == "ses_AAA"
+
+    def test_release_file_lock_succeeds(self, started_server: BridgeMCPServer):
+        started_server._tool_acquire_file_lock(session_id="ses_AAA", filepath="/tmp/a.py")
+        result = started_server._tool_release_file_lock(session_id="ses_AAA", filepath="/tmp/a.py")
+        assert result == {"ok": True, "released": True}
+
+    def test_list_file_locks_returns_active_and_stale(self, started_server: BridgeMCPServer, tmp_path):
+        started_server._tool_acquire_file_lock(session_id="ses_AAA", filepath="/tmp/native.py")
+        working = tmp_path / ".claude" / "working"
+        working.mkdir(parents=True)
+        (working / "stale---b.py").write_text(
+            json.dumps(
+                {
+                    "session_id": "ses_STALE",
+                    "filepath": "/tmp/b.py",
+                    "project": "~/alpha",
+                    "locked_at": "2026-03-11T01:01:00+01:00",
+                }
+            )
+        )
+
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            locks = started_server._tool_list_file_locks(project="", include_stale=True)
+
+        assert len(locks) == 2
+        assert {(lock["session_id"], lock["source"]) for lock in locks} == {
+            ("ses_AAA", "bridge"),
+            ("ses_STALE", "legacy"),
+        }
+        stale = {(lock["session_id"], lock["source"]): lock["stale"] for lock in locks}
+        assert stale[("ses_AAA", "bridge")] is False
+        assert stale[("ses_STALE", "legacy")] is True
+
+    def test_list_file_locks_can_hide_stale(self, started_server: BridgeMCPServer, tmp_path):
+        working = tmp_path / ".claude" / "working"
+        working.mkdir(parents=True)
+        (working / "stale---b.py").write_text(
+            json.dumps(
+                {
+                    "session_id": "ses_STALE",
+                    "filepath": "/tmp/b.py",
+                    "project": "~/alpha",
+                    "locked_at": "2026-03-11T01:01:00+01:00",
+                }
+            )
+        )
+
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            locks = started_server._tool_list_file_locks(include_stale=False)
+
+        assert locks == []
+
+    def test_cleanup_stale_locks_removes_only_stale(self, started_server: BridgeMCPServer, tmp_path):
+        started_server._tool_acquire_file_lock(session_id="ses_AAA", filepath="/tmp/native.py")
+        started_server._bridge.registry.register("ses_STALE", "1", "1", "/tmp/stale")
+        started_server._bridge.registry.acquire_file_lock("ses_STALE", "/tmp/native-stale.py", "/tmp/stale")
+        started_server._bridge.registry.unregister("ses_STALE")
+        working = tmp_path / ".claude" / "working"
+        working.mkdir(parents=True)
+        stale = working / "stale---b.py"
+        stale.write_text(
+            json.dumps(
+                {
+                    "session_id": "ses_STALE",
+                    "filepath": "/tmp/b.py",
+                    "project": "~/alpha",
+                    "locked_at": "2026-03-11T01:01:00+01:00",
+                }
+            )
+        )
+
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            result = started_server._tool_cleanup_stale_locks(project="")
+
+        assert result["removed"] == 2
+        assert {lock["filepath"] for lock in result["locks"]} == {"/tmp/b.py", "/tmp/native-stale.py"}
+        assert started_server._bridge.registry.list_file_locks()[0]["filepath"] == "/tmp/native.py"
+        assert not stale.exists()
+        started_server._bridge.audit.log.assert_called()
+
     def test_list_agent_state_none_returns_empty_string(self, server: BridgeMCPServer):
         sessions = {"ses_X": _make_session_info(agent_state=None)}
         server._bridge = _make_bridge(sessions=sessions)
@@ -395,6 +551,10 @@ class TestBuildMcp:
         assert "receive_messages" in tool_names
         assert "broadcast_message" in tool_names
         assert "list_sessions" in tool_names
+        assert "list_file_locks" in tool_names
+        assert "acquire_file_lock" in tool_names
+        assert "release_file_lock" in tool_names
+        assert "cleanup_stale_locks" in tool_names
 
     def test_build_mcp_uses_correct_port(self, started_server: BridgeMCPServer):
         mcp = started_server._build_mcp()
@@ -585,6 +745,19 @@ class TestSendMessageNudge:
         started_server._bridge._nudge_session.assert_awaited_once()
         started_server._bridge._stuff_to_session.assert_not_awaited()
         assert "nudge" in result.lower() or "delivered" in result.lower() or "alpha" in result.lower()
+
+    async def test_send_screen_true_wraps_generated_message(self, started_server: BridgeMCPServer):
+        await started_server._tool_send_message(to="ses_AAA", message="ping")
+        wrapped = started_server._bridge._stuff_to_session.await_args.args[2]
+        assert "[bridge-generated message]" in wrapped
+        assert wrapped.endswith("ping")
+
+    async def test_send_nudge_true_wraps_generated_message(self, started_server: BridgeMCPServer):
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True)
+        wrapped = started_server._bridge._nudge_session.await_args.args[2]
+        assert "[bridge-generated message]" in wrapped
+        assert wrapped.endswith("ping")
 
     async def test_send_nudge_true_returns_message_id_with_nudge_tag(self, started_server: BridgeMCPServer):
         """nudge=True confirmation string must include both [id:...] and (nudge)."""

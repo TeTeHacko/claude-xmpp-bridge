@@ -3676,6 +3676,8 @@ class TestBroadcast:
         assert "agent-b" in delivered_sids
         assert "agent-c" in delivered_sids
         assert "agent-a" not in delivered_sids
+        assert all("[bridge-generated message]" in text for _sid, text in stuffed)
+        assert all(text.endswith("start feature X") for _sid, text in stuffed)
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -4495,6 +4497,9 @@ class TestNudgePattern:
         assert resp == {"ok": True}
         bridge._nudge_session.assert_awaited_once()
         bridge._stuff_to_session.assert_not_awaited()
+        wrapped = bridge._nudge_session.await_args.args[2]
+        assert "[bridge-generated message]" in wrapped
+        assert wrapped.endswith("hi")
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -4509,6 +4514,9 @@ class TestNudgePattern:
         assert resp == {"ok": True}
         bridge._stuff_to_session.assert_awaited_once()
         bridge._nudge_session.assert_not_awaited()
+        wrapped = bridge._stuff_to_session.await_args.args[2]
+        assert "[bridge-generated message]" in wrapped
+        assert wrapped.endswith("hi")
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
