@@ -384,6 +384,18 @@ class TestPluginTitleFallback:
             "dispose path must not emit an explicit title reset escape sequence during shutdown"
         )
 
+    def test_dispose_uses_fire_and_forget_cleanup(self):
+        text = _plugin_text()
+        assert "const fireAndForget = (promise, label) => {" in text, "plugin must define fire-and-forget helper"
+        body = _function_body(text, 'if (event.type === "server.instance.disposed")')
+        assert body, "server.instance.disposed branch not found in plugin"
+        assert 'fireAndForget(runBridgeClient("unregister", registeredSessionID), "bridge-unregister")' in body, (
+            "dispose path must not await unregister synchronously"
+        )
+        assert 'fireAndForget(' in body and 'agent-notify-end' in body, (
+            "dispose path must send end notification without blocking shutdown"
+        )
+
     def test_message_updated_no_longer_updates_title_immediately(self):
         """message.updated should only update currentAgent and rely on later state
         transitions for the title update.

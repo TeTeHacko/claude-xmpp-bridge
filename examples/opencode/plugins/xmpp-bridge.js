@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.1"
+  const PLUGIN_VERSION = "0.8.2"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -307,6 +307,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
   const clearBridgeUnavailable = () => {
     bridgeUnavailableUntil = 0
+  }
+
+  const fireAndForget = (promise, label) => {
+    promise.catch(err => { errlog(`${label}: ${err}`, `fire-and-forget:${label}`) })
   }
 
   const stopActiveBridgeTimers = () => {
@@ -775,16 +779,19 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null }
         clearHstatusPulseTimers()
         messageBuffer = []
-        if (registeredSessionID) {
-          if (CLIENT_BIN) {
-            await $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow()
-          }
-          await runBridgeClient("unregister", registeredSessionID)
-        }
         clearTitleTimer()
         desiredTitle = null
+        if (registeredSessionID) {
+          if (CLIENT_BIN) {
+            fireAndForget(
+              $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow(),
+              "agent-notify-end"
+            )
+          }
+          fireAndForget(runBridgeClient("unregister", registeredSessionID), "bridge-unregister")
+        }
         if (STY && !inSandbox) {
-          await $`screen -S ${STY} -p ${WINDOW} -X dynamictitle on`.nothrow()
+          fireAndForget($`screen -S ${STY} -p ${WINDOW} -X dynamictitle on`.nothrow(), "screen-dynamictitle-on")
         }
         return
       }
