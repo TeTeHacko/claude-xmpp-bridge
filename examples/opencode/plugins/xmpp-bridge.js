@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.0"
+  const PLUGIN_VERSION = "0.8.1"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -783,7 +783,6 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         }
         clearTitleTimer()
         desiredTitle = null
-        await applyTitleNow("", projectName)
         if (STY && !inSandbox) {
           await $`screen -S ${STY} -p ${WINDOW} -X dynamictitle on`.nothrow()
         }

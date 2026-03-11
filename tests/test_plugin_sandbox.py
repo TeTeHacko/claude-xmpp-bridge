@@ -376,6 +376,14 @@ class TestPluginTitleFallback:
         assert "desiredTitle = null" in text, "dispose path must discard pending title request"
         assert "clearHstatusPulseTimers()" in text, "dispose path must clear pending hstatus cleanup pulses"
 
+    def test_dispose_does_not_force_title_reset_escape_sequence(self):
+        text = _plugin_text()
+        body = _function_body(text, 'if (event.type === "server.instance.disposed")')
+        assert body, "server.instance.disposed branch not found in plugin"
+        assert 'applyTitleNow("", projectName)' not in body, (
+            "dispose path must not emit an explicit title reset escape sequence during shutdown"
+        )
+
     def test_message_updated_no_longer_updates_title_immediately(self):
         """message.updated should only update currentAgent and rely on later state
         transitions for the title update.
