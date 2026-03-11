@@ -4596,7 +4596,24 @@ class TestNudgePattern:
             ok = await bridge._nudge_session("agent-b", info, "nudge me!")
 
         assert ok is True
-        bridge.mcp_server.enqueue.assert_called_once_with("agent-b", "nudge me!")
+        bridge.mcp_server.enqueue.assert_called_once_with("agent-b", "nudge me!", from_session=None)
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_nudge_session_passes_from_session_to_inbox(self, MockXMPP, tmp_path):
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        assert bridge.mcp_server is not None
+        bridge.mcp_server.enqueue = MagicMock()
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            info = bridge.registry.get("agent-b")
+            assert info is not None
+            ok = await bridge._nudge_session("agent-b", info, "nudge me!", from_session="agent-a")
+
+        assert ok is True
+        bridge.mcp_server.enqueue.assert_called_once_with("agent-b", "nudge me!", from_session="agent-a")
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -4736,7 +4753,7 @@ class TestNudgePattern:
 
         nudged: list[str] = []
 
-        async def _mock_nudge(session_id, info, text):
+        async def _mock_nudge(session_id, info, text, from_session=None):
             nudged.append(session_id)
             return True
 

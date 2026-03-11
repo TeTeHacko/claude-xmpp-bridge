@@ -39,6 +39,7 @@ class SessionInfo(TypedDict):
     agent_mode: str | None  # last known mode: "planning", "code", "build"
     last_seen: float | None  # timestamp of last successful "state" heartbeat
     todos_version: int  # optimistic-lock version for bridge-native todos
+    last_agent_sender: str | None  # last known agent session_id that sent a relay/inbox message
 
 
 class FileLockInfo(TypedDict):
@@ -147,6 +148,8 @@ class SessionRegistry:
             self._db.execute("ALTER TABLE sessions ADD COLUMN last_seen REAL")
         if "todos_version" not in cols:
             self._db.execute("ALTER TABLE sessions ADD COLUMN todos_version INTEGER NOT NULL DEFAULT 0")
+        if "last_agent_sender" not in cols:
+            self._db.execute("ALTER TABLE sessions ADD COLUMN last_agent_sender TEXT")
         todo_cols = {row[1] for row in self._db.execute("PRAGMA table_info(todos)")}
         if todo_cols and "todo_id" not in todo_cols:
             self._db.execute("ALTER TABLE todos ADD COLUMN todo_id TEXT")
@@ -162,7 +165,7 @@ class SessionRegistry:
         """Load sessions and state from SQLite on startup."""
         for row in self._db.execute(
             "SELECT session_id, sty, window, project, backend, source, registered_at,"
-            "       plugin_version, agent_state, agent_mode, last_seen, todos_version FROM sessions"
+            "       plugin_version, agent_state, agent_mode, last_seen, todos_version, last_agent_sender FROM sessions"
         ):
             self.sessions[row[0]] = SessionInfo(
                 sty=row[1] or "",
@@ -176,6 +179,7 @@ class SessionRegistry:
                 agent_mode=row[9],
                 last_seen=float(row[10]) if row[10] is not None else None,
                 todos_version=int(row[11] or 0),
+                last_agent_sender=row[12],
             )
         row = self._db.execute("SELECT value FROM state WHERE key = 'last_active'").fetchone()
         if row and row[0] in self.sessions:
@@ -187,8 +191,8 @@ class SessionRegistry:
         self._db.execute(
             "INSERT OR REPLACE INTO sessions"
             " (session_id, sty, window, project, backend, source,"
-            "  registered_at, plugin_version, agent_state, agent_mode, last_seen, todos_version)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  registered_at, plugin_version, agent_state, agent_mode, last_seen, todos_version, last_agent_sender)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 info["sty"],
@@ -202,6 +206,7 @@ class SessionRegistry:
                 info.get("agent_mode"),
                 info.get("last_seen"),
                 info.get("todos_version", 0),
+                info.get("last_agent_sender"),
             ),
         )
         self._save_last_active()
@@ -244,6 +249,7 @@ class SessionRegistry:
         prev_mode = self.sessions[session_id].get("agent_mode") if is_reregister else None
         prev_last_seen = self.sessions[session_id].get("last_seen") if is_reregister else None
         prev_todos_version = self.sessions[session_id].get("todos_version", 0) if is_reregister else 0
+        prev_last_agent_sender = self.sessions[session_id].get("last_agent_sender") if is_reregister else None
         self.sessions[session_id] = SessionInfo(
             sty=sty,
             window=window,
@@ -256,6 +262,7 @@ class SessionRegistry:
             agent_mode=prev_mode,
             last_seen=prev_last_seen,
             todos_version=prev_todos_version,
+            last_agent_sender=prev_last_agent_sender,
         )
         # Don't flip last_active when the same session re-registers — it would
         # hijack plain-text routing away from whatever the user targeted last.
@@ -380,6 +387,40 @@ class SessionRegistry:
                     ids,
                 )
         return [r[1] for r in rows]
+
+    def inbox_drain_with_senders(self, session_id: str) -> list[tuple[str, str | None]]:
+        """Atomically drain messages together with their stored from_session metadata."""
+        with self._db:
+            rows = self._db.execute(
+                "SELECT id, message, from_session FROM inbox WHERE to_session = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+            if rows:
+                ids = [r[0] for r in rows]
+                self._db.execute(
+                    f"DELETE FROM inbox WHERE id IN ({','.join('?' * len(ids))})",  # noqa: S608
+                    ids,
+                )
+        return [(r[1], r[2]) for r in rows]
+
+    def set_last_agent_sender(self, session_id: str, sender_session_id: str | None) -> bool:
+        """Persist the last replyable agent sender for a session."""
+        if session_id not in self.sessions:
+            return False
+        self.sessions[session_id]["last_agent_sender"] = sender_session_id
+        self._db.execute(
+            "UPDATE sessions SET last_agent_sender = ? WHERE session_id = ?",
+            (sender_session_id, session_id),
+        )
+        self._db.commit()
+        return True
+
+    def get_last_agent_sender(self, session_id: str) -> str | None:
+        """Return the last remembered replyable agent sender for a session."""
+        info = self.sessions.get(session_id)
+        if not info:
+            return None
+        return info.get("last_agent_sender")
 
     def inbox_count(self, session_id: str) -> int:
         """Return the number of pending messages for *session_id*."""

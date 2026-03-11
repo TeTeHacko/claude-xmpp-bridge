@@ -57,6 +57,7 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     bridge.registry.get = MagicMock(side_effect=lambda sid: (sessions or {}).get(sid))
     file_locks: dict[str, dict] = {}
     todos_by_session: dict[str, list[dict]] = {}
+    last_agent_sender_by_session: dict[str, str | None] = {}
 
     def _acquire_file_lock(session_id: str, filepath: str, project: str, reason: str | None = None):
         existing = file_locks.get(filepath)
@@ -196,6 +197,16 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     def _inbox_count(_session_id: str):
         return 0
 
+    def _set_last_agent_sender(session_id: str, sender_session_id: str | None):
+        if session_id not in bridge.registry.sessions:
+            return False
+        bridge.registry.sessions[session_id]["last_agent_sender"] = sender_session_id
+        last_agent_sender_by_session[session_id] = sender_session_id
+        return True
+
+    def _get_last_agent_sender(session_id: str):
+        return last_agent_sender_by_session.get(session_id)
+
     def _session_counts(session_id: str):
         return {
             "inbox_count": bridge.registry.inbox_count(session_id),
@@ -320,6 +331,8 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     bridge.registry.update_todo = MagicMock(side_effect=_update_todo)
     bridge.registry.remove_todo = MagicMock(side_effect=_remove_todo)
     bridge.registry.inbox_count = MagicMock(side_effect=_inbox_count)
+    bridge.registry.set_last_agent_sender = MagicMock(side_effect=_set_last_agent_sender)
+    bridge.registry.get_last_agent_sender = MagicMock(side_effect=_get_last_agent_sender)
     bridge._stuff_to_session = AsyncMock(return_value=True)
     bridge._xmpp_send = MagicMock(return_value=True)
     bridge._session_prefix = MagicMock(side_effect=lambda info: f"[{info['project'].split('/')[-1]}]")
@@ -392,45 +405,63 @@ class TestEnqueueAndReceive:
     def test_enqueue_calls_registry_inbox_put(self, started_server: BridgeMCPServer):
         started_server._bridge.registry.inbox_put = MagicMock()
         started_server.enqueue("ses_AAA", "hello")
-        started_server._bridge.registry.inbox_put.assert_called_once_with("ses_AAA", "hello")
+        started_server._bridge.registry.inbox_put.assert_called_once_with("ses_AAA", "hello", from_session=None)
+
+    def test_enqueue_passes_from_session(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.inbox_put = MagicMock()
+        started_server.enqueue("ses_AAA", "hello", from_session="ses_BBB")
+        started_server._bridge.registry.inbox_put.assert_called_once_with("ses_AAA", "hello", from_session="ses_BBB")
 
     def test_enqueue_before_bridge_logs_warning_no_crash(self, server: BridgeMCPServer):
         """enqueue() before bridge is set should not raise."""
         server.enqueue("ses_AAA", "hello")  # must not raise
 
     def test_receive_calls_registry_inbox_drain(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain = MagicMock(return_value=["msg1", "msg2"])
+        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(
+            return_value=[("msg1", None), ("msg2", None)]
+        )
         msgs = started_server._tool_receive_messages(session_id="ses_AAA")
         assert msgs == ["msg1", "msg2"]
-        started_server._bridge.registry.inbox_drain.assert_called_once_with("ses_AAA")
+        started_server._bridge.registry.inbox_drain_with_senders.assert_called_once_with("ses_AAA")
 
     def test_receive_drains_queue(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain = MagicMock(return_value=["msg1", "msg2"])
+        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(
+            return_value=[("msg1", None), ("msg2", None)]
+        )
         msgs = started_server._tool_receive_messages(session_id="ses_AAA")
         assert msgs == ["msg1", "msg2"]
 
     def test_receive_empty_inbox_returns_empty_list(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain = MagicMock(return_value=[])
+        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[])
         assert started_server._tool_receive_messages(session_id="ses_AAA") == []
 
     def test_receive_unknown_session_returns_empty(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain = MagicMock(return_value=[])
+        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[])
         assert started_server._tool_receive_messages(session_id="ses_UNKNOWN") == []
 
     def test_receive_without_bridge_returns_empty(self, server: BridgeMCPServer):
         assert server._tool_receive_messages(session_id="ses_X") == []
 
     def test_receive_logs_audit_when_messages_present(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain = MagicMock(return_value=["hello"])
+        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[("hello", None)])
         started_server._tool_receive_messages(session_id="ses_AAA")
         started_server._bridge.audit.log.assert_called()
         event_arg = started_server._bridge.audit.log.call_args[0][0]
         assert event_arg == "MCP_RECEIVE"
 
     def test_receive_no_audit_when_empty(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain = MagicMock(return_value=[])
+        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[])
         started_server._tool_receive_messages(session_id="ses_AAA")
         started_server._bridge.audit.log.assert_not_called()
+
+    def test_receive_updates_last_agent_sender_from_inbox_metadata(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[("hello", "ses_BBB")])
+        started_server._bridge.registry.set_last_agent_sender = MagicMock(return_value=True)
+
+        msgs = started_server._tool_receive_messages(session_id="ses_AAA")
+
+        assert msgs == ["hello"]
+        started_server._bridge.registry.set_last_agent_sender.assert_called_once_with("ses_AAA", "ses_BBB")
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +523,21 @@ class TestSendMessageTool:
         assert payload["to"] == "ses_AAA"
         assert payload["message"] == "ping"
         assert "message_id" in payload
+
+    async def test_send_includes_sender_session_id_in_relay_metadata(self, started_server: BridgeMCPServer):
+        await started_server._tool_send_message(
+            to="ses_AAA", message="ping", sender_session_id="ses_BBB", screen=False
+        )
+        args = started_server._bridge.registry.inbox_put.call_args[0]
+        wrapped = args[1]
+        lines = wrapped.splitlines()
+        payload = json.loads(lines[1])
+        assert payload["from"] == "ses_BBB"
+
+    async def test_send_includes_sender_session_id_in_xmpp_notification(self, started_server: BridgeMCPServer):
+        await started_server._tool_send_message(to="ses_AAA", message="ping", sender_session_id="ses_BBB")
+        payload = json.loads(started_server._bridge._xmpp_send.call_args[0][0])
+        assert payload["from"] == "ses_BBB"
 
     async def test_send_returns_message_id(self, started_server: BridgeMCPServer):
         result = await started_server._tool_send_message(to="ses_AAA", message="ping")
@@ -922,6 +968,7 @@ class TestBuildMcp:
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
         assert "send_message" in tool_names
         assert "receive_messages" in tool_names
+        assert "reply_to_last_sender" in tool_names
         assert "broadcast_message" in tool_names
         assert "list_sessions" in tool_names
         assert "get_session_context" in tool_names
@@ -938,6 +985,28 @@ class TestBuildMcp:
     def test_build_mcp_uses_correct_port(self, started_server: BridgeMCPServer):
         mcp = started_server._build_mcp()
         assert mcp.settings.port == started_server.port
+
+
+class TestReplyToLastSenderTool:
+    async def test_reply_to_last_sender_uses_stored_sender(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.set_last_agent_sender("ses_AAA", "ses_BBB")
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+
+        result = await started_server._tool_reply_to_last_sender(
+            session_id="ses_AAA", message="reply back", nudge=True
+        )
+
+        assert "nudge" in result.lower()
+        wrapped = started_server._bridge._nudge_session.await_args.args[2]
+        payload = json.loads(wrapped.splitlines()[1])
+        assert payload["from"] == "ses_AAA"
+        assert payload["to"] == "ses_BBB"
+
+    async def test_reply_to_last_sender_without_known_sender_returns_error(self, started_server: BridgeMCPServer):
+        result = await started_server._tool_reply_to_last_sender(
+            session_id="ses_AAA", message="reply back", nudge=True
+        )
+        assert "no known sender" in result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1081,9 +1150,9 @@ class TestEnqueueForMcp:
         ):
             bridge = XMPPBridge(cfg)
             assert bridge.mcp_server is not None
-            bridge.mcp_server.enqueue = MagicMock()
-            bridge._enqueue_for_mcp("ses_TEST", "hello")
-            bridge.mcp_server.enqueue.assert_called_once_with("ses_TEST", "hello")
+        bridge.mcp_server.enqueue = MagicMock()
+        bridge._enqueue_for_mcp("ses_TEST", "hello")
+        bridge.mcp_server.enqueue.assert_called_once_with("ses_TEST", "hello", from_session=None)
 
     def test_enqueue_for_mcp_noop_when_disabled(self):
         from unittest.mock import patch
@@ -1163,9 +1232,12 @@ class TestSendMessageNudge:
         started_server._bridge._nudge_session = AsyncMock(return_value=True)
         started_server._bridge.registry.inbox_put = MagicMock()
 
-        await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True)
+        await started_server._tool_send_message(
+            to="ses_AAA", message="ping", nudge=True, sender_session_id="ses_BBB"
+        )
 
         started_server._bridge.registry.inbox_put.assert_not_called()
+        assert started_server._bridge._nudge_session.await_args.kwargs["from_session"] == "ses_BBB"
 
     async def test_send_nudge_true_failure_returns_error(self, started_server: BridgeMCPServer):
         """nudge=True when CR send fails must return a failure message."""

@@ -279,7 +279,14 @@ class XMPPBridge:
             )
         return ok
 
-    async def _nudge_session(self, session_id: str, info: SessionInfo, message: str) -> bool:
+    async def _nudge_session(
+        self,
+        session_id: str,
+        info: SessionInfo,
+        message: str,
+        *,
+        from_session: str | None = None,
+    ) -> bool:
         """Enqueue *message* to the MCP inbox and send a bare CR nudge to the session.
 
         The nudge pattern (Návrh #3) separates message delivery from terminal
@@ -296,7 +303,7 @@ class XMPPBridge:
         if not mux:
             log.warning("No backend for nudge (project=%s)", info["project"])
             return False
-        self._enqueue_for_mcp(session_id, message)
+        self._enqueue_for_mcp(session_id, message, from_session=from_session)
         ok = await mux.send_nudge(info["sty"], info["window"])
         if ok:
             self.audit.log(
@@ -374,10 +381,10 @@ class XMPPBridge:
         if exc is not None:
             log.error("Email task raised unexpected error: %s", exc)
 
-    def _enqueue_for_mcp(self, session_id: str, message: str) -> None:
+    def _enqueue_for_mcp(self, session_id: str, message: str, *, from_session: str | None = None) -> None:
         """Queue *message* into the MCP inbox for *session_id* (no-op if MCP disabled)."""
         if self.mcp_server is not None:
-            self.mcp_server.enqueue(session_id, message)
+            self.mcp_server.enqueue(session_id, message, from_session=from_session)
 
     @staticmethod
     def _short_path(path: str) -> str:
@@ -1082,9 +1089,14 @@ class XMPPBridge:
 
         if nudge:
             if target_info["backend"]:
-                ok = await self._nudge_session(target_id, target_info, wrapped_message)
+                ok = await self._nudge_session(
+                    target_id,
+                    target_info,
+                    wrapped_message,
+                    from_session=sender_id or None,
+                )
             else:
-                self._enqueue_for_mcp(target_id, wrapped_message)
+                self._enqueue_for_mcp(target_id, wrapped_message, from_session=sender_id or None)
                 ok = True
         else:
             ok = await self._stuff_to_session(target_id, target_info, wrapped_message)
@@ -1159,8 +1171,8 @@ class XMPPBridge:
         if nudge:
             async def _deliver_nudge(sid: str, info: SessionInfo) -> bool:
                 if info.get("backend"):
-                    return await self._nudge_session(sid, info, wrapped_message)
-                self._enqueue_for_mcp(sid, wrapped_message)
+                    return await self._nudge_session(sid, info, wrapped_message, from_session=sender_id or None)
+                self._enqueue_for_mcp(sid, wrapped_message, from_session=sender_id or None)
                 return True
 
             results = await asyncio.gather(*(_deliver_nudge(sid, info) for sid, info in targets.items()))

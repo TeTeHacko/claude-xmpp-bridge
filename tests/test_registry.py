@@ -1121,3 +1121,30 @@ def test_inbox_from_session_stored(db_path):
     assert row is not None
     assert row[0] == "sess-a"
     assert row[1] == "hi there"
+
+
+def test_inbox_drain_with_senders_preserves_metadata(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put("sess-b", "one", from_session="sess-a")
+        reg.inbox_put("sess-b", "two")
+        rows = reg.inbox_drain_with_senders("sess-b")
+        assert rows == [("one", "sess-a"), ("two", None)]
+    finally:
+        reg.close()
+
+
+def test_last_agent_sender_persists_across_restart(db_path):
+    reg1 = SessionRegistry(db_path)
+    try:
+        reg1.register("sess-b", "", "", "/tmp/proj")
+        assert reg1.set_last_agent_sender("sess-b", "sess-a") is True
+        assert reg1.get_last_agent_sender("sess-b") == "sess-a"
+    finally:
+        reg1.close()
+
+    reg2 = SessionRegistry(db_path)
+    try:
+        assert reg2.get_last_agent_sender("sess-b") == "sess-a"
+    finally:
+        reg2.close()

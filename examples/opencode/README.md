@@ -156,6 +156,14 @@ Inter-agent messages are wrapped by the bridge as a generated block with a JSON
 metadata line, so it is immediately visible in shared Screen/tmux windows that
 the text was injected by the bridge rather than typed manually.
 
+When one agent wants a direct reply from another, it should call MCP
+`send_message(..., sender_session_id=process.env.BRIDGE_SESSION_ID)`.
+That causes the generated JSON metadata to include a non-null `from` session ID,
+which the bridge remembers as `last_agent_sender` when the recipient drains its
+inbox via `receive_messages(session_id)`. The receiving agent can then call
+`reply_to_last_sender(session_id, message)` instead of manually copying the
+session ID out of the relay metadata.
+
 ## Coexistence with Claude Code
 
 Claude Code and OpenCode sessions in the **same project directory coexist** — the bridge tracks them separately by `source`. Neither tool's session evicts the other's.

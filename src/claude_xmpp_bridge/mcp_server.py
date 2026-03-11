@@ -82,7 +82,7 @@ class BridgeMCPServer:
     # Public API used by XMPPBridge
     # ------------------------------------------------------------------
 
-    def enqueue(self, session_id: str, message: str) -> None:
+    def enqueue(self, session_id: str, message: str, *, from_session: str | None = None) -> None:
         """Put a message into the SQLite inbox for *session_id*.
 
         Called from bridge relay/broadcast handlers so that MCP clients
@@ -92,7 +92,7 @@ class BridgeMCPServer:
         if self._bridge is None:
             log.warning("enqueue called before bridge initialised — dropping message for %s", session_id)
             return
-        self._bridge.registry.inbox_put(session_id, message)
+        self._bridge.registry.inbox_put(session_id, message, from_session=from_session)
 
     async def start(self, bridge: XMPPBridge) -> None:
         """Initialise the FastMCP server and launch it as a background task."""
@@ -126,7 +126,13 @@ class BridgeMCPServer:
         server = self
 
         @mcp.tool()
-        async def send_message(to: str, message: str, screen: bool = True, nudge: bool = False) -> str:
+        async def send_message(
+            to: str,
+            message: str,
+            screen: bool = True,
+            nudge: bool = False,
+            sender_session_id: str = "",
+        ) -> str:
             """Send a message to a specific agent session identified by session_id.
 
             Delivery modes (mutually exclusive; nudge takes priority over screen):
@@ -151,11 +157,19 @@ class BridgeMCPServer:
                 nudge: If True, store in inbox and send CR nudge only (recommended).
                 screen: If True (default), deliver via screen/tmux relay (when nudge=False).
                         If False, only enqueue in MCP inbox (no screen relay, no nudge).
+                sender_session_id: Optional sender session_id to include in relay metadata
+                        so the recipient can reply directly to the originating agent.
 
             Returns:
                 A confirmation string with message_id on success, or an error description.
             """
-            return await server._tool_send_message(to=to, message=message, screen=screen, nudge=nudge)
+            return await server._tool_send_message(
+                to=to,
+                message=message,
+                screen=screen,
+                nudge=nudge,
+                sender_session_id=sender_session_id,
+            )
 
         @mcp.tool()
         async def broadcast_message(message: str, sender_session_id: str = "", nudge: bool = False) -> str:
@@ -193,6 +207,21 @@ class BridgeMCPServer:
                 List of pending message strings (may be empty).
             """
             return server._tool_receive_messages(session_id=session_id)
+
+        @mcp.tool()
+        async def reply_to_last_sender(session_id: str, message: str, nudge: bool = True) -> str:
+            """Reply to the last agent session that messaged *session_id*.
+
+            The bridge remembers the latest non-null relay sender seen by
+            ``receive_messages(session_id)``. This helper resolves that sender and
+            forwards the reply back to them, setting ``sender_session_id`` to the
+            replying session so the conversation can continue agent-to-agent.
+            """
+            return await server._tool_reply_to_last_sender(
+                session_id=session_id,
+                message=message,
+                nudge=nudge,
+            )
 
         @mcp.tool()
         async def list_sessions() -> list[dict[str, Any]]:
@@ -413,7 +442,15 @@ class BridgeMCPServer:
         locks.sort(key=lambda item: (item["locked_at"], item["filepath"]))
         return locks
 
-    async def _tool_send_message(self, *, to: str, message: str, screen: bool = True, nudge: bool = False) -> str:
+    async def _tool_send_message(
+        self,
+        *,
+        to: str,
+        message: str,
+        screen: bool = True,
+        nudge: bool = False,
+        sender_session_id: str = "",
+    ) -> str:
         """Implementation of the send_message tool."""
         bridge = self._bridge
         if bridge is None:
@@ -432,6 +469,7 @@ class BridgeMCPServer:
         wrapped_message = format_generated_agent_message(
             msg_type="relay",
             message=message,
+            from_session_id=sender_session_id or None,
             to_session_id=to,
             mode="nudge" if nudge else ("screen" if screen else "inbox"),
             message_id=message_id,
@@ -442,19 +480,24 @@ class BridgeMCPServer:
             # but still queue for backend-less sessions so MCP-only agents can
             # pick the message up on their next poll.
             if target_info["backend"]:
-                ok = await bridge._nudge_session(to, target_info, wrapped_message)
+                ok = await bridge._nudge_session(
+                    to,
+                    target_info,
+                    wrapped_message,
+                    from_session=sender_session_id or None,
+                )
             else:
-                self.enqueue(to, wrapped_message)
+                self.enqueue(to, wrapped_message, from_session=sender_session_id or None)
                 ok = True
             bridge._xmpp_send(
                 json.dumps(
-                    {
-                        "type": "relay",
-                        "mode": "nudge",
-                        "from": None,
-                        "to": to,
-                        "message_id": message_id,
-                        "message": message,
+                        {
+                            "type": "relay",
+                            "mode": "nudge",
+                            "from": sender_session_id or None,
+                            "to": to,
+                            "message_id": message_id,
+                            "message": message,
                         "ts": time.time(),
                     },
                     ensure_ascii=False,
@@ -462,10 +505,11 @@ class BridgeMCPServer:
             )
             bridge.audit.log(
                 "MCP_SEND",
-                message_id=message_id,
-                to_session_id=to,
-                nudge=True,
-                backend=target_info.get("backend") or "none",
+                    message_id=message_id,
+                    from_session_id=sender_session_id or None,
+                    to_session_id=to,
+                    nudge=True,
+                    backend=target_info.get("backend") or "none",
                 ok=ok,
                 message=message[:100],
             )
@@ -499,7 +543,7 @@ class BridgeMCPServer:
                         {
                             "type": "relay",
                             "mode": "screen",
-                            "from": None,
+                            "from": sender_session_id or None,
                             "to": to,
                             "message_id": message_id,
                             "message": message,
@@ -511,6 +555,7 @@ class BridgeMCPServer:
                 bridge.audit.log(
                     "MCP_SEND",
                     message_id=message_id,
+                    from_session_id=sender_session_id or None,
                     to_session_id=to,
                     screen=screen,
                     ok=True,
@@ -521,6 +566,7 @@ class BridgeMCPServer:
                 bridge.audit.log(
                     "MCP_SEND",
                     message_id=message_id,
+                    from_session_id=sender_session_id or None,
                     to_session_id=to,
                     screen=screen,
                     ok=False,
@@ -536,7 +582,7 @@ class BridgeMCPServer:
                     {
                         "type": "relay",
                         "mode": "inbox",
-                        "from": None,
+                        "from": sender_session_id or None,
                         "to": to,
                         "message_id": message_id,
                         "message": message,
@@ -548,6 +594,7 @@ class BridgeMCPServer:
             bridge.audit.log(
                 "MCP_SEND",
                 message_id=message_id,
+                from_session_id=sender_session_id or None,
                 to_session_id=to,
                 screen=screen,
                 ok=True,
@@ -590,9 +637,16 @@ class BridgeMCPServer:
             results: list[bool] = []
             for sid, info in targets.items():
                 if info.get("backend"):
-                    results.append(await bridge._nudge_session(sid, info, wrapped_message))
+                    results.append(
+                        await bridge._nudge_session(
+                            sid,
+                            info,
+                            wrapped_message,
+                            from_session=sender_session_id or None,
+                        )
+                    )
                 else:
-                    self.enqueue(sid, wrapped_message)
+                    self.enqueue(sid, wrapped_message, from_session=sender_session_id or None)
                     results.append(True)
         else:
             results = await asyncio.gather(
@@ -869,7 +923,11 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return []
-        messages = bridge.registry.inbox_drain(session_id)
+        rows = bridge.registry.inbox_drain_with_senders(session_id)
+        messages = [message for message, _sender in rows]
+        for _message, sender_session_id in rows:
+            if sender_session_id:
+                bridge.registry.set_last_agent_sender(session_id, sender_session_id)
         if messages:
             bridge.audit.log(
                 "MCP_RECEIVE",
@@ -877,6 +935,25 @@ class BridgeMCPServer:
                 count=len(messages),
             )
         return messages
+
+    async def _tool_reply_to_last_sender(self, *, session_id: str, message: str, nudge: bool = True) -> str:
+        """Reply to the last remembered agent sender for *session_id*."""
+        bridge = self._bridge
+        if bridge is None:
+            return "Error: bridge not initialised"
+        sender_info = bridge.registry.get(session_id)
+        if sender_info is None:
+            return f"Error: unknown session_id: {session_id}"
+        last_sender = bridge.registry.get_last_agent_sender(session_id)
+        if not last_sender:
+            return f"Error: no known sender to reply to for {session_id}"
+        return await self._tool_send_message(
+            to=last_sender,
+            message=message,
+            nudge=nudge,
+            screen=not nudge,
+            sender_session_id=session_id,
+        )
 
     def _tool_list_sessions(self) -> list[dict[str, Any]]:
         """Implementation of the list_sessions tool."""

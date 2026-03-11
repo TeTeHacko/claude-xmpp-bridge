@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.44] - 2026-03-11
+
+### Changed
+- **MCP relay metadata can now identify the sender** — `send_message` accepts
+  optional `sender_session_id`, and generated relay payloads now propagate it in
+  the JSON `from` field so receiving agents can reply directly to the originating
+  session instead of responding to the human observer.
+
+## [0.7.45] - 2026-03-11
+
+### Added
+- **Reply to the last agent sender via MCP** — the bridge now remembers the last
+  non-null relay sender seen by `receive_messages(session_id)` and exposes
+  `reply_to_last_sender(session_id, message, nudge=True)` so agents can answer
+  other agents directly without manually parsing relay metadata.
+
+### Changed
+- **Session context now includes `last_agent_sender`** — MCP context payloads can
+  expose the currently remembered reply target for the session.
+
+### Documentation
+- Documented the recommended reply flow using `BRIDGE_SESSION_ID` as
+  `sender_session_id` when agents call MCP `send_message`.
+
 ## [0.7.43] - 2026-03-10
 
 ### Added

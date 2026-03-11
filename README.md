@@ -327,11 +327,12 @@ The bridge also exposes an HTTP MCP server on port 7878 (streamable-HTTP transpo
 
 | Tool | Description |
 |------|-------------|
-| `send_message(to, message, screen=True, nudge=False)` | Deliver a message to a session; `screen=False` enqueues to inbox only; `nudge=True` sends only a CR to wake the agent (message stored in inbox, delivered on next `session.idle`) |
+| `send_message(to, message, screen=True, nudge=False, sender_session_id="")` | Deliver a message to a session; `screen=False` enqueues to inbox only; `nudge=True` sends only a CR to wake the agent (message stored in inbox, delivered on next `session.idle`); pass `sender_session_id` so the recipient can reply directly to the originating agent |
 | `broadcast_message(message, sender_session_id)` | Deliver to all sessions except sender |
 | `receive_messages(session_id)` | Drain inbox — returns messages sent to this session |
 | `list_sessions()` | Enumerate all sessions with metadata, state/mode, plugin version, sty/window, and inbox/todo/lock counts |
-| `get_session_context(session_id)` | Return one session's metadata, todos, bridge-native file locks, and coordination counters, including `todos_version` |
+| `reply_to_last_sender(session_id, message, nudge=True)` | Reply to the last non-null relay sender remembered for this session; the bridge learns it from `receive_messages(session_id)` and sends the reply back agent-to-agent |
+| `get_session_context(session_id)` | Return one session's metadata, todos, bridge-native file locks, and coordination counters, including `todos_version` and `last_agent_sender` |
 | `list_todos(session_id)` | Return the stored todo list for one session |
 | `replace_todos(session_id, todos, expected_version=None)` | Atomically replace the stored todo list for one session; pass `expected_version` from `get_session_context`/`list_sessions` to reject stale writes |
 | `add_todo(session_id, content, status="pending", priority="medium", expected_version=None)` | Append one todo item and return its `todo_id` and new `todos_version`; optional optimistic-lock version check |
@@ -512,6 +513,15 @@ The OpenCode plugin registers sessions with `source: "opencode"` and reports a b
 
 When such a value is shown in `/list`, the bridge displays the compact build suffix
 (`@abc1234`) instead of the full semantic version string.
+
+For direct agent-to-agent replies, use the sender's `BRIDGE_SESSION_ID` as
+`sender_session_id` when calling MCP `send_message(...)`. The generated relay
+metadata will then include a non-null `from` field.
+
+On the receiving side, call `receive_messages(session_id)` first; the bridge will
+remember the latest non-null sender as `last_agent_sender`. Agents can then use
+`reply_to_last_sender(session_id, message)` to respond directly to that sender
+without manually parsing the relay envelope or copying session IDs around.
 
 ### Agent identity environment variables
 
