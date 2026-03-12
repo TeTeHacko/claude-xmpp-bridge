@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-03-11
+
+### Fixed
+- **Reply-to-sender now survives inbox-only MCP delivery paths** — agent-originated
+  relay messages now preserve `from_session` even when delivered through MCP inbox
+  queuing, so direct agent replies no longer fall back to the human observer in
+  those paths.
+
 ## [0.8.3] - 2026-03-11
 
 ### Added

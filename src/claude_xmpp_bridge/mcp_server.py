@@ -576,7 +576,7 @@ class BridgeMCPServer:
                 return bridge.messages.mcp_send_failed.format(project=self._short_path(target_info["project"]))
         else:
             # screen=False: only enqueue in MCP inbox, no terminal relay
-            self.enqueue(to, wrapped_message)
+            self.enqueue(to, wrapped_message, from_session=sender_session_id or None)
             bridge._xmpp_send(
                 json.dumps(
                     {

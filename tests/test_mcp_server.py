@@ -539,6 +539,7 @@ class TestSendMessageTool:
         lines = wrapped.splitlines()
         payload = json.loads(lines[1])
         assert payload["from"] == "ses_BBB"
+        assert started_server._bridge.registry.inbox_put.call_args.kwargs["from_session"] == "ses_BBB"
 
     async def test_send_includes_sender_session_id_in_xmpp_notification(self, started_server: BridgeMCPServer):
         await started_server._tool_send_message(to="ses_AAA", message="ping", sender_session_id="ses_BBB")
