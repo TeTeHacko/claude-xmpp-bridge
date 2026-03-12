@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.14] - 2026-03-12
+
+### Changed
+- **OpenCode plugin is now installed as a symlink instead of a copy** — the setup
+  wizard creates a symlink from `~/.config/opencode/plugins/xmpp-bridge.js` to the
+  canonical plugin source (editable install or pipx shared data), so `pipx upgrade`
+  automatically propagates plugin updates without requiring a manual `setup -u` step.
+- **Removed `_render_opencode_plugin()` source patching** — title-only mode is now
+  configured purely via the `XMPP_BRIDGE_MODE=title-only` environment variable
+  instead of patching the JS source at install time, which was the last barrier to
+  symlink-based installation.
+- **Existing plain-file plugin copies are replaced with symlinks on upgrade** — running
+  `claude-xmpp-bridge-setup` or `setup -u` detects stale plain-file copies and
+  replaces them with the correct symlink.
+- **Legacy plugin copies are removed** — the old data-dir copy at
+  `~/.local/share/claude-xmpp-bridge/opencode/plugins/xmpp-bridge.js` is cleaned up
+  during install/upgrade instead of being synced.
+
 ## [0.8.6] - 2026-03-12
 
 ### Fixed

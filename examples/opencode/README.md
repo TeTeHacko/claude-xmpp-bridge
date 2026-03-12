@@ -27,14 +27,26 @@ The easiest way is the setup wizard:
 claude-xmpp-bridge-setup
 ```
 
-The wizard installs the plugin to `~/.config/opencode/plugins/` and merges the permission config into `~/.config/opencode/opencode.json`.
+The wizard creates a **symlink** at `~/.config/opencode/plugins/xmpp-bridge.js`
+pointing to the canonical plugin source (editable install or pipx shared data).
+This means `pipx upgrade` automatically propagates plugin updates without
+requiring a manual re-setup step.
+
+The wizard also merges the permission config into `~/.config/opencode/opencode.json`.
 
 ### Manual setup
 
-1. Copy the plugin:
+1. Create a symlink to the plugin:
    ```bash
    mkdir -p ~/.config/opencode/plugins
-   cp plugins/xmpp-bridge.js ~/.config/opencode/plugins/
+   ln -sf "$(python3 -c "import sysconfig; print(sysconfig.get_path('data'))")/share/claude-xmpp-bridge/opencode/plugins/xmpp-bridge.js" \
+       ~/.config/opencode/plugins/xmpp-bridge.js
+   ```
+
+   For an editable (development) install, symlink directly to the repo source:
+   ```bash
+   ln -sf /path/to/claude-xmpp-bridge/examples/opencode/plugins/xmpp-bridge.js \
+       ~/.config/opencode/plugins/xmpp-bridge.js
    ```
 
 2. Merge `opencode.json` into `~/.config/opencode/opencode.json`:

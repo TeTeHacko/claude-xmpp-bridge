@@ -21,7 +21,7 @@ from claude_xmpp_bridge.setup import (
     _confirm,
     _find_hooks_dir,
     _find_opencode_dir,
-    _render_opencode_plugin,
+    _resolve_plugin_source,
     _step_config,
     _step_credentials,
     _step_hooks,
@@ -333,62 +333,123 @@ class TestFindOpencodeDir:
 
 
 class TestStepOpencode:
-    def test_installs_plugin(self, monkeypatch, tmp_path):
+    def test_installs_plugin_as_symlink(self, monkeypatch, tmp_path):
         plugins_dir = tmp_path / "plugins"
         settings_path = tmp_path / "opencode.json"
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
         monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
         monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
 
         ok = _step_opencode(yes_mode=True)
 
         assert ok is True
-        assert (plugins_dir / "xmpp-bridge.js").is_file()
+        dst = plugins_dir / "xmpp-bridge.js"
+        assert dst.is_symlink(), "plugin must be installed as a symlink"
+        assert dst.is_file(), "symlink must point to an existing file"
 
     def test_installed_plugin_has_source_field(self, monkeypatch, tmp_path):
         plugins_dir = tmp_path / "plugins"
         settings_path = tmp_path / "opencode.json"
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
         monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
         monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
 
         _step_opencode(yes_mode=True)
 
         plugin_text = (plugins_dir / "xmpp-bridge.js").read_text()
         assert 'source:     "opencode"' in plugin_text
 
-    def test_installs_title_only_plugin_when_requested(self, monkeypatch, tmp_path):
+    def test_title_only_does_not_modify_plugin(self, monkeypatch, tmp_path):
+        """Title-only mode installs the same (unmodified) plugin file via symlink."""
         plugins_dir = tmp_path / "plugins"
         settings_path = tmp_path / "opencode.json"
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
         monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
         monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
 
         ok = _step_opencode(yes_mode=True, plugin_mode=PLUGIN_MODE_TITLE_ONLY)
 
         assert ok is True
-        plugin_text = (plugins_dir / "xmpp-bridge.js").read_text()
-        assert 'const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "title-only"' in plugin_text
+        dst = plugins_dir / "xmpp-bridge.js"
+        assert dst.is_symlink()
+        # Plugin keeps default BRIDGE_MODE = "auto" — title-only is set via env
+        plugin_text = dst.read_text()
+        assert 'const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "auto"' in plugin_text
 
-    def test_installs_normal_plugin_mode_when_bridge_selected(self, monkeypatch, tmp_path):
+    def test_normal_mode_installs_symlink(self, monkeypatch, tmp_path):
         plugins_dir = tmp_path / "plugins"
         settings_path = tmp_path / "opencode.json"
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
         monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
         monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
 
         ok = _step_opencode(yes_mode=True, plugin_mode=PLUGIN_MODE_NORMAL)
 
         assert ok is True
-        plugin_text = (plugins_dir / "xmpp-bridge.js").read_text()
-        assert 'const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "auto"' in plugin_text
+        dst = plugins_dir / "xmpp-bridge.js"
+        assert dst.is_symlink()
 
-    def test_render_opencode_plugin_rewrites_bridge_mode(self):
-        source = _find_opencode_dir() / "plugins" / "xmpp-bridge.js"  # type: ignore[operator]
-        plugin_text = _render_opencode_plugin(source, plugin_mode=PLUGIN_MODE_TITLE_ONLY)
-        assert 'const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "title-only"' in plugin_text
+    def test_symlink_target_matches_resolve_plugin_source(self, monkeypatch, tmp_path):
+        """Symlink must point to the resolved canonical path."""
+        plugins_dir = tmp_path / "plugins"
+        settings_path = tmp_path / "opencode.json"
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
+
+        _step_opencode(yes_mode=True)
+
+        dst = plugins_dir / "xmpp-bridge.js"
+        opencode_dir = _find_opencode_dir()
+        assert opencode_dir is not None
+        expected = _resolve_plugin_source(opencode_dir)
+        assert dst.resolve() == expected
+
+    def test_replaces_plain_file_with_symlink(self, monkeypatch, tmp_path):
+        """Upgrade path: existing plain file is replaced with a symlink."""
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir(parents=True)
+        old_file = plugins_dir / "xmpp-bridge.js"
+        old_file.write_text("old plain copy")
+        settings_path = tmp_path / "opencode.json"
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
+
+        ok = _step_opencode(yes_mode=True, upgrade=True)
+
+        assert ok is True
+        assert old_file.is_symlink(), "plain file must be replaced with symlink on upgrade"
+
+    def test_removes_legacy_plugin_on_install(self, monkeypatch, tmp_path):
+        """Legacy plugin copy must be removed during install/upgrade."""
+        plugins_dir = tmp_path / "plugins"
+        settings_path = tmp_path / "opencode.json"
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
+        legacy_plugin.parent.mkdir(parents=True, exist_ok=True)
+        legacy_plugin.write_text("old plugin")
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
+
+        ok = _step_opencode(yes_mode=True)
+
+        assert ok is True
+        assert not legacy_plugin.exists(), "legacy plugin copy must be removed"
 
     def test_merges_opencode_json(self, monkeypatch, tmp_path):
         plugins_dir = tmp_path / "plugins"
         settings_path = tmp_path / "opencode.json"
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
         monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
         monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
 
         ok = _step_opencode(yes_mode=True)
 
@@ -401,8 +462,10 @@ class TestStepOpencode:
         plugins_dir = tmp_path / "plugins"
         settings_path = tmp_path / "opencode.json"
         settings_path.write_text('{"existing_key": "value"}')
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
         monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
         monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
 
         _step_opencode(yes_mode=True)
 
@@ -652,9 +715,11 @@ class TestUninstallOpencode:
         plugins_dir.mkdir()
         plugin_file = plugins_dir / "xmpp-bridge.js"
         plugin_file.write_text("export const XmppBridgePlugin = () => {}")
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
         settings_path = tmp_path / "opencode.json"
         monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
         monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
 
         ok = _uninstall_opencode(yes_mode=True)
 
@@ -665,6 +730,7 @@ class TestUninstallOpencode:
         plugins_dir = tmp_path / "plugins"
         plugins_dir.mkdir()
         settings_path = tmp_path / "opencode.json"
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
         settings_path.write_text(
             json.dumps(
                 {
@@ -675,6 +741,7 @@ class TestUninstallOpencode:
         )
         monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
         monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
 
         _uninstall_opencode(yes_mode=True)
 
@@ -687,10 +754,50 @@ class TestUninstallOpencode:
         plugins_dir.mkdir()
         monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
         monkeypatch.setattr(setup, "OPENCODE_SETTINGS", tmp_path / "opencode.json")
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", tmp_path / "legacy" / "plugins" / "xmpp-bridge.js")
 
         ok = _uninstall_opencode(yes_mode=True)
 
         assert ok is True
+
+    def test_removes_legacy_plugin_file(self, monkeypatch, tmp_path):
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
+        legacy_plugin.parent.mkdir(parents=True, exist_ok=True)
+        legacy_plugin.write_text("old plugin")
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", tmp_path / "opencode.json")
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
+
+        ok = _uninstall_opencode(yes_mode=True)
+
+        assert ok is True
+        assert not legacy_plugin.exists()
+
+    def test_removes_plugin_symlink(self, monkeypatch, tmp_path):
+        """Uninstall must remove symlink correctly."""
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+        # Create a symlink pointing to some file
+        target = tmp_path / "source" / "xmpp-bridge.js"
+        target.parent.mkdir(parents=True)
+        target.write_text("plugin content")
+        link = plugins_dir / "xmpp-bridge.js"
+        link.symlink_to(target)
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
+        settings_path = tmp_path / "opencode.json"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
+
+        ok = _uninstall_opencode(yes_mode=True)
+
+        assert ok is True
+        assert not link.exists()
+        assert not link.is_symlink()
+        # Source file must remain untouched
+        assert target.is_file()
 
 
 # ---------------------------------------------------------------------------

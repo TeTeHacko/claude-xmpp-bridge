@@ -25,6 +25,8 @@ CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 OPENCODE_CONFIG_DIR = Path.home() / ".config" / "opencode"
 OPENCODE_PLUGINS_DIR = OPENCODE_CONFIG_DIR / "plugins"
 OPENCODE_SETTINGS = OPENCODE_CONFIG_DIR / "opencode.json"
+LEGACY_OPENCODE_DATA_DIR = Path.home() / ".local" / "share" / "claude-xmpp-bridge" / "opencode"
+LEGACY_OPENCODE_PLUGIN_DST = LEGACY_OPENCODE_DATA_DIR / "plugins" / "xmpp-bridge.js"
 SANDBOX_DST = Path.home() / ".local" / "bin" / "sandbox"
 SANDBOX_COMPLETION_DST = Path.home() / ".local" / "share" / "bash-completion" / "completions" / "sandbox"
 
@@ -420,21 +422,23 @@ def _step_hooks(yes_mode: bool, upgrade: bool = False, with_bridge: bool = True)
     return True
 
 
-def _render_opencode_plugin(source: Path, *, plugin_mode: str) -> str:
-    """Return OpenCode plugin text customized for the requested default mode."""
-    text = source.read_text()
-    marker = '  const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "auto"\n'
-    if plugin_mode == PLUGIN_MODE_TITLE_ONLY:
-        replacement = '  const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "title-only"\n'
-    else:
-        replacement = marker
-    if marker not in text:
-        raise ValueError("plugin source missing BRIDGE_MODE marker")
-    return text.replace(marker, replacement, 1)
+def _resolve_plugin_source(opencode_dir: Path) -> Path:
+    """Return the canonical path to the OpenCode plugin JS file."""
+    return (opencode_dir / "plugins" / "xmpp-bridge.js").resolve()
 
 
 def _step_opencode(yes_mode: bool, upgrade: bool = False, plugin_mode: str = PLUGIN_MODE_NORMAL) -> bool:
-    """Step: Install OpenCode plugin and config."""
+    """Step: Install OpenCode plugin as a symlink and merge config.
+
+    Since v0.8.14 the plugin is installed as a **symlink** pointing to the
+    canonical source file (either the repository checkout for editable installs
+    or the shared-data copy inside the pipx/venv).  This means ``pipx upgrade``
+    automatically propagates plugin updates — no manual copy needed.
+
+    The ``plugin_mode`` parameter no longer patches the JS source.  When
+    ``plugin_mode == PLUGIN_MODE_TITLE_ONLY`` the function prints a reminder
+    to set ``XMPP_BRIDGE_MODE=title-only`` in the environment.
+    """
     print("\n--- opencode-plugin: OpenCode plugin ---")
 
     opencode_source = _find_opencode_dir()
@@ -447,21 +451,41 @@ def _step_opencode(yes_mode: bool, upgrade: bool = False, plugin_mode: str = PLU
 
     OPENCODE_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
 
-    src = opencode_source / "plugins" / "xmpp-bridge.js"
+    canonical_src = _resolve_plugin_source(opencode_source)
     dst = OPENCODE_PLUGINS_DIR / "xmpp-bridge.js"
-    rendered_plugin = _render_opencode_plugin(src, plugin_mode=plugin_mode)
-    needs_plugin_update = True
-    if dst.is_file():
-        needs_plugin_update = dst.read_text() != rendered_plugin
-    if not needs_plugin_update:
+
+    # Determine whether the symlink is already correct
+    needs_update = True
+    if dst.is_symlink():
+        try:
+            needs_update = dst.resolve() != canonical_src
+        except OSError:
+            needs_update = True  # dangling symlink
+    elif dst.is_file():
+        # Existing plain-file copy — will be replaced by a symlink
+        needs_update = True
+    else:
+        needs_update = True  # does not exist at all
+
+    if not needs_update:
         if upgrade:
-            print("  xmpp-bridge.js: up to date")
-    elif upgrade or yes_mode or not dst.is_file() or _confirm("    Overwrite xmpp-bridge.js?", default=False):
-        dst.write_text(rendered_plugin)
-        dst.chmod(dst.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR)
-        print(f"  xmpp-bridge.js: {'updated' if upgrade else 'installed'}")
-        if plugin_mode == PLUGIN_MODE_TITLE_ONLY:
-            print("  Default OpenCode bridge mode: title-only (bridge-daemon not selected)")
+            print(f"  xmpp-bridge.js: up to date (symlink → {canonical_src})")
+    elif upgrade or yes_mode or not dst.exists() or _confirm("    Replace xmpp-bridge.js with symlink?", default=True):
+        # Remove old file/symlink before creating the new symlink
+        if dst.exists() or dst.is_symlink():
+            dst.unlink()
+        dst.symlink_to(canonical_src)
+        action = "updated" if upgrade else "installed"
+        print(f"  xmpp-bridge.js: {action} (symlink → {canonical_src})")
+
+    if plugin_mode == PLUGIN_MODE_TITLE_ONLY:
+        print("  Bridge-daemon not selected — set XMPP_BRIDGE_MODE=title-only in your")
+        print("  shell profile or OpenCode environment to disable bridge traffic.")
+
+    # Clean up legacy plugin copy if present
+    if LEGACY_OPENCODE_PLUGIN_DST.is_file() or LEGACY_OPENCODE_PLUGIN_DST.is_symlink():
+        LEGACY_OPENCODE_PLUGIN_DST.unlink()
+        print(f"  Removed legacy plugin copy: {LEGACY_OPENCODE_PLUGIN_DST}")
 
     # Merge permission config into opencode.json
     config_src = opencode_source / "opencode.json"
@@ -668,18 +692,28 @@ def _uninstall_hooks_settings(yes_mode: bool) -> None:
 
 
 def _uninstall_opencode(yes_mode: bool) -> bool:
-    """Remove OpenCode plugin and revert opencode.json permission config."""
+    """Remove OpenCode plugin symlink/file and revert opencode.json permission config."""
     print("\n--- opencode-plugin: Remove OpenCode plugin ---")
 
     plugin_dst = OPENCODE_PLUGINS_DIR / "xmpp-bridge.js"
-    if plugin_dst.is_file():
-        if yes_mode or _confirm(f"  Remove {plugin_dst}?", yes_mode=False):
+    if plugin_dst.is_symlink() or plugin_dst.is_file():
+        kind = "symlink" if plugin_dst.is_symlink() else "file"
+        if yes_mode or _confirm(f"  Remove {plugin_dst} ({kind})?", yes_mode=False):
             plugin_dst.unlink()
             print(f"  Removed: {plugin_dst}")
         else:
             print(f"  Skipped: {plugin_dst}")
     else:
         print(f"  Not found: {plugin_dst}")
+
+    if LEGACY_OPENCODE_PLUGIN_DST.is_file() or LEGACY_OPENCODE_PLUGIN_DST.is_symlink():
+        if yes_mode or _confirm(f"  Remove legacy plugin {LEGACY_OPENCODE_PLUGIN_DST}?", yes_mode=False):
+            LEGACY_OPENCODE_PLUGIN_DST.unlink()
+            print(f"  Removed: {LEGACY_OPENCODE_PLUGIN_DST}")
+        else:
+            print(f"  Skipped: {LEGACY_OPENCODE_PLUGIN_DST}")
+    else:
+        print(f"  Not found: {LEGACY_OPENCODE_PLUGIN_DST}")
 
     # Remove "permission" key from opencode.json if present
     if OPENCODE_SETTINGS.is_file():

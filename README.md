@@ -82,9 +82,12 @@ claude-xmpp-bridge-setup
 
 The wizard walks through all configuration steps: credentials, config file, XMPP test, Claude Code hook installation, OpenCode plugin installation, systemd service, and notification switches.
 
+The OpenCode plugin is installed as a **symlink** to the canonical source, so
+`pipx upgrade` automatically propagates plugin updates.
+
 If you install the OpenCode plugin without selecting `bridge-daemon`, the wizard
-installs it in `title-only` mode automatically, so you keep Screen/tmux title
-indicators without any bridge/MCP traffic.
+prints a reminder to set `XMPP_BRIDGE_MODE=title-only` in your environment, so
+you keep Screen/tmux title indicators without any bridge/MCP traffic.
 
 Use `--test-only` to just verify XMPP connectivity:
 
@@ -486,11 +489,19 @@ The setup wizard handles installation automatically (Step 5):
 claude-xmpp-bridge-setup
 ```
 
+The wizard creates a **symlink** at `~/.config/opencode/plugins/xmpp-bridge.js`
+pointing to the canonical plugin source. This means `pipx upgrade` automatically
+propagates plugin updates — no manual re-setup required.
+
+If you install without selecting `bridge-daemon`, the wizard prints a reminder to
+set `XMPP_BRIDGE_MODE=title-only` in your environment for title-only indicators.
+
 Or manually:
 
 ```bash
 mkdir -p ~/.config/opencode/plugins
-cp examples/opencode/plugins/xmpp-bridge.js ~/.config/opencode/plugins/
+ln -sf "$(python3 -c "import sysconfig; print(sysconfig.get_path('data'))")/share/claude-xmpp-bridge/opencode/plugins/xmpp-bridge.js" \
+    ~/.config/opencode/plugins/xmpp-bridge.js
 ```
 
 Merge the permission config into `~/.config/opencode/opencode.json`:
