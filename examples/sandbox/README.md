@@ -24,13 +24,14 @@ The `claude-xmpp-bridge-setup` wizard can automatically install this script to `
 Or install manually:
 ```bash
 mkdir -p ~/.local/bin
-cp examples/sandbox/sandbox ~/.local/bin/
-chmod +x ~/.local/bin/sandbox
+ln -sf "$(pwd)/sandbox" ~/.local/bin/sandbox
 
 # Bash completion (optional)
 mkdir -p ~/.local/share/bash-completion/completions
-cp examples/sandbox/sandbox.bash-completion ~/.local/share/bash-completion/completions/sandbox
+ln -sf "$(pwd)/sandbox.bash-completion" ~/.local/share/bash-completion/completions/sandbox
 ```
+
+Using symlinks means `pipx upgrade` automatically propagates sandbox updates.
 
 ## Usage
 

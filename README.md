@@ -267,8 +267,17 @@ claude-xmpp-client state '{"session_id":"abc","state":"idle"}'  # report agent s
 
 ### systemd service
 
+The setup wizard installs a **symlink** to the unit file, so upgrades are automatic:
+
 ```bash
-cp examples/systemd/claude-xmpp-bridge.service ~/.config/systemd/user/
+claude-xmpp-bridge-setup
+```
+
+Or manually:
+```bash
+mkdir -p ~/.config/systemd/user
+ln -sf "$(python3 -c "import claude_xmpp_bridge, pathlib; print(pathlib.Path(claude_xmpp_bridge.__file__).resolve().parent.parent.parent / 'examples' / 'systemd' / 'claude-xmpp-bridge.service')")" \
+    ~/.config/systemd/user/claude-xmpp-bridge.service
 systemctl --user daemon-reload
 systemctl --user enable --now claude-xmpp-bridge
 ```

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.15] - 2026-03-12
+
+### Changed
+- **All setup wizard installations now use symlinks instead of copies** — hooks
+  (`~/.claude/hooks/`), sandbox script (`~/.local/bin/sandbox`), bash completion,
+  and systemd unit are installed as symlinks pointing to the canonical sources, so
+  `pipx upgrade` automatically propagates updates without requiring a manual
+  `setup -u` step.
+- **New `_install_symlink()` helper** consolidates symlink creation, replacement of
+  plain files, and stale/dangling symlink handling into a single reusable function.
+- **Uninstall functions now handle both symlinks and plain files** — `_uninstall_hooks`,
+  `_uninstall_sandbox`, and `_uninstall_bridge` correctly detect and remove symlinks
+  in addition to regular files.
+
 ## [0.8.14] - 2026-03-12
 
 ### Changed

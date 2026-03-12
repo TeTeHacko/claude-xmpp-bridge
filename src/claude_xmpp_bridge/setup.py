@@ -177,10 +177,52 @@ def _confirm(prompt: str, default: bool = True, yes_mode: bool = False) -> bool:
 
 
 def _needs_update(src: Path, dst: Path) -> bool:
-    """Return True if dst does not exist or differs from src."""
+    """Return True if dst does not exist or differs from src.
+
+    For symlinks, checks that the link target matches ``src.resolve()``.
+    For plain files, compares contents byte-by-byte.
+    """
+    if dst.is_symlink():
+        try:
+            return dst.resolve() != src.resolve()
+        except OSError:
+            return True  # dangling symlink
     if not dst.is_file():
         return True
     return src.read_bytes() != dst.read_bytes()
+
+
+def _install_symlink(src: Path, dst: Path, *, make_executable: bool = False) -> bool:
+    """Install *src* as a symlink at *dst*.
+
+    If *dst* is already a correct symlink nothing happens and ``False`` is
+    returned.  Otherwise any existing file/symlink is replaced and ``True``
+    is returned.
+
+    When *make_executable* is ``True`` the source file gets ``+x`` bits
+    (symlinks inherit the target's permissions).
+    """
+    canonical = src.resolve()
+    if dst.is_symlink():
+        try:
+            if dst.resolve() == canonical:
+                return False  # already up to date
+        except OSError:
+            pass  # dangling — will be replaced
+
+    # Remove old file/symlink before creating the new symlink
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.symlink_to(canonical)
+
+    if make_executable and canonical.is_file():
+        mode = canonical.stat().st_mode
+        if not (mode & stat.S_IXUSR):
+            canonical.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    return True
 
 
 def _ask_components(yes_mode: bool, default_all: bool = True) -> set[str]:
@@ -321,7 +363,11 @@ def _step_test() -> bool:
 
 
 def _step_hooks(yes_mode: bool, upgrade: bool = False, with_bridge: bool = True) -> bool:
-    """Step: Install hook scripts and merge settings.json.
+    """Step: Install hook scripts as symlinks and merge settings.json.
+
+    Since v0.8.15 hooks are installed as **symlinks** pointing to the
+    canonical source files, so ``pipx upgrade`` automatically propagates
+    hook updates.
 
     When with_bridge is False only session-start-title.sh is installed
     (the other hooks require the bridge daemon to be useful).
@@ -352,16 +398,21 @@ def _step_hooks(yes_mode: bool, upgrade: bool = False, with_bridge: bool = True)
         dst = HOOKS_DIR / dst_name
         if not src.is_file():
             continue
-        if not _needs_update(src, dst):
+        if (
+            not upgrade
+            and dst.exists()
+            and not dst.is_symlink()
+            and not yes_mode
+            and not _confirm(f"    Replace {dst.name} with symlink?", default=True)
+        ):
+            continue
+        changed = _install_symlink(src, dst, make_executable=True)
+        if changed:
+            updated += 1
+            if upgrade:
+                print(f"    {dst.name}: updated (symlink → {src.resolve()})")
+        else:
             up_to_date += 1
-            continue
-        if not upgrade and dst.is_file() and not yes_mode and not _confirm(f"    Overwrite {dst.name}?", default=False):
-            continue
-        shutil.copy2(src, dst)
-        dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        updated += 1
-        if upgrade:
-            print(f"    {dst.name}: updated")
 
     if upgrade:
         if up_to_date and not updated:
@@ -454,29 +505,21 @@ def _step_opencode(yes_mode: bool, upgrade: bool = False, plugin_mode: str = PLU
     canonical_src = _resolve_plugin_source(opencode_source)
     dst = OPENCODE_PLUGINS_DIR / "xmpp-bridge.js"
 
-    # Determine whether the symlink is already correct
-    needs_update = True
-    if dst.is_symlink():
-        try:
-            needs_update = dst.resolve() != canonical_src
-        except OSError:
-            needs_update = True  # dangling symlink
-    elif dst.is_file():
-        # Existing plain-file copy — will be replaced by a symlink
-        needs_update = True
+    if (
+        not upgrade
+        and dst.exists()
+        and not dst.is_symlink()
+        and not yes_mode
+        and not _confirm("    Replace xmpp-bridge.js with symlink?", default=True)
+    ):
+        pass  # user declined
     else:
-        needs_update = True  # does not exist at all
-
-    if not needs_update:
-        if upgrade:
+        changed = _install_symlink(Path(canonical_src), dst)
+        if changed:
+            action = "updated" if upgrade else "installed"
+            print(f"  xmpp-bridge.js: {action} (symlink → {canonical_src})")
+        elif upgrade:
             print(f"  xmpp-bridge.js: up to date (symlink → {canonical_src})")
-    elif upgrade or yes_mode or not dst.exists() or _confirm("    Replace xmpp-bridge.js with symlink?", default=True):
-        # Remove old file/symlink before creating the new symlink
-        if dst.exists() or dst.is_symlink():
-            dst.unlink()
-        dst.symlink_to(canonical_src)
-        action = "updated" if upgrade else "installed"
-        print(f"  xmpp-bridge.js: {action} (symlink → {canonical_src})")
 
     if plugin_mode == PLUGIN_MODE_TITLE_ONLY:
         print("  Bridge-daemon not selected — set XMPP_BRIDGE_MODE=title-only in your")
@@ -517,7 +560,7 @@ def _step_opencode(yes_mode: bool, upgrade: bool = False, plugin_mode: str = PLU
 
 
 def _step_systemd(yes_mode: bool, upgrade: bool = False) -> bool:
-    """Step: Install systemd user unit."""
+    """Step: Install systemd user unit as a symlink."""
     print("\n--- bridge-daemon: systemd service ---")
 
     if not shutil.which("systemctl"):
@@ -532,25 +575,29 @@ def _step_systemd(yes_mode: bool, upgrade: bool = False) -> bool:
     SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
     dst = SYSTEMD_DIR / "claude-xmpp-bridge.service"
 
-    if not _needs_update(unit_src, dst):
-        if upgrade:
-            print("  systemd unit: up to date")
+    if (
+        not upgrade
+        and dst.exists()
+        and not dst.is_symlink()
+        and not yes_mode
+        and not _confirm(f"    Replace {dst.name} with symlink?", default=True)
+    ):
         return True
 
-    if not upgrade and not _confirm("  Install systemd user service?", yes_mode=yes_mode):
+    if not upgrade and not dst.exists() and not _confirm("  Install systemd user service?", yes_mode=yes_mode):
         return True
 
-    if not upgrade and dst.is_file() and not yes_mode and not _confirm(f"    Overwrite {dst}?", default=False):
-        return True
-
-    shutil.copy2(unit_src, dst)
-    print(f"  systemd unit: {'updated' if upgrade else 'installed'}")
-    print("  Run: systemctl --user daemon-reload")
+    changed = _install_symlink(unit_src, dst)
+    if changed:
+        print(f"  systemd unit: {'updated' if upgrade else 'installed'} (symlink → {unit_src.resolve()})")
+        print("  Run: systemctl --user daemon-reload")
+    elif upgrade:
+        print("  systemd unit: up to date")
     return True
 
 
 def _step_sandbox(yes_mode: bool, upgrade: bool = False) -> bool:
-    """Step: Install sandbox script and bash completion."""
+    """Step: Install sandbox script and bash completion as symlinks."""
     print("\n--- sandbox: Sandbox script ---")
 
     sandbox_src = _find_sandbox_script()
@@ -558,28 +605,27 @@ def _step_sandbox(yes_mode: bool, upgrade: bool = False) -> bool:
         print("  Warning: sandbox script source not found, skipping")
         return True
 
-    if _needs_update(sandbox_src, SANDBOX_DST):
-        if upgrade or yes_mode or not SANDBOX_DST.is_file():
-            SANDBOX_DST.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(sandbox_src, SANDBOX_DST)
-            SANDBOX_DST.chmod(0o755)
-            print(f"  sandbox: {'updated' if upgrade else 'installed'}")
-        elif _confirm("  Overwrite sandbox script?", default=False):
-            shutil.copy2(sandbox_src, SANDBOX_DST)
-            SANDBOX_DST.chmod(0o755)
-            print("  sandbox: updated")
-        else:
-            return True
-    elif upgrade:
-        print("  sandbox: up to date")
+    if (
+        not upgrade
+        and SANDBOX_DST.exists()
+        and not SANDBOX_DST.is_symlink()
+        and not yes_mode
+        and not _confirm("  Replace sandbox script with symlink?", default=True)
+    ):
+        pass  # user declined
+    else:
+        changed = _install_symlink(sandbox_src, SANDBOX_DST, make_executable=True)
+        if changed:
+            print(f"  sandbox: {'updated' if upgrade else 'installed'} (symlink → {sandbox_src.resolve()})")
+        elif upgrade:
+            print("  sandbox: up to date")
 
     # Install bash completion
     comp_src = _find_sandbox_completion()
     if comp_src:
-        if _needs_update(comp_src, SANDBOX_COMPLETION_DST):
-            SANDBOX_COMPLETION_DST.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(comp_src, SANDBOX_COMPLETION_DST)
-            print(f"  bash completion: {'updated' if upgrade else 'installed'}")
+        changed = _install_symlink(comp_src, SANDBOX_COMPLETION_DST)
+        if changed:
+            print(f"  bash completion: {'updated' if upgrade else 'installed'} (symlink → {comp_src.resolve()})")
         elif upgrade:
             print("  bash completion: up to date")
 
@@ -616,12 +662,13 @@ def _step_switches(yes_mode: bool) -> bool:
 
 
 def _uninstall_sandbox(yes_mode: bool) -> bool:
-    """Remove sandbox script and bash completion."""
+    """Remove sandbox script and bash completion (symlink or plain file)."""
     print("\n--- sandbox: Remove sandbox script ---")
     removed = 0
     for path in [SANDBOX_DST, SANDBOX_COMPLETION_DST]:
-        if path.is_file():
-            if yes_mode or _confirm(f"  Remove {path}?", yes_mode=False):
+        if path.is_symlink() or path.is_file():
+            kind = "symlink" if path.is_symlink() else "file"
+            if yes_mode or _confirm(f"  Remove {path} ({kind})?", yes_mode=False):
                 path.unlink()
                 print(f"  Removed: {path}")
                 removed += 1
@@ -635,13 +682,14 @@ def _uninstall_sandbox(yes_mode: bool) -> bool:
 
 
 def _uninstall_hooks(yes_mode: bool) -> bool:
-    """Remove installed hook scripts and clean up settings.json."""
+    """Remove installed hook scripts (symlinks or plain files) and clean up settings.json."""
     print("\n--- claude-hooks: Remove hook scripts ---")
     removed = 0
     for target_name in ALL_HOOK_TARGETS:
         dst = HOOKS_DIR / target_name
-        if dst.is_file():
-            if yes_mode or _confirm(f"  Remove {dst}?", yes_mode=False):
+        if dst.is_symlink() or dst.is_file():
+            kind = "symlink" if dst.is_symlink() else "file"
+            if yes_mode or _confirm(f"  Remove {dst} ({kind})?", yes_mode=False):
                 dst.unlink()
                 print(f"  Removed: {dst}")
                 removed += 1
@@ -742,7 +790,7 @@ def _uninstall_bridge(yes_mode: bool, purge: bool = False) -> bool:
     print("\n--- bridge-daemon: Remove systemd service ---")
 
     unit_dst = SYSTEMD_DIR / "claude-xmpp-bridge.service"
-    if unit_dst.is_file():
+    if unit_dst.is_symlink() or unit_dst.is_file():
         # Stop and disable service if systemctl available
         if shutil.which("systemctl"):
             try:
@@ -754,7 +802,8 @@ def _uninstall_bridge(yes_mode: bool, purge: bool = False) -> bool:
                 print("  Stopped and disabled systemd service")
             except (subprocess.TimeoutExpired, OSError):
                 pass
-        if yes_mode or _confirm(f"  Remove {unit_dst}?", yes_mode=False):
+        kind = "symlink" if unit_dst.is_symlink() else "file"
+        if yes_mode or _confirm(f"  Remove {unit_dst} ({kind})?", yes_mode=False):
             unit_dst.unlink()
             print(f"  Removed: {unit_dst}")
             if shutil.which("systemctl"):

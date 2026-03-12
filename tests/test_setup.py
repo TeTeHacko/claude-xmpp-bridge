@@ -21,11 +21,13 @@ from claude_xmpp_bridge.setup import (
     _confirm,
     _find_hooks_dir,
     _find_opencode_dir,
+    _install_symlink,
     _resolve_plugin_source,
     _step_config,
     _step_credentials,
     _step_hooks,
     _step_opencode,
+    _step_sandbox,
     _step_switches,
     _step_systemd,
     _uninstall_bridge,
@@ -180,7 +182,7 @@ class TestStepConfig:
 
 
 class TestStepHooks:
-    def test_installs_all_hooks_with_bridge(self, monkeypatch, tmp_path):
+    def test_installs_all_hooks_as_symlinks_with_bridge(self, monkeypatch, tmp_path):
         hooks_dir = tmp_path / "hooks"
         settings_path = tmp_path / "settings.json"
         monkeypatch.setattr(setup, "HOOKS_DIR", hooks_dir)
@@ -190,12 +192,11 @@ class TestStepHooks:
 
         assert ok is True
         assert hooks_dir.is_dir()
-        assert (hooks_dir / "session-start-title.sh").is_file()
-        assert (hooks_dir / "notification.sh").is_file()
-        assert (hooks_dir / "permission-ask-xmpp.sh").is_file()
-        # All hook targets should be installed
+        # All hook targets should be installed as symlinks
         for target in {**HOOK_FILES_LOCAL, **HOOK_FILES_BRIDGE}.values():
-            assert (hooks_dir / target).is_file(), f"missing {target}"
+            dst = hooks_dir / target
+            assert dst.is_symlink(), f"{target} must be a symlink"
+            assert dst.is_file(), f"{target} symlink must point to existing file"
 
     def test_installs_only_title_hook_without_bridge(self, monkeypatch, tmp_path):
         hooks_dir = tmp_path / "hooks"
@@ -206,12 +207,12 @@ class TestStepHooks:
         ok = _step_hooks(yes_mode=True, with_bridge=False)
 
         assert ok is True
-        assert (hooks_dir / "session-start-title.sh").is_file()
+        assert (hooks_dir / "session-start-title.sh").is_symlink()
         # Bridge-only hooks must NOT be installed
         for target in HOOK_FILES_BRIDGE.values():
             assert not (hooks_dir / target).exists(), f"unexpected {target}"
 
-    def test_scripts_are_executable(self, monkeypatch, tmp_path):
+    def test_hook_symlinks_resolve_to_executable(self, monkeypatch, tmp_path):
         hooks_dir = tmp_path / "hooks"
         settings_path = tmp_path / "settings.json"
         monkeypatch.setattr(setup, "HOOKS_DIR", hooks_dir)
@@ -220,7 +221,23 @@ class TestStepHooks:
         _step_hooks(yes_mode=True, with_bridge=True)
 
         for f in hooks_dir.iterdir():
-            assert f.stat().st_mode & 0o100, f"{f.name} is not executable"
+            resolved = f.resolve()
+            assert resolved.stat().st_mode & 0o100, f"{f.name} target is not executable"
+
+    def test_replaces_plain_file_with_symlink(self, monkeypatch, tmp_path):
+        """Upgrade path: existing plain file hooks are replaced with symlinks."""
+        hooks_dir = tmp_path / "hooks"
+        hooks_dir.mkdir(parents=True)
+        old_hook = hooks_dir / "session-start-title.sh"
+        old_hook.write_text("#!/bin/bash\n# old copy")
+        settings_path = tmp_path / "settings.json"
+        monkeypatch.setattr(setup, "HOOKS_DIR", hooks_dir)
+        monkeypatch.setattr(setup, "CLAUDE_SETTINGS", settings_path)
+
+        ok = _step_hooks(yes_mode=True, upgrade=True, with_bridge=True)
+
+        assert ok is True
+        assert old_hook.is_symlink(), "plain file must be replaced with symlink on upgrade"
 
     def test_merges_settings_json(self, monkeypatch, tmp_path):
         hooks_dir = tmp_path / "hooks"
@@ -303,7 +320,7 @@ class TestStepSystemd:
         captured = capsys.readouterr()
         assert "not found" in captured.out
 
-    def test_installs_unit(self, monkeypatch, tmp_path):
+    def test_installs_unit_as_symlink(self, monkeypatch, tmp_path):
         systemd_dir = tmp_path / "systemd"
         monkeypatch.setattr(setup, "SYSTEMD_DIR", systemd_dir)
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/systemctl")
@@ -311,7 +328,23 @@ class TestStepSystemd:
         ok = _step_systemd(yes_mode=True)
 
         assert ok is True
-        assert (systemd_dir / "claude-xmpp-bridge.service").is_file()
+        dst = systemd_dir / "claude-xmpp-bridge.service"
+        assert dst.is_symlink(), "systemd unit must be a symlink"
+        assert dst.is_file(), "systemd unit symlink must point to existing file"
+
+    def test_replaces_plain_file_with_symlink(self, monkeypatch, tmp_path):
+        """Upgrade path: existing plain-file unit is replaced with symlink."""
+        systemd_dir = tmp_path / "systemd"
+        systemd_dir.mkdir(parents=True)
+        old_unit = systemd_dir / "claude-xmpp-bridge.service"
+        old_unit.write_text("[Unit]\nDescription=old copy\n")
+        monkeypatch.setattr(setup, "SYSTEMD_DIR", systemd_dir)
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/systemctl")
+
+        ok = _step_systemd(yes_mode=True, upgrade=True)
+
+        assert ok is True
+        assert old_unit.is_symlink(), "plain file must be replaced with symlink on upgrade"
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +528,135 @@ class TestStepOpencode:
 
 
 # ---------------------------------------------------------------------------
+# _install_symlink
+# ---------------------------------------------------------------------------
+
+
+class TestInstallSymlink:
+    def test_creates_symlink_to_source(self, tmp_path):
+        src = tmp_path / "source" / "file.txt"
+        src.parent.mkdir()
+        src.write_text("content")
+        dst = tmp_path / "dest" / "file.txt"
+
+        changed = _install_symlink(src, dst)
+
+        assert changed is True
+        assert dst.is_symlink()
+        assert dst.resolve() == src.resolve()
+        assert dst.read_text() == "content"
+
+    def test_returns_false_when_already_correct(self, tmp_path):
+        src = tmp_path / "source" / "file.txt"
+        src.parent.mkdir()
+        src.write_text("content")
+        dst = tmp_path / "dest" / "file.txt"
+        dst.parent.mkdir()
+        dst.symlink_to(src.resolve())
+
+        changed = _install_symlink(src, dst)
+
+        assert changed is False
+
+    def test_replaces_plain_file(self, tmp_path):
+        src = tmp_path / "source" / "file.txt"
+        src.parent.mkdir()
+        src.write_text("new content")
+        dst = tmp_path / "dest" / "file.txt"
+        dst.parent.mkdir()
+        dst.write_text("old plain copy")
+
+        changed = _install_symlink(src, dst)
+
+        assert changed is True
+        assert dst.is_symlink()
+        assert dst.read_text() == "new content"
+
+    def test_replaces_wrong_symlink(self, tmp_path):
+        old_target = tmp_path / "old" / "file.txt"
+        old_target.parent.mkdir()
+        old_target.write_text("old")
+        new_src = tmp_path / "new" / "file.txt"
+        new_src.parent.mkdir()
+        new_src.write_text("new")
+        dst = tmp_path / "dest" / "file.txt"
+        dst.parent.mkdir()
+        dst.symlink_to(old_target.resolve())
+
+        changed = _install_symlink(new_src, dst)
+
+        assert changed is True
+        assert dst.resolve() == new_src.resolve()
+
+    def test_replaces_dangling_symlink(self, tmp_path):
+        src = tmp_path / "source" / "file.txt"
+        src.parent.mkdir()
+        src.write_text("content")
+        dst = tmp_path / "dest" / "file.txt"
+        dst.parent.mkdir()
+        dst.symlink_to(tmp_path / "nonexistent")
+
+        changed = _install_symlink(src, dst)
+
+        assert changed is True
+        assert dst.is_symlink()
+        assert dst.resolve() == src.resolve()
+
+    def test_make_executable(self, tmp_path):
+        src = tmp_path / "script.sh"
+        src.write_text("#!/bin/bash")
+        src.chmod(0o644)  # not executable
+        dst = tmp_path / "dest" / "script.sh"
+
+        _install_symlink(src, dst, make_executable=True)
+
+        assert src.stat().st_mode & 0o100, "source must be made executable"
+
+
+# ---------------------------------------------------------------------------
+# _step_sandbox
+# ---------------------------------------------------------------------------
+
+
+class TestStepSandbox:
+    def test_installs_sandbox_as_symlink(self, monkeypatch, tmp_path):
+        sandbox_dst = tmp_path / "sandbox"
+        completion_dst = tmp_path / "completion" / "sandbox"
+        monkeypatch.setattr(setup, "SANDBOX_DST", sandbox_dst)
+        monkeypatch.setattr(setup, "SANDBOX_COMPLETION_DST", completion_dst)
+
+        ok = _step_sandbox(yes_mode=True)
+
+        assert ok is True
+        assert sandbox_dst.is_symlink(), "sandbox must be a symlink"
+        assert sandbox_dst.is_file(), "sandbox symlink must point to existing file"
+
+    def test_installs_bash_completion_as_symlink(self, monkeypatch, tmp_path):
+        sandbox_dst = tmp_path / "sandbox"
+        completion_dst = tmp_path / "completion" / "sandbox"
+        monkeypatch.setattr(setup, "SANDBOX_DST", sandbox_dst)
+        monkeypatch.setattr(setup, "SANDBOX_COMPLETION_DST", completion_dst)
+
+        ok = _step_sandbox(yes_mode=True)
+
+        assert ok is True
+        assert completion_dst.is_symlink(), "bash completion must be a symlink"
+
+    def test_replaces_plain_file_with_symlink(self, monkeypatch, tmp_path):
+        """Upgrade path: existing plain file is replaced with a symlink."""
+        sandbox_dst = tmp_path / "sandbox"
+        sandbox_dst.write_text("#!/bin/bash\n# old copy")
+        completion_dst = tmp_path / "completion" / "sandbox"
+        monkeypatch.setattr(setup, "SANDBOX_DST", sandbox_dst)
+        monkeypatch.setattr(setup, "SANDBOX_COMPLETION_DST", completion_dst)
+
+        ok = _step_sandbox(yes_mode=True, upgrade=True)
+
+        assert ok is True
+        assert sandbox_dst.is_symlink(), "plain file must be replaced with symlink on upgrade"
+
+
+# ---------------------------------------------------------------------------
 # _ask_components
 # ---------------------------------------------------------------------------
 
@@ -603,6 +765,25 @@ class TestUninstallSandbox:
         assert not sandbox_dst.exists()
         assert not completion_dst.exists()
 
+    def test_removes_symlinks(self, monkeypatch, tmp_path):
+        """Uninstall must also handle symlinks from the new install model."""
+        target = tmp_path / "source" / "sandbox"
+        target.parent.mkdir(parents=True)
+        target.write_text("#!/bin/bash")
+        sandbox_dst = tmp_path / "sandbox"
+        sandbox_dst.symlink_to(target)
+        completion_dst = tmp_path / "completion"
+        monkeypatch.setattr(setup, "SANDBOX_DST", sandbox_dst)
+        monkeypatch.setattr(setup, "SANDBOX_COMPLETION_DST", completion_dst)
+
+        ok = _uninstall_sandbox(yes_mode=True)
+
+        assert ok is True
+        assert not sandbox_dst.exists()
+        assert not sandbox_dst.is_symlink()
+        # Source file must remain untouched
+        assert target.is_file()
+
     def test_reports_not_found(self, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(setup, "SANDBOX_DST", tmp_path / "sandbox")
         monkeypatch.setattr(setup, "SANDBOX_COMPLETION_DST", tmp_path / "completion")
@@ -654,6 +835,29 @@ class TestUninstallHooks:
         assert ok is True
         assert not (hooks_dir / "session-start-title.sh").exists()
         assert not (hooks_dir / "notification.sh").exists()
+
+    def test_removes_hook_symlinks(self, monkeypatch, tmp_path):
+        """Uninstall must handle symlinks from the new install model."""
+        hooks_dir = tmp_path / "hooks"
+        hooks_dir.mkdir()
+        settings_path = tmp_path / "settings.json"
+        monkeypatch.setattr(setup, "HOOKS_DIR", hooks_dir)
+        monkeypatch.setattr(setup, "CLAUDE_SETTINGS", settings_path)
+        # Create symlinks instead of plain files
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        for name in ["session-start-title.sh", "notification.sh"]:
+            target = source_dir / name
+            target.write_text("#!/bin/bash")
+            (hooks_dir / name).symlink_to(target)
+
+        ok = _uninstall_hooks(yes_mode=True)
+
+        assert ok is True
+        assert not (hooks_dir / "session-start-title.sh").exists()
+        assert not (hooks_dir / "session-start-title.sh").is_symlink()
+        # Source files must remain untouched
+        assert (source_dir / "session-start-title.sh").is_file()
 
     def test_removes_hook_events_from_settings(self, monkeypatch, tmp_path):
         hooks_dir = tmp_path / "hooks"
@@ -818,6 +1022,26 @@ class TestUninstallBridge:
 
         assert ok is True
         assert not unit.exists()
+
+    def test_removes_systemd_unit_symlink(self, monkeypatch, tmp_path):
+        """Uninstall must handle symlinks from the new install model."""
+        systemd_dir = tmp_path / "systemd"
+        systemd_dir.mkdir()
+        target = tmp_path / "source" / "claude-xmpp-bridge.service"
+        target.parent.mkdir()
+        target.write_text("[Unit]\nDescription=test\n")
+        unit = systemd_dir / "claude-xmpp-bridge.service"
+        unit.symlink_to(target)
+        monkeypatch.setattr(setup, "SYSTEMD_DIR", systemd_dir)
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+
+        ok = _uninstall_bridge(yes_mode=True)
+
+        assert ok is True
+        assert not unit.exists()
+        assert not unit.is_symlink()
+        # Source file must remain untouched
+        assert target.is_file()
 
     def test_purge_removes_config_dir(self, monkeypatch, tmp_path):
         systemd_dir = tmp_path / "systemd"

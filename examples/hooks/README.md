@@ -14,15 +14,16 @@ claude-xmpp-bridge-setup
 
 ### Manual setup
 
-1. Copy hook scripts to `~/.claude/hooks/` and make them executable:
+1. Create symlinks for hook scripts in `~/.claude/hooks/`:
    ```bash
    mkdir -p ~/.claude/hooks
-   cp session-start-title.sh session-start-register.sh session-end.sh \
-      notification.sh task-completed.sh stop.sh \
-      format-location.sh ~/.claude/hooks/
-   cp permission-ask.sh ~/.claude/hooks/permission-ask-xmpp.sh
-   chmod +x ~/.claude/hooks/*.sh
+   for hook in session-start-title.sh session-start-register.sh session-end.sh \
+               notification.sh task-completed.sh stop.sh format-location.sh; do
+     ln -sf "$(pwd)/$hook" ~/.claude/hooks/
+   done
+   ln -sf "$(pwd)/permission-ask.sh" ~/.claude/hooks/permission-ask-xmpp.sh
    ```
+   Using symlinks means `pipx upgrade` automatically propagates hook updates.
 2. Copy `settings.json` to `~/.claude/settings.json` (or merge with your existing config)
 3. Enable hooks (both disabled by default):
    ```bash
