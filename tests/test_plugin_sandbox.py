@@ -112,6 +112,21 @@ class TestPluginClientBinFallback:
         assert 'new Response(proc.stderr).text()' in body, "runClient must read stderr explicitly"
         assert '$`${CLIENT_BIN} ${args}`' not in body, "runClient must not use Bun shell interpolation anymore"
 
+    def test_runAgentNotify_uses_quiet_spawn_helper(self):
+        text = _plugin_text()
+        assert 'const runQuietCommand = async (argv) => {' in text, "plugin must define quiet subprocess helper"
+        body = _function_body(text, "const runAgentNotify = async")
+        assert body, "runAgentNotify helper not found in plugin"
+        assert 'runQuietCommand([AGENT_NOTIFY_BIN, ...args])' in body
+        assert 'agent-notify exit=' in body, "agent-notify errors should go to structured logs"
+
+    def test_agent_notify_no_longer_uses_bun_shell_templates(self):
+        text = _plugin_text()
+        assert "agent-notify.sh" in text, "plugin should still reference agent-notify helper"
+        assert '$`${process.env.HOME}/claude-home/agent-notify.sh' not in text, (
+            "agent-notify must not be executed through Bun shell templates anymore"
+        )
+
     def test_rawRelay_returns_silently_when_no_client_bin(self):
         """rawRelay must return immediately without spawning a process when
         CLIENT_BIN is null.
@@ -168,6 +183,17 @@ class TestPluginClientBinFallback:
         assert "ensureRecoveryTimer" in text, "plugin must define a degraded-mode recovery timer"
         assert "bridgeDisabled" in text, "plugin must support full bridge-disabled mode"
         assert "client.app.log" in text, "plugin should use structured OpenCode logging instead of raw terminal output"
+
+    def test_agent_notify_has_own_availability_check(self):
+        text = _plugin_text()
+        assert "const AGENT_NOTIFY_AVAILABLE = helperExists(AGENT_NOTIFY_BIN)" in text, (
+            "agent-notify helper should have explicit availability detection"
+        )
+        body = _function_body(text, "const runAgentNotify = async")
+        assert body, "runAgentNotify helper not found in plugin"
+        assert "if (!AGENT_NOTIFY_AVAILABLE) return { exitCode: 127" in body, (
+            "runAgentNotify must no-op when helper script is absent"
+        )
 
     def test_plugin_uses_structured_log_levels_and_throttling(self):
         text = _plugin_text()
@@ -226,7 +252,7 @@ class TestPluginClientBinFallback:
 
     def test_agent_notify_helpers_run_only_with_registered_session(self):
         text = _plugin_text()
-        assert "if (registeredSessionID && CLIENT_BIN)" in text, (
+        assert "if (registeredSessionID && AGENT_NOTIFY_AVAILABLE)" in text, (
             "startup/session-created notify helper must only run when bridge registration succeeded"
         )
 
@@ -493,22 +519,11 @@ class TestPluginNothrowOnExternalCalls:
         )
 
     def test_agent_notify_calls_use_nothrow(self):
-        """agent-notify.sh calls must use .nothrow() — the script may not exist
-        in a sandbox or corporate environment.
-        """
+        """agent-notify helper must no longer run through raw Bun shell templates."""
         text = _plugin_text()
-        lines = text.splitlines()
-
-        notify_lines = [
-            (i + 1, line.strip())
-            for i, line in enumerate(lines)
-            if "agent-notify.sh" in line and not line.strip().startswith("//")
-        ]
-        assert notify_lines, "No agent-notify.sh calls found — plugin structure may have changed"
-
-        missing = [(n, ln) for n, ln in notify_lines if ".nothrow()" not in ln]
-        assert not missing, "agent-notify.sh calls missing .nothrow():\n" + "\n".join(
-            f"  line {n}: {ln}" for n, ln in missing
+        assert 'const runAgentNotify = async' in text, "runAgentNotify helper must exist"
+        assert '$`${process.env.HOME}/claude-home/agent-notify.sh' not in text, (
+            "agent-notify shell template calls must be removed in favor of quiet spawned execution"
         )
 
 

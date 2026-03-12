@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.11"
+  const PLUGIN_VERSION = "0.8.13"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -79,6 +79,16 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     }
   }
   const CLIENT_BIN = resolveClientBin()
+  const helperExists = (path) => {
+    try {
+      // eslint-disable-next-line no-undef
+      const fs = require("fs")
+      fs.accessSync(path, fs.constants.X_OK)
+      return true
+    } catch (_) {
+      return false
+    }
+  }
   const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "auto"
   const DISABLE_WHEN_MISSING = process.env.XMPP_BRIDGE_DISABLE_WHEN_MISSING === "1"
   let bridgeDisabled = BRIDGE_MODE === "title-only"
@@ -116,6 +126,37 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       }
     } else if (res.exitCode === 0) {
       clearBridgeUnavailable()
+    }
+    return res
+  }
+
+  const runQuietCommand = async (argv) => {
+    try {
+      const proc = Bun.spawn(argv.map(String), {
+        stdout: "pipe", stderr: "pipe",
+      })
+      const [exitCode, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      return { exitCode, stdout, stderr }
+    } catch (err) {
+      return { exitCode: 1, stdout: "", stderr: String(err) }
+    }
+  }
+
+  const AGENT_NOTIFY_BIN = `${process.env.HOME}/claude-home/agent-notify.sh`
+  const AGENT_NOTIFY_AVAILABLE = helperExists(AGENT_NOTIFY_BIN)
+
+  const runAgentNotify = async (...args) => {
+    if (!AGENT_NOTIFY_AVAILABLE) return { exitCode: 127, stdout: "", stderr: "agent-notify unavailable" }
+    const res = await runQuietCommand([AGENT_NOTIFY_BIN, ...args])
+    if (res.exitCode !== 0) {
+      await warn(
+        `agent-notify exit=${res.exitCode}${res.stderr ? " stderr=" + res.stderr.slice(0, 200) : ""}`,
+        `agent-notify:${args[0] ?? "run"}`
+      )
     }
     return res
   }
@@ -331,13 +372,13 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     recoveryTimer = setInterval(async () => {
       if (!desiredBridgeSessionID || registeredSessionID || bridgeSuppressed()) return
       await dbg("bridge recovery tick for " + desiredBridgeSessionID, "bridge-recovery-tick")
-      const regRes = await runBridgeClient("register", makeRegPayload(desiredBridgeSessionID, desiredProjectDir))
-      if (regRes.exitCode === 0) {
-        registeredSessionID = desiredBridgeSessionID
-        process.env.BRIDGE_SESSION_ID = desiredBridgeSessionID
-        if (CLIENT_BIN) {
-          await $`${process.env.HOME}/claude-home/agent-notify.sh start ${desiredBridgeSessionID} ${desiredProjectDir}`.nothrow()
-        }
+        const regRes = await runBridgeClient("register", makeRegPayload(desiredBridgeSessionID, desiredProjectDir))
+        if (regRes.exitCode === 0) {
+          registeredSessionID = desiredBridgeSessionID
+          process.env.BRIDGE_SESSION_ID = desiredBridgeSessionID
+          if (AGENT_NOTIFY_AVAILABLE) {
+            await runAgentNotify("start", desiredBridgeSessionID, desiredProjectDir)
+          }
         await reportState(isIdle ? "idle" : "running")
         if (STY && !pollTimer) {
           pollTimer = setInterval(async () => {
@@ -734,8 +775,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         stopActiveBridgeTimers()
         if (!bridgeDisabled) ensureRecoveryTimer()
       }
-      if (registeredSessionID && CLIENT_BIN) {
-        await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${active.directory}`.nothrow()
+      if (registeredSessionID && AGENT_NOTIFY_AVAILABLE) {
+        await runAgentNotify("start", bid, active.directory)
       }
       // Report initial state (agent is idle at startup, mode = planning)
       if (registeredSessionID) await reportState("idle")
@@ -795,9 +836,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         clearTitleTimer()
         desiredTitle = null
         if (registeredSessionID) {
-          if (CLIENT_BIN) {
+          if (AGENT_NOTIFY_AVAILABLE) {
             fireAndForget(
-              $`${process.env.HOME}/claude-home/agent-notify.sh end ${registeredSessionID} ${directory}`.nothrow(),
+              runAgentNotify("end", registeredSessionID, directory),
               "agent-notify-end"
             )
           }
@@ -830,8 +871,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           return
         }
         const regRes = await runBridgeClient("register", makeRegPayload(bid, info.directory))
-        if (regRes.exitCode === 0 && CLIENT_BIN) {
-          await $`${process.env.HOME}/claude-home/agent-notify.sh start ${bid} ${info.directory}`.nothrow()
+        if (regRes.exitCode === 0 && AGENT_NOTIFY_AVAILABLE) {
+          await runAgentNotify("start", bid, info.directory)
         }
         registeredSessionID = regRes.exitCode === 0 ? bid : null
         ocToBridge.set(info.id, bid)
@@ -849,8 +890,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const info = event.properties.info
         if (info.parentID) return
         const bid = ocToBridge.get(info.id) ?? bridgeID(info.id)
-        if (CLIENT_BIN) {
-          await $`${process.env.HOME}/claude-home/agent-notify.sh end ${bid} ${info.directory}`.nothrow()
+        if (AGENT_NOTIFY_AVAILABLE) {
+          await runAgentNotify("end", bid, info.directory)
         }
         await runBridgeClient("unregister", bid)
         ocToBridge.delete(info.id)

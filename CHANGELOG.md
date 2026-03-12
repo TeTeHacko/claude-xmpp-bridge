@@ -67,6 +67,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are handled internally and logged through OpenCode instead of being printed
   directly into the TUI.
 
+## [0.8.12] - 2026-03-12
+
+### Fixed
+- **OpenCode plugin now quiets helper script failures too** — optional helper
+  commands such as `~/claude-home/agent-notify.sh` now run through the same
+  quiet spawned subprocess path as bridge client calls, so missing helpers no
+  longer leak Bun `command not found` messages into the OpenCode terminal UI.
+
+## [0.8.13] - 2026-03-12
+
+### Fixed
+- **OpenCode plugin now skips unavailable helper scripts entirely** — optional
+  helper commands such as `~/claude-home/agent-notify.sh` are now checked for
+  executability up front and are not spawned at all when absent, removing both
+  unnecessary work and the remaining chance of helper-related terminal noise.
+
 ## [0.8.5] - 2026-03-11
 
 ### Fixed

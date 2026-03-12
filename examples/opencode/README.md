@@ -105,6 +105,11 @@ stack traces or diagnostics to terminal stdout/stderr.
 The plugin also runs `claude-xmpp-client` through quiet spawned subprocesses,
 so expected bridge CLI errors are captured for internal handling instead of
 being printed directly into the OpenCode TUI.
+The same quiet subprocess handling is also used for optional helper scripts like
+`~/claude-home/agent-notify.sh`, so missing helper binaries no longer leak Bun
+`command not found` messages into the terminal UI. The plugin also checks helper
+availability up front and skips those helper calls entirely when the script is
+not present or not executable.
 
 ### Agent circles
 
