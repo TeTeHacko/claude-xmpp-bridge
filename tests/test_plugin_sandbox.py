@@ -101,6 +101,17 @@ class TestPluginClientBinFallback:
         assert "console.error" not in body, "runClient must not call console.error"
         assert "console.warn" not in body, "runClient must not call console.warn"
 
+    def test_runClient_uses_bun_spawn_with_piped_output(self):
+        text = _plugin_text()
+        body = _function_body(text, "const runClient = async")
+        assert body, "runClient function not found in plugin"
+        assert "Bun.spawn" in body, "runClient must use Bun.spawn for quiet subprocess handling"
+        assert 'stdout: "pipe", stderr: "pipe"' in body, (
+            "runClient must capture stdout/stderr instead of leaking client output to the terminal"
+        )
+        assert 'new Response(proc.stderr).text()' in body, "runClient must read stderr explicitly"
+        assert '$`${CLIENT_BIN} ${args}`' not in body, "runClient must not use Bun shell interpolation anymore"
+
     def test_rawRelay_returns_silently_when_no_client_bin(self):
         """rawRelay must return immediately without spawning a process when
         CLIENT_BIN is null.

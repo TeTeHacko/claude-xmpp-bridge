@@ -102,6 +102,9 @@ same key are throttled by `XMPP_BRIDGE_LOG_THROTTLE_MS` (default: `30000`).
 Startup hooks, event handlers, and tool hooks also catch and route unexpected
 plugin exceptions into that same OpenCode log channel instead of leaking raw
 stack traces or diagnostics to terminal stdout/stderr.
+The plugin also runs `claude-xmpp-client` through quiet spawned subprocesses,
+so expected bridge CLI errors are captured for internal handling instead of
+being printed directly into the OpenCode TUI.
 
 ### Agent circles
 

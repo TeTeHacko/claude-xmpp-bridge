@@ -58,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   errors and report them via `client.app.log(...)` instead of letting raw
   diagnostics leak to terminal stdout/stderr.
 
+## [0.8.11] - 2026-03-12
+
+### Fixed
+- **OpenCode plugin now keeps bridge CLI stderr out of the terminal UI** —
+  `claude-xmpp-client` calls now run through quiet spawned subprocesses with
+  captured stdout/stderr, so expected bridge errors such as `bridge not running`
+  are handled internally and logged through OpenCode instead of being printed
+  directly into the TUI.
+
 ## [0.8.5] - 2026-03-11
 
 ### Fixed

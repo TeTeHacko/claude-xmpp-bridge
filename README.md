@@ -457,7 +457,7 @@ See [`examples/opencode/`](examples/opencode/) for an OpenCode plugin that provi
 - Polls MCP inbox on `session.idle` and every 30 s — injects pending inter-agent messages into the session
 - Falls back to a quiet degraded mode when the bridge is down — suppresses repeated failed bridge calls during idle events and retries recovery in the background
 - Supports `XMPP_BRIDGE_MODE=title-only` for title/status indicators without any bridge/MCP traffic
-- Logs bridge/plugin warnings, errors, and caught handler exceptions via OpenCode's structured plugin log instead of dumping raw diagnostics into the terminal
+- Logs bridge/plugin warnings, errors, and caught handler exceptions via OpenCode's structured plugin log instead of dumping raw diagnostics into the terminal, and captures bridge CLI stderr internally so expected client failures do not print into the OpenCode TUI
 
 Window title traffic-light states:
 

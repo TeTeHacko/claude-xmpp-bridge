@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.10"
+  const PLUGIN_VERSION = "0.8.11"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -88,10 +88,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   const runClient = async (...args) => {
     if (!CLIENT_BIN) return { exitCode: 127, stdout: "", stderr: "" }
     try {
-      const res = await $`${CLIENT_BIN} ${args}`.nothrow()
-      return res
-    } catch (_) {
-      return { exitCode: 1, stdout: "", stderr: "" }
+      const proc = Bun.spawn([CLIENT_BIN, ...args.map(String)], {
+        stdout: "pipe", stderr: "pipe",
+      })
+      const [exitCode, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      return { exitCode, stdout, stderr }
+    } catch (err) {
+      return { exitCode: 1, stdout: "", stderr: String(err) }
     }
   }
 
