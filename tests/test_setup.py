@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 
 from claude_xmpp_bridge import setup
 from claude_xmpp_bridge.setup import (
@@ -473,6 +475,49 @@ class TestAskComponents:
         monkeypatch.setattr("builtins.input", lambda _: "")
         result = _ask_components(yes_mode=False, default_all=False)
         assert result == set()
+
+
+class TestReleaseGuards:
+    def test_plugin_changes_require_package_version_bump(self):
+        if shutil.which("git") is None:
+            return
+
+        repo_root = setup.Path(__file__).resolve().parent.parent
+        plugin_path = "examples/opencode/plugins/xmpp-bridge.js"
+        version_file = "src/claude_xmpp_bridge/__init__.py"
+
+        diff = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD", "--", plugin_path],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if diff.returncode != 0 or plugin_path not in diff.stdout.splitlines():
+            return
+
+        head_version = subprocess.run(
+            ["git", "show", f"HEAD:{version_file}"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if head_version.returncode != 0:
+            return
+
+        current_version = setup.__version__
+        previous_version = None
+        for line in head_version.stdout.splitlines():
+            if line.startswith("__version__ = "):
+                previous_version = line.split('"')[1]
+                break
+
+        assert previous_version is not None
+        assert current_version != previous_version, (
+            "OpenCode plugin changed but package version did not change. "
+            "Bump pyproject.toml and src/claude_xmpp_bridge/__init__.py so pipx upgrade will reinstall the package."
+        )
 
 
 # ---------------------------------------------------------------------------
