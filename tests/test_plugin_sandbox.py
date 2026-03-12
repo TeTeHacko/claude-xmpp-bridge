@@ -163,8 +163,28 @@ class TestPluginClientBinFallback:
         assert "const logPlugin = (level, msg, key = \"\") =>" in text, "plugin must centralize logging"
         assert "const warn = (msg, key = \"\") => logPlugin(\"warn\", msg, key)" in text
         assert "const errlog = (msg, key = \"\") => logPlugin(\"error\", msg, key)" in text
+        assert "const logCaught = (scope, err, key = \"\") => errlog(" in text
         assert "const lastLogAt = new Map()" in text, "plugin logs should be throttled by key"
         assert "XMPP_BRIDGE_LOG_THROTTLE_MS" in text, "plugin must expose log throttle env var"
+
+    def test_startup_async_blocks_log_caught_errors(self):
+        text = _plugin_text()
+        assert 'await logCaught("startup-title", err, "startup-title-error")' in text
+        assert 'await logCaught("startup-register", err, "startup-register-error")' in text
+
+    def test_tool_execute_before_logs_caught_errors(self):
+        text = _plugin_text()
+        body = _function_body(text, '"tool.execute.before": async')
+        assert body, "tool.execute.before handler not found in plugin"
+        assert 'await logCaught("tool.execute.before", err, "tool-execute-before-error")' in body
+
+    def test_event_handler_logs_caught_errors(self):
+        text = _plugin_text()
+        idx = text.find("event: async ({ event }) =>")
+        assert idx != -1, "event handler not found in plugin"
+        body = text[idx : idx + 12000]
+        assert "try {" in body, "event handler must wrap event processing in try/catch"
+        assert 'await logCaught(`event:${event.type}`, err, `event-error:${event.type}`)' in body
 
     def test_runBridgeClient_short_circuits_when_bridge_disabled(self):
         text = _plugin_text()

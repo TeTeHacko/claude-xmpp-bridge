@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.6] - 2026-03-12
+
+### Fixed
+- **MCP tools now remember the caller's bridge session automatically** — after an
+  MCP client calls a session-scoped tool such as `receive_messages(session_id)`,
+  later `send_message(...)`, `broadcast_message(...)`, and
+  `reply_to_last_sender(...)` calls from the same MCP client can reuse that
+  session identity even if `sender_session_id` is omitted, preventing remaining
+  `from: null` relay envelopes in OpenCode agent conversations.
+
+## [0.8.7] - 2026-03-12
+
+### Fixed
+- **MCP sender fallback now tracks streamable-HTTP session identity too** — the
+  bridge now reuses the caller's prior bridge `session_id` by stable
+  `mcp-session-id` request headers in addition to FastMCP `client_id`, covering
+  OpenCode tool-call paths where `client_id` alone is missing or unstable and
+  preventing remaining `from: null` relays.
+
+### Changed
+- **Added MCP identity-miss audit records for runtime diagnosis** — when an MCP
+  send/broadcast still arrives without any recoverable sender identity, the
+  bridge now logs structured request metadata to help pinpoint the remaining
+  caller path instead of failing silently.
+
+## [0.8.8] - 2026-03-12
+
+### Fixed
+- **OpenCode MCP callers now bind to bridge sessions during discovery traffic** —
+  the bridge now watches the first `list_tools` / `list_prompts` /
+  `list_resources` requests that arrive right after OpenCode session
+  registration and binds that MCP caller identity to the freshly registered
+  bridge session, so later `send_message(...)` calls from the same transport no
+  longer fall back to `from: null` when no explicit `sender_session_id` was
+  passed.
+
+## [0.8.9] - 2026-03-12
+
+### Fixed
+- **Bridge-native relay/broadcast replies now always include `message_id`** —
+  socket relay, broadcast, and reply-to-last-sender paths now generate and
+  propagate short `message_id` values in both the generated terminal envelope
+  and the observer-facing XMPP JSON payload, eliminating remaining
+  `message_id: null` relay metadata.
+
+## [0.8.10] - 2026-03-12
+
+### Fixed
+- **OpenCode plugin now routes caught handler exceptions into structured plugin logs** —
+  startup tasks, event handling, and tool hooks now catch unexpected plugin
+  errors and report them via `client.app.log(...)` instead of letting raw
+  diagnostics leak to terminal stdout/stderr.
+
 ## [0.8.5] - 2026-03-11
 
 ### Fixed

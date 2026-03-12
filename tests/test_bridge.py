@@ -3510,6 +3510,7 @@ class TestRelay:
         assert payload["mode"] == "screen"
         assert payload["from"] == "agent-a"
         assert payload["to"] == "agent-b"
+        assert len(payload["message_id"]) == 12
         assert payload["message"] == "yo agent-b, done with module X"
         assert "ts" in payload
         bridge.registry.close()
@@ -3530,6 +3531,7 @@ class TestRelay:
         sent = conn.send.call_args[0][1]
         payload = json.loads(sent)
         assert payload["type"] == "relay"
+        assert len(payload["message_id"]) == 12
         assert payload["message"] == "hello session 2"
         bridge.registry.close()
 
@@ -3659,6 +3661,7 @@ class TestRelay:
         sent = conn.send.call_args[0][1]
         payload = json.loads(sent)
         assert payload["type"] == "relay"
+        assert len(payload["message_id"]) == 12
         assert payload["message"] == long_msg  # full message, no truncation
         bridge.registry.close()
 
@@ -3677,6 +3680,7 @@ class TestRelay:
         sent = conn.send.call_args[0][1]
         payload = json.loads(sent)
         assert payload["from"] is None
+        assert len(payload["message_id"]) == 12
         assert payload["message"] == "anonymous relay"
         bridge.registry.close()
 
@@ -4565,6 +4569,8 @@ class TestStateCommand:
         result = await bridge._handle_reply_to_last_sender({"session_id": "s1", "message": "ack", "nudge": True})
 
         assert result == {"ok": True, "to": "s2", "mode": "nudge"}
+        payload = json.loads(conn.send.call_args[0][1])
+        assert len(payload["message_id"]) == 12
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")

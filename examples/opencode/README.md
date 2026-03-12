@@ -99,6 +99,9 @@ export XMPP_BRIDGE_DISABLE_WHEN_MISSING=1
 Bridge/plugin diagnostics are written via OpenCode's structured plugin log API,
 not dumped directly into the terminal. Repeated warning/error entries with the
 same key are throttled by `XMPP_BRIDGE_LOG_THROTTLE_MS` (default: `30000`).
+Startup hooks, event handlers, and tool hooks also catch and route unexpected
+plugin exceptions into that same OpenCode log channel instead of leaking raw
+stack traces or diagnostics to terminal stdout/stderr.
 
 ### Agent circles
 
@@ -188,6 +191,15 @@ which the bridge remembers as `last_agent_sender` when the recipient drains its
 inbox via `receive_messages(session_id)`. The receiving agent can then call
 `reply_to_last_sender(session_id, message)` instead of manually copying the
 session ID out of the relay metadata.
+
+As an extra safeguard, the MCP server also remembers the caller's last
+session-scoped `session_id` per MCP caller. In practice this means that after
+an OpenCode session calls `receive_messages(session_id)` or another tool with
+its own `session_id`, later `send_message(...)` calls from the same MCP caller
+can still preserve the relay `from` field even if `sender_session_id` was not
+passed explicitly. The bridge keys this fallback by both FastMCP `client_id`
+and the underlying streamable-HTTP `mcp-session-id`, which better matches how
+OpenCode reconnects and issues tool calls in practice.
 
 The same reply flow is also available over the local bridge socket/CLI as
 `claude-xmpp-client reply-last SESSION_ID MESSAGE`.

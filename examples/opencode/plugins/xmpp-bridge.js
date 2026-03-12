@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.5"
+  const PLUGIN_VERSION = "0.8.10"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -257,6 +257,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   const dbg = (msg, key = "") => logPlugin("info", msg, key)
   const warn = (msg, key = "") => logPlugin("warn", msg, key)
   const errlog = (msg, key = "") => logPlugin("error", msg, key)
+  const logCaught = (scope, err, key = "") => errlog(`${scope}: ${err}`, key || `caught:${scope}`)
 
   // ---------------------------------------------------------------------------
   // rawRelay(): posílá zprávu přes claude-xmpp-client relay BEZ bun shell.
@@ -654,8 +655,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       }
       pulseScreenHstatusCleanup()
       scheduleTitle(buildTitle("🟢"), buildAscii("AI.", projectName), { immediate: true })
-    } catch (_) {
-      // Tiše přeskočit — title update nesmí rozbít startup pluginu.
+    } catch (err) {
+      await logCaught("startup-title", err, "startup-title-error")
     }
   })
 
@@ -751,8 +752,8 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           }
         }, REREG_INTERVAL_MS)
       }
-    } catch (_) {
-      // Bridge neběží nebo session list selhal — tiše přeskočit
+    } catch (err) {
+      await logCaught("startup-register", err, "startup-register-error")
     }
   })
 
@@ -764,13 +765,18 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     // Stav `running` do bridge reportujeme dál; title se změní při session.status.
     // -------------------------------------------------------------------------
     "tool.execute.before": async (_input, _output) => {
-      await reportState("running")
+      try {
+        await reportState("running")
+      } catch (err) {
+        await logCaught("tool.execute.before", err, "tool-execute-before-error")
+      }
     },
 
     // -------------------------------------------------------------------------
     // Události session + lifecycle
     // -------------------------------------------------------------------------
     event: async ({ event }) => {
+      try {
 
       // --- SERVER INSTANCE DISPOSED: OpenCode se ukončuje ---
       if (event.type === "server.instance.disposed") {
@@ -994,6 +1000,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       if (event.type === "permission.replied") {
         scheduleTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
         return
+      }
+      } catch (err) {
+        await logCaught(`event:${event.type}`, err, `event-error:${event.type}`)
       }
     },
   }

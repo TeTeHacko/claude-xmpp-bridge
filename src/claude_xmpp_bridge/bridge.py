@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import time
+import uuid
 from pathlib import Path
 
 import slixmpp
@@ -917,6 +918,8 @@ class XMPPBridge:
                 registered_at=inherited_registered_at,
                 plugin_version=plugin_version,
             )
+            if self.mcp_server is not None:
+                self.mcp_server.note_session_registration(sid, source=source)
             self.audit.log(
                 "SESSION_REGISTERED",
                 session_id=sid,
@@ -1081,12 +1084,14 @@ class XMPPBridge:
 
         # Build XMPP observer label
         sender_id = str(req.get("session_id", ""))
+        message_id = uuid.uuid4().hex[:12]
         wrapped_message = format_generated_agent_message(
             msg_type="relay",
             message=message,
             from_session_id=sender_id or None,
             to_session_id=target_id,
             mode="nudge" if nudge else "screen",
+            message_id=message_id,
         )
 
         if nudge:
@@ -1120,6 +1125,7 @@ class XMPPBridge:
                     "mode": mode,
                     "from": sender_id or None,
                     "to": target_id,
+                    "message_id": message_id,
                     "message": message,
                     "ts": time.time(),
                 },
@@ -1153,6 +1159,7 @@ class XMPPBridge:
         nudge = bool(req.get("nudge", False))
 
         sender_id = str(req.get("session_id", ""))
+        message_id = uuid.uuid4().hex[:12]
 
         targets = {
             sid: info
@@ -1168,6 +1175,7 @@ class XMPPBridge:
             message=message,
             from_session_id=sender_id or None,
             mode="nudge" if nudge else "screen",
+            message_id=message_id,
         )
 
         if nudge:
@@ -1216,6 +1224,7 @@ class XMPPBridge:
                 "mode": mode,
                 "from": sender_id or None,
                 "to": delivered_sids,
+                "message_id": message_id,
                 "message": message,
                 "ts": time.time(),
             },
@@ -1495,12 +1504,14 @@ class XMPPBridge:
         if not target_info:
             return {"error": f"reply target not found: {last_sender}"}
         nudge = bool(req.get("nudge", True))
+        message_id = uuid.uuid4().hex[:12]
         wrapped_message = format_generated_agent_message(
             msg_type="relay",
             message=message,
             from_session_id=session_id,
             to_session_id=last_sender,
             mode="nudge" if nudge else "screen",
+            message_id=message_id,
         )
         if nudge:
             if target_info.get("backend"):
@@ -1528,6 +1539,7 @@ class XMPPBridge:
                         "mode": mode,
                         "from": session_id,
                         "to": last_sender,
+                        "message_id": message_id,
                         "message": message,
                         "ts": time.time(),
                     },

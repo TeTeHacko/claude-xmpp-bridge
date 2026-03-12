@@ -41,15 +41,19 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mcp.server.fastmcp import FastMCP
+import mcp.types as mcp_types
+from mcp.server.fastmcp import Context, FastMCP
 
 from .messages import format_generated_agent_message
 
 if TYPE_CHECKING:
     from .bridge import XMPPBridge
+
+MCPContext = Context[Any, Any, Any]
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +81,8 @@ class BridgeMCPServer:
         self._bridge: XMPPBridge | None = None
         self._task: asyncio.Task[None] | None = None
         self._mcp: FastMCP | None = None
+        self._client_sessions: dict[str, str] = {}
+        self._recent_registrations: deque[dict[str, Any]] = deque()
 
     # ------------------------------------------------------------------
     # Public API used by XMPPBridge
@@ -121,9 +127,25 @@ class BridgeMCPServer:
             port=self.port,
             log_level="WARNING",  # avoid noisy uvicorn INFO in bridge logs
         )
-
+        lowlevel = mcp._mcp_server
         # Keep a reference to self that tool functions can close over.
         server = self
+
+        async def _instrumented_list_tools(_req: mcp_types.ListToolsRequest) -> mcp_types.ListToolsResult:
+            server._observe_request_context(lowlevel.request_context)
+            return mcp_types.ListToolsResult(tools=list(await mcp.list_tools()))
+
+        async def _instrumented_list_prompts(_req: mcp_types.ListPromptsRequest) -> mcp_types.ListPromptsResult:
+            server._observe_request_context(lowlevel.request_context)
+            return mcp_types.ListPromptsResult(prompts=list(await mcp.list_prompts()))
+
+        async def _instrumented_list_resources(_req: mcp_types.ListResourcesRequest) -> mcp_types.ListResourcesResult:
+            server._observe_request_context(lowlevel.request_context)
+            return mcp_types.ListResourcesResult(resources=list(await mcp.list_resources()))
+
+        lowlevel.list_tools()(_instrumented_list_tools)  # type: ignore[no-untyped-call]
+        lowlevel.list_prompts()(_instrumented_list_prompts)  # type: ignore[no-untyped-call]
+        lowlevel.list_resources()(_instrumented_list_resources)  # type: ignore[no-untyped-call]
 
         @mcp.tool()
         async def send_message(
@@ -132,6 +154,7 @@ class BridgeMCPServer:
             screen: bool = True,
             nudge: bool = False,
             sender_session_id: str = "",
+            ctx: MCPContext | None = None,
         ) -> str:
             """Send a message to a specific agent session identified by session_id.
 
@@ -169,10 +192,17 @@ class BridgeMCPServer:
                 screen=screen,
                 nudge=nudge,
                 sender_session_id=sender_session_id,
+                client_id=ctx.client_id if ctx else None,
+                request_info=server._context_request_info(ctx),
             )
 
         @mcp.tool()
-        async def broadcast_message(message: str, sender_session_id: str = "", nudge: bool = False) -> str:
+        async def broadcast_message(
+            message: str,
+            sender_session_id: str = "",
+            nudge: bool = False,
+            ctx: MCPContext | None = None,
+        ) -> str:
             """Broadcast a message to all registered agent sessions.
 
             The message is delivered to every session that has a backend.  The sender
@@ -189,11 +219,15 @@ class BridgeMCPServer:
                 A summary string with delivery count.
             """
             return await server._tool_broadcast_message(
-                message=message, sender_session_id=sender_session_id, nudge=nudge
+                message=message,
+                sender_session_id=sender_session_id,
+                nudge=nudge,
+                client_id=ctx.client_id if ctx else None,
+                request_info=server._context_request_info(ctx),
             )
 
         @mcp.tool()
-        async def receive_messages(session_id: str) -> list[str]:
+        async def receive_messages(session_id: str, ctx: MCPContext | None = None) -> list[str]:
             """Drain and return all pending messages in the inbox for *session_id*.
 
             Messages are queued here when another agent calls ``send_message`` or
@@ -206,10 +240,15 @@ class BridgeMCPServer:
             Returns:
                 List of pending message strings (may be empty).
             """
-            return server._tool_receive_messages(session_id=session_id)
+            return server._tool_receive_messages(session_id=session_id, client_id=ctx.client_id if ctx else None)
 
         @mcp.tool()
-        async def reply_to_last_sender(session_id: str, message: str, nudge: bool = True) -> str:
+        async def reply_to_last_sender(
+            session_id: str,
+            message: str,
+            nudge: bool = True,
+            ctx: MCPContext | None = None,
+        ) -> str:
             """Reply to the last agent session that messaged *session_id*.
 
             The bridge remembers the latest non-null relay sender seen by
@@ -221,6 +260,7 @@ class BridgeMCPServer:
                 session_id=session_id,
                 message=message,
                 nudge=nudge,
+                client_id=ctx.client_id if ctx else None,
             )
 
         @mcp.tool()
@@ -242,22 +282,25 @@ class BridgeMCPServer:
             return server._tool_list_sessions()
 
         @mcp.tool()
-        async def get_session_context(session_id: str) -> dict[str, Any]:
+        async def get_session_context(session_id: str, ctx: MCPContext | None = None) -> dict[str, Any]:
             """Return the current coordination context for one session.
 
             Includes session metadata, inbox/todo/lock counts, current todo list,
             and bridge-native file locks held by the session.
             """
-            return server._tool_get_session_context(session_id=session_id)
+            return server._tool_get_session_context(session_id=session_id, client_id=ctx.client_id if ctx else None)
 
         @mcp.tool()
-        async def list_todos(session_id: str) -> list[dict[str, Any]]:
+        async def list_todos(session_id: str, ctx: MCPContext | None = None) -> list[dict[str, Any]]:
             """Return the stored todo list for one session."""
-            return server._tool_list_todos(session_id=session_id)
+            return server._tool_list_todos(session_id=session_id, client_id=ctx.client_id if ctx else None)
 
         @mcp.tool()
         async def replace_todos(
-            session_id: str, todos: list[dict[str, Any]], expected_version: int | None = None
+            session_id: str,
+            todos: list[dict[str, Any]],
+            expected_version: int | None = None,
+            ctx: MCPContext | None = None,
         ) -> dict[str, Any]:
             """Replace the stored todo list for one session.
 
@@ -265,7 +308,10 @@ class BridgeMCPServer:
             matches the current todo version for that session.
             """
             return server._tool_replace_todos(
-                session_id=session_id, todos=todos, expected_version=expected_version
+                session_id=session_id,
+                todos=todos,
+                expected_version=expected_version,
+                client_id=ctx.client_id if ctx else None,
             )
 
         @mcp.tool()
@@ -275,6 +321,7 @@ class BridgeMCPServer:
             status: str = "pending",
             priority: str = "medium",
             expected_version: int | None = None,
+            ctx: MCPContext | None = None,
         ) -> dict[str, Any]:
             """Append one todo item to a session todo list."""
             return server._tool_add_todo(
@@ -283,6 +330,7 @@ class BridgeMCPServer:
                 status=status,
                 priority=priority,
                 expected_version=expected_version,
+                client_id=ctx.client_id if ctx else None,
             )
 
         @mcp.tool()
@@ -293,6 +341,7 @@ class BridgeMCPServer:
             status: str | None = None,
             priority: str | None = None,
             expected_version: int | None = None,
+            ctx: MCPContext | None = None,
         ) -> dict[str, Any]:
             """Update one todo item by id."""
             return server._tool_update_todo(
@@ -302,15 +351,22 @@ class BridgeMCPServer:
                 status=status,
                 priority=priority,
                 expected_version=expected_version,
+                client_id=ctx.client_id if ctx else None,
             )
 
         @mcp.tool()
-        async def remove_todo(session_id: str, todo_id: str, expected_version: int | None = None) -> dict[str, Any]:
+        async def remove_todo(
+            session_id: str,
+            todo_id: str,
+            expected_version: int | None = None,
+            ctx: MCPContext | None = None,
+        ) -> dict[str, Any]:
             """Remove one todo item by id."""
             return server._tool_remove_todo(
                 session_id=session_id,
                 todo_id=todo_id,
                 expected_version=expected_version,
+                client_id=ctx.client_id if ctx else None,
             )
 
         @mcp.tool()
@@ -331,7 +387,11 @@ class BridgeMCPServer:
 
         @mcp.tool()
         async def acquire_file_lock(
-            session_id: str, filepath: str, project: str = "", reason: str = ""
+            session_id: str,
+            filepath: str,
+            project: str = "",
+            reason: str = "",
+            ctx: MCPContext | None = None,
         ) -> dict[str, Any]:
             """Acquire a bridge-native file lock for a session.
 
@@ -339,13 +399,27 @@ class BridgeMCPServer:
             current owner instead of replacing it.
             """
             return server._tool_acquire_file_lock(
-                session_id=session_id, filepath=filepath, project=project, reason=reason
+                session_id=session_id,
+                filepath=filepath,
+                project=project,
+                reason=reason,
+                client_id=ctx.client_id if ctx else None,
             )
 
         @mcp.tool()
-        async def release_file_lock(session_id: str, filepath: str, force: bool = False) -> dict[str, Any]:
+        async def release_file_lock(
+            session_id: str,
+            filepath: str,
+            force: bool = False,
+            ctx: MCPContext | None = None,
+        ) -> dict[str, Any]:
             """Release a bridge-native file lock for a session."""
-            return server._tool_release_file_lock(session_id=session_id, filepath=filepath, force=force)
+            return server._tool_release_file_lock(
+                session_id=session_id,
+                filepath=filepath,
+                force=force,
+                client_id=ctx.client_id if ctx else None,
+            )
 
         @mcp.tool()
         async def cleanup_stale_locks(project: str = "") -> dict[str, Any]:
@@ -389,6 +463,128 @@ class BridgeMCPServer:
         if path == home:
             return "~"
         return path.replace(home + "/", "~/", 1) if path.startswith(home + "/") else path
+
+    def _request_info_from_request_context(self, request_context: Any | None) -> dict[str, Any]:
+        if request_context is None:
+            return {}
+
+        info: dict[str, Any] = {}
+        meta = getattr(request_context, "meta", None)
+        client_id = getattr(meta, "client_id", None)
+        if client_id:
+            info["client_id"] = client_id
+
+        request = getattr(request_context, "request", None)
+        headers = getattr(request, "headers", None)
+        if headers is not None:
+            mcp_session_id = headers.get("mcp-session-id")
+            if mcp_session_id:
+                info["mcp_session_id"] = mcp_session_id
+            user_agent = headers.get("user-agent")
+            if user_agent:
+                info["user_agent"] = user_agent
+
+        request_client = getattr(request, "client", None)
+        if request_client is not None:
+            info["request_client"] = f"{request_client.host}:{request_client.port}"
+
+        if meta is not None:
+            with contextlib.suppress(Exception):
+                dumped = meta.model_dump(by_alias=True, exclude_none=True)
+                if dumped:
+                    info["request_meta"] = dumped
+
+        session = getattr(request_context, "session", None)
+        client_params = getattr(session, "client_params", None)
+        if client_params is not None:
+            with contextlib.suppress(Exception):
+                dumped = client_params.model_dump(by_alias=True, exclude_none=True)
+                if dumped:
+                    info["client_params"] = dumped
+
+        return info
+
+    def _context_request_info(self, ctx: MCPContext | None) -> dict[str, Any]:
+        if ctx is None:
+            return {}
+        return self._request_info_from_request_context(ctx.request_context)
+
+    def note_session_registration(self, session_id: str, *, source: str | None = None) -> None:
+        if source != "opencode":
+            return
+        self._recent_registrations.append({"session_id": session_id, "ts": time.time()})
+        self._prune_recent_registrations()
+
+    def _prune_recent_registrations(self) -> None:
+        cutoff = time.time() - 60.0
+        while self._recent_registrations and self._recent_registrations[0]["ts"] < cutoff:
+            self._recent_registrations.popleft()
+
+    def _bind_request_to_session(self, request_info: dict[str, Any], session_id: str) -> None:
+        self._remember_request_session(request_info, session_id)
+        client_id = str(request_info.get("client_id", "")).strip()
+        if client_id:
+            self._client_sessions[client_id] = session_id
+        self._recent_registrations = deque(
+            item for item in self._recent_registrations if item["session_id"] != session_id
+        )
+
+    def _observe_request_context(self, request_context: Any | None) -> None:
+        request_info = self._request_info_from_request_context(request_context)
+        self._observe_request_identity(request_info)
+
+    def _observe_request_identity(self, request_info: dict[str, Any]) -> None:
+        self._prune_recent_registrations()
+        if not request_info:
+            return
+        if self._resolve_sender_session_id("", str(request_info.get("client_id", "")), request_info):
+            return
+        if not self._recent_registrations:
+            return
+        session_id = str(self._recent_registrations[0]["session_id"])
+        self._bind_request_to_session(request_info, session_id)
+        bridge = self._bridge
+        if bridge is not None:
+            bridge.audit.log(
+                "MCP_SESSION_BOUND",
+                session_id=session_id,
+                request_info=request_info,
+                source="recent_registration",
+            )
+
+    def _remember_client_session(self, client_id: str | None, session_id: str) -> None:
+        client_key = (client_id or "").strip()
+        session_key = session_id.strip()
+        if client_key and session_key:
+            self._client_sessions[client_key] = session_key
+
+    def _remember_request_session(self, request_info: dict[str, Any], session_id: str) -> None:
+        session_key = session_id.strip()
+        if not session_key:
+            return
+        mcp_session_id = str(request_info.get("mcp_session_id", "")).strip()
+        if mcp_session_id:
+            self._client_sessions[f"mcp:{mcp_session_id}"] = session_key
+
+    def _resolve_sender_session_id(
+        self,
+        sender_session_id: str,
+        client_id: str | None,
+        request_info: dict[str, Any] | None = None,
+    ) -> str:
+        sender = sender_session_id.strip()
+        if sender:
+            self._remember_client_session(client_id, sender)
+            if request_info:
+                self._remember_request_session(request_info, sender)
+            return sender
+        client_key = (client_id or "").strip()
+        if client_key and client_key in self._client_sessions:
+            return self._client_sessions[client_key]
+        mcp_session_id = str((request_info or {}).get("mcp_session_id", "")).strip()
+        if mcp_session_id:
+            return self._client_sessions.get(f"mcp:{mcp_session_id}", "")
+        return ""
 
     @staticmethod
     def _lock_dir() -> Path:
@@ -450,6 +646,8 @@ class BridgeMCPServer:
         screen: bool = True,
         nudge: bool = False,
         sender_session_id: str = "",
+        client_id: str | None = None,
+        request_info: dict[str, Any] | None = None,
     ) -> str:
         """Implementation of the send_message tool."""
         bridge = self._bridge
@@ -459,6 +657,13 @@ class BridgeMCPServer:
             return bridge.messages.mcp_send_missing_to
         if not message:
             return bridge.messages.mcp_send_missing_message
+
+        sender_session_id = self._resolve_sender_session_id(sender_session_id, client_id, request_info)
+        if not sender_session_id and request_info:
+            self._observe_request_identity(request_info)
+            sender_session_id = self._resolve_sender_session_id(sender_session_id, client_id, request_info)
+        if not sender_session_id and request_info:
+            bridge.audit.log("MCP_SEND_IDENTITY_MISS", to_session_id=to, request_info=request_info)
 
         target_info = bridge.registry.get(to)
         if not target_info:
@@ -602,13 +807,28 @@ class BridgeMCPServer:
             )
             return bridge.messages.mcp_send_ok.format(target_prefix=target_prefix) + f" [id:{message_id}] (inbox only)"
 
-    async def _tool_broadcast_message(self, *, message: str, sender_session_id: str, nudge: bool = False) -> str:
+    async def _tool_broadcast_message(
+        self,
+        *,
+        message: str,
+        sender_session_id: str,
+        nudge: bool = False,
+        client_id: str | None = None,
+        request_info: dict[str, Any] | None = None,
+    ) -> str:
         """Implementation of the broadcast_message tool."""
         bridge = self._bridge
         if bridge is None:
             return "Error: bridge not initialised"
         if not message:
             return bridge.messages.broadcast_no_message
+
+        sender_session_id = self._resolve_sender_session_id(sender_session_id, client_id, request_info)
+        if not sender_session_id and request_info:
+            self._observe_request_identity(request_info)
+            sender_session_id = self._resolve_sender_session_id(sender_session_id, client_id, request_info)
+        if not sender_session_id and request_info:
+            bridge.audit.log("MCP_BROADCAST_IDENTITY_MISS", request_info=request_info)
 
         targets = {
             sid: info
@@ -688,12 +908,19 @@ class BridgeMCPServer:
         return bridge.messages.broadcast_sent.format(count=delivered)
 
     def _tool_acquire_file_lock(
-        self, *, session_id: str, filepath: str, project: str = "", reason: str = ""
+        self,
+        *,
+        session_id: str,
+        filepath: str,
+        project: str = "",
+        reason: str = "",
+        client_id: str | None = None,
     ) -> dict[str, Any]:
         """Implementation of ``acquire_file_lock``."""
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
             return {"ok": False, "error": f"unknown session_id: {session_id}"}
@@ -712,11 +939,19 @@ class BridgeMCPServer:
         )
         return {"ok": acquired, "lock": dict(lock), "replaced_stale": replaced_stale}
 
-    def _tool_release_file_lock(self, *, session_id: str, filepath: str, force: bool = False) -> dict[str, Any]:
+    def _tool_release_file_lock(
+        self,
+        *,
+        session_id: str,
+        filepath: str,
+        force: bool = False,
+        client_id: str | None = None,
+    ) -> dict[str, Any]:
         """Implementation of ``release_file_lock``."""
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "released": False, "error": "bridge not initialised"}
+        self._remember_client_session(client_id, session_id)
         released = bridge.registry.release_file_lock(session_id, filepath, force=force)
         bridge.audit.log(
             "MCP_LOCK_RELEASE",
@@ -727,20 +962,27 @@ class BridgeMCPServer:
         )
         return {"ok": True, "released": released}
 
-    def _tool_list_todos(self, *, session_id: str) -> list[dict[str, Any]]:
+    def _tool_list_todos(self, *, session_id: str, client_id: str | None = None) -> list[dict[str, Any]]:
         """Implementation of ``list_todos``."""
         bridge = self._bridge
         if bridge is None:
             return []
+        self._remember_client_session(client_id, session_id)
         return [dict(todo) for todo in bridge.registry.list_todos(session_id)]
 
     def _tool_replace_todos(
-        self, *, session_id: str, todos: list[dict[str, Any]], expected_version: int | None = None
+        self,
+        *,
+        session_id: str,
+        todos: list[dict[str, Any]],
+        expected_version: int | None = None,
+        client_id: str | None = None,
     ) -> dict[str, Any]:
         """Implementation of ``replace_todos``."""
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
             return {"ok": False, "error": f"unknown session_id: {session_id}"}
@@ -768,11 +1010,13 @@ class BridgeMCPServer:
         status: str = "pending",
         priority: str = "medium",
         expected_version: int | None = None,
+        client_id: str | None = None,
     ) -> dict[str, Any]:
         """Implementation of ``add_todo``."""
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
             return {"ok": False, "error": f"unknown session_id: {session_id}"}
@@ -807,11 +1051,13 @@ class BridgeMCPServer:
         status: str | None = None,
         priority: str | None = None,
         expected_version: int | None = None,
+        client_id: str | None = None,
     ) -> dict[str, Any]:
         """Implementation of ``update_todo``."""
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
             return {"ok": False, "error": f"unknown session_id: {session_id}"}
@@ -841,12 +1087,18 @@ class BridgeMCPServer:
         return {"ok": True, "todo": dict(todo), "version": version}
 
     def _tool_remove_todo(
-        self, *, session_id: str, todo_id: str, expected_version: int | None = None
+        self,
+        *,
+        session_id: str,
+        todo_id: str,
+        expected_version: int | None = None,
+        client_id: str | None = None,
     ) -> dict[str, Any]:
         """Implementation of ``remove_todo``."""
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
             return {"ok": False, "error": f"unknown session_id: {session_id}"}
@@ -869,11 +1121,12 @@ class BridgeMCPServer:
         )
         return {"ok": True, "removed": removed, "version": version}
 
-    def _tool_get_session_context(self, *, session_id: str) -> dict[str, Any]:
+    def _tool_get_session_context(self, *, session_id: str, client_id: str | None = None) -> dict[str, Any]:
         """Implementation of ``get_session_context``."""
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
             return {"ok": False, "error": f"unknown session_id: {session_id}"}
@@ -918,11 +1171,13 @@ class BridgeMCPServer:
             )
         return {"removed": len(removed), "locks": removed}
 
-    def _tool_receive_messages(self, *, session_id: str) -> list[str]:
+    def _tool_receive_messages(self, *, session_id: str, client_id: str | None = None) -> list[str]:
         """Implementation of the receive_messages tool — drains the SQLite inbox."""
         bridge = self._bridge
         if bridge is None:
             return []
+        self._remember_client_session(client_id, session_id)
+        self._bind_request_to_session({"client_id": client_id} if client_id else {}, session_id)
         rows = bridge.registry.inbox_drain_with_senders(session_id)
         messages = [message for message, _sender in rows]
         for _message, sender_session_id in rows:
@@ -936,11 +1191,19 @@ class BridgeMCPServer:
             )
         return messages
 
-    async def _tool_reply_to_last_sender(self, *, session_id: str, message: str, nudge: bool = True) -> str:
+    async def _tool_reply_to_last_sender(
+        self,
+        *,
+        session_id: str,
+        message: str,
+        nudge: bool = True,
+        client_id: str | None = None,
+    ) -> str:
         """Reply to the last remembered agent sender for *session_id*."""
         bridge = self._bridge
         if bridge is None:
             return "Error: bridge not initialised"
+        self._remember_client_session(client_id, session_id)
         sender_info = bridge.registry.get(session_id)
         if sender_info is None:
             return f"Error: unknown session_id: {session_id}"

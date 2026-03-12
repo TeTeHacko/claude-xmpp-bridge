@@ -334,7 +334,7 @@ The bridge also exposes an HTTP MCP server on port 7878 (streamable-HTTP transpo
 
 | Tool | Description |
 |------|-------------|
-| `send_message(to, message, screen=True, nudge=False, sender_session_id="")` | Deliver a message to a session; `screen=False` enqueues to inbox only; `nudge=True` sends only a CR to wake the agent (message stored in inbox, delivered on next `session.idle`); pass `sender_session_id` so the recipient can reply directly to the originating agent |
+| `send_message(to, message, screen=True, nudge=False, sender_session_id="")` | Deliver a message to a session; `screen=False` enqueues to inbox only; `nudge=True` sends only a CR to wake the agent (message stored in inbox, delivered on next `session.idle`); pass `sender_session_id` so the recipient can reply directly to the originating agent; if omitted, the MCP server reuses the same caller's last known `session_id` from earlier session-scoped tool calls, keyed by FastMCP `client_id` and streamable-HTTP `mcp-session-id` when available |
 | `broadcast_message(message, sender_session_id)` | Deliver to all sessions except sender |
 | `receive_messages(session_id)` | Drain inbox — returns messages sent to this session |
 | `list_sessions()` | Enumerate all sessions with metadata, state/mode, last_seen/idle_seconds, last_agent_sender, plugin version, sty/window, and inbox/todo/lock counts |
@@ -457,7 +457,7 @@ See [`examples/opencode/`](examples/opencode/) for an OpenCode plugin that provi
 - Polls MCP inbox on `session.idle` and every 30 s — injects pending inter-agent messages into the session
 - Falls back to a quiet degraded mode when the bridge is down — suppresses repeated failed bridge calls during idle events and retries recovery in the background
 - Supports `XMPP_BRIDGE_MODE=title-only` for title/status indicators without any bridge/MCP traffic
-- Logs bridge/plugin warnings and errors via OpenCode's structured plugin log instead of dumping raw diagnostics into the terminal
+- Logs bridge/plugin warnings, errors, and caught handler exceptions via OpenCode's structured plugin log instead of dumping raw diagnostics into the terminal
 
 Window title traffic-light states:
 
@@ -529,7 +529,11 @@ When such a value is shown in `/list`, the bridge displays the compact build suf
 
 For direct agent-to-agent replies, use the sender's `BRIDGE_SESSION_ID` as
 `sender_session_id` when calling MCP `send_message(...)`. The generated relay
-metadata will then include a non-null `from` field.
+metadata will then include a non-null `from` field. As a fallback, the MCP
+server also remembers the caller's most recent `session_id` from prior
+session-scoped tool calls such as `receive_messages(session_id)` or
+`reply_to_last_sender(session_id, ...)`, so later sends from the same MCP
+caller can still preserve sender identity if `sender_session_id` is omitted.
 
 On the receiving side, call `receive_messages(session_id)` first; the bridge will
 remember the latest non-null sender as `last_agent_sender`. Agents can then use

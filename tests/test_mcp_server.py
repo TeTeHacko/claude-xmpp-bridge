@@ -56,6 +56,36 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     bridge.registry = MagicMock()
     bridge.registry.sessions = sessions or {}
     bridge.registry.get = MagicMock(side_effect=lambda sid: (sessions or {}).get(sid))
+    def _register(*args, **kwargs):
+        if kwargs:
+            session_id = kwargs["session_id"]
+            sty = kwargs["sty"]
+            window = kwargs["window"]
+            project = kwargs["project"]
+            backend = kwargs["backend"]
+            source = kwargs.get("source")
+            registered_at = kwargs.get("registered_at") or 1_000_000.0
+            plugin_version = kwargs.get("plugin_version")
+        else:
+            session_id, sty, window, project = args[:4]
+            backend = args[4] if len(args) > 4 else "screen"
+            source = args[5] if len(args) > 5 else None
+            registered_at = args[6] if len(args) > 6 else 1_000_000.0
+            plugin_version = args[7] if len(args) > 7 else None
+        bridge.registry.sessions[session_id] = {
+            "project": project,
+            "backend": backend,
+            "sty": sty,
+            "window": window,
+            "source": source,
+            "registered_at": registered_at,
+            "plugin_version": plugin_version,
+            "agent_state": None,
+            "agent_mode": None,
+            "todos_version": 0,
+        }
+
+    bridge.registry.register = MagicMock(side_effect=_register)
     file_locks: dict[str, dict] = {}
     todos_by_session: dict[str, list[dict]] = {}
     last_agent_sender_by_session: dict[str, str | None] = {}
@@ -111,6 +141,9 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
         for lock in removed:
             file_locks.pop(lock["filepath"], None)
         return sorted(removed, key=lambda item: item["filepath"])
+
+    def _unregister(session_id: str):
+        bridge.registry.sessions.pop(session_id, None)
 
     def _replace_todos(session_id: str, todos: list[dict], expected_version: int | None = None):
         current_version = int(bridge.registry.sessions[session_id].get("todos_version", 0))
@@ -339,6 +372,7 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     bridge.registry.inbox_count = MagicMock(side_effect=_inbox_count)
     bridge.registry.set_last_agent_sender = MagicMock(side_effect=_set_last_agent_sender)
     bridge.registry.get_last_agent_sender = MagicMock(side_effect=_get_last_agent_sender)
+    bridge.registry.unregister = MagicMock(side_effect=_unregister)
     bridge._stuff_to_session = AsyncMock(return_value=True)
     bridge._xmpp_send = MagicMock(return_value=True)
     bridge._session_prefix = MagicMock(side_effect=lambda info: f"[{info['project'].split('/')[-1]}]")
@@ -469,6 +503,31 @@ class TestEnqueueAndReceive:
         assert msgs == ["hello"]
         started_server._bridge.registry.set_last_agent_sender.assert_called_once_with("ses_AAA", "ses_BBB")
 
+    def test_receive_remembers_client_session_for_future_tools(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[])
+
+        started_server._tool_receive_messages(session_id="ses_AAA", client_id="client-123")
+
+        assert started_server._client_sessions["client-123"] == "ses_AAA"
+
+    def test_observe_request_identity_binds_recent_registration_by_mcp_session(self, started_server: BridgeMCPServer):
+        started_server.note_session_registration("ses_AAA", source="opencode")
+
+        started_server._observe_request_identity(
+            {
+                "mcp_session_id": "mcp-123",
+                "user_agent": "opencode/1.2.24",
+                "client_params": {"clientInfo": {"name": "opencode", "version": "1.2.24"}},
+            }
+        )
+
+        assert started_server._client_sessions["mcp:mcp-123"] == "ses_AAA"
+
+    def test_note_session_registration_only_tracks_recent_queue(self, started_server: BridgeMCPServer):
+        started_server.note_session_registration("ses_AAA", source="opencode")
+
+        assert started_server._recent_registrations[0]["session_id"] == "ses_AAA"
+
 
 # ---------------------------------------------------------------------------
 # send_message tool
@@ -545,6 +604,40 @@ class TestSendMessageTool:
         await started_server._tool_send_message(to="ses_AAA", message="ping", sender_session_id="ses_BBB")
         payload = json.loads(started_server._bridge._xmpp_send.call_args[0][0])
         assert payload["from"] == "ses_BBB"
+
+    async def test_send_uses_remembered_client_session_when_sender_missing(self, started_server: BridgeMCPServer):
+        started_server._tool_receive_messages(session_id="ses_BBB", client_id="client-123")
+
+        await started_server._tool_send_message(
+            to="ses_AAA",
+            message="ping",
+            screen=False,
+            sender_session_id="",
+            client_id="client-123",
+        )
+
+        args = started_server._bridge.registry.inbox_put.call_args[0]
+        wrapped = args[1]
+        payload = json.loads(wrapped.splitlines()[1])
+        assert payload["from"] == "ses_BBB"
+        assert started_server._bridge.registry.inbox_put.call_args.kwargs["from_session"] == "ses_BBB"
+
+    async def test_send_uses_remembered_mcp_session_when_sender_missing(self, started_server: BridgeMCPServer):
+        started_server._remember_request_session({"mcp_session_id": "mcp-123"}, "ses_BBB")
+
+        await started_server._tool_send_message(
+            to="ses_AAA",
+            message="ping",
+            screen=False,
+            sender_session_id="",
+            request_info={"mcp_session_id": "mcp-123"},
+        )
+
+        args = started_server._bridge.registry.inbox_put.call_args[0]
+        wrapped = args[1]
+        payload = json.loads(wrapped.splitlines()[1])
+        assert payload["from"] == "ses_BBB"
+        assert started_server._bridge.registry.inbox_put.call_args.kwargs["from_session"] == "ses_BBB"
 
     async def test_send_returns_message_id(self, started_server: BridgeMCPServer):
         result = await started_server._tool_send_message(to="ses_AAA", message="ping")
@@ -638,6 +731,32 @@ class TestBroadcastMessageTool:
         assert payload["mode"] == "screen"
         assert set(payload["to"]) == {"ses_AAA", "ses_BBB"}
         assert payload["message"] == "hi"
+
+    async def test_broadcast_uses_remembered_client_session_when_sender_missing(self, started_server: BridgeMCPServer):
+        started_server._tool_receive_messages(session_id="ses_AAA", client_id="client-123")
+
+        await started_server._tool_broadcast_message(
+            message="hi",
+            sender_session_id="",
+            client_id="client-123",
+        )
+
+        payload = json.loads(started_server._bridge._xmpp_send.call_args[0][0])
+        assert payload["from"] == "ses_AAA"
+        assert payload["to"] == ["ses_BBB"]
+
+    async def test_broadcast_uses_remembered_mcp_session_when_sender_missing(self, started_server: BridgeMCPServer):
+        started_server._remember_request_session({"mcp_session_id": "mcp-123"}, "ses_AAA")
+
+        await started_server._tool_broadcast_message(
+            message="hi",
+            sender_session_id="",
+            request_info={"mcp_session_id": "mcp-123"},
+        )
+
+        payload = json.loads(started_server._bridge._xmpp_send.call_args[0][0])
+        assert payload["from"] == "ses_AAA"
+        assert payload["to"] == ["ses_BBB"]
 
     async def test_broadcast_logs_audit(self, started_server: BridgeMCPServer):
         await started_server._tool_broadcast_message(message="hi", sender_session_id="")
