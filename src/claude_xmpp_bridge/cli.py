@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -43,6 +44,14 @@ def _print_bridge_error(result: dict[str, object] | None) -> None:
     message = str(result.get("error", "bridge not running")) if result else "bridge not running"
     print(f"Error: {message}", file=sys.stderr)
     sys.exit(1)
+
+
+def _default_bridge_session_id(explicit: str | None) -> str | None:
+    """Return explicit sender session_id or fallback to BRIDGE_SESSION_ID env."""
+    if explicit:
+        return explicit
+    value = os.environ.get("BRIDGE_SESSION_ID", "").strip()
+    return value or None
 
 
 # --- bridge ---
@@ -468,8 +477,9 @@ def client_main() -> None:
             relay_req["to"] = args.to
         if args.to_index is not None:
             relay_req["to_index"] = args.to_index
-        if args.session_id:
-            relay_req["session_id"] = args.session_id
+        sender_session_id = _default_bridge_session_id(args.session_id)
+        if sender_session_id:
+            relay_req["session_id"] = sender_session_id
         result = send_to_bridge(relay_req, socket_path)
         if result is None:
             print("Error: bridge not running", file=sys.stderr)
@@ -490,8 +500,9 @@ def client_main() -> None:
         if not message:
             sys.exit(0)
         broadcast_req: dict[str, object] = {"cmd": "broadcast", "message": message}
-        if args.session_id:
-            broadcast_req["session_id"] = args.session_id
+        sender_session_id = _default_bridge_session_id(args.session_id)
+        if sender_session_id:
+            broadcast_req["session_id"] = sender_session_id
         result = send_to_bridge(broadcast_req, socket_path)
         if result is None:
             print("Error: bridge not running", file=sys.stderr)

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-03-11
+
+### Fixed
+- **CLI relay/broadcast now inherit `BRIDGE_SESSION_ID` by default** — local
+  `claude-xmpp-client relay` and `broadcast` commands now fall back to the
+  caller's environment-provided session ID when `--session-id` is omitted,
+  preventing agent-originated bridge messages from losing sender identity and
+  falling back to `from: null`.
+
 ## [0.8.4] - 2026-03-11
 
 ### Fixed

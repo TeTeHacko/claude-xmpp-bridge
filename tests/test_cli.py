@@ -249,6 +249,33 @@ class TestClientSubcommands:
         assert '"to": "sess-2"' in out
         assert '"mode": "nudge"' in out
 
+    def test_relay_uses_bridge_session_id_from_env(self, monkeypatch):
+        monkeypatch.setenv("BRIDGE_SESSION_ID", "sess-env")
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "relay", "--to", "sess-target", "hello"])
+        captured = {}
+
+        def _send(req, *_args, **_kwargs):
+            captured.update(req)
+            return {"ok": True}
+
+        monkeypatch.setattr("claude_xmpp_bridge.client.send_to_bridge", _send)
+        client_main()
+        assert captured["session_id"] == "sess-env"
+
+    def test_broadcast_uses_bridge_session_id_from_env(self, monkeypatch, capsys):
+        monkeypatch.setenv("BRIDGE_SESSION_ID", "sess-env")
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "broadcast", "hello"])
+        captured = {}
+
+        def _send(req, *_args, **_kwargs):
+            captured.update(req)
+            return {"ok": True, "delivered": 1}
+
+        monkeypatch.setattr("claude_xmpp_bridge.client.send_to_bridge", _send)
+        client_main()
+        assert captured["session_id"] == "sess-env"
+        assert "broadcast delivered to 1 session(s)" in capsys.readouterr().out
+
 
 class TestAskMissingMessage:
     """ask without message and with a tty should exit non-zero."""
