@@ -1282,6 +1282,8 @@ class XMPPBridge:
         last_seen = info.get("last_seen")
         if last_seen is None:
             return None
+        if info.get("agent_state") != "idle":
+            return 0
         return max(0, int(time.time() - last_seen))
 
     def _session_entry(

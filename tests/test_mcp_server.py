@@ -267,7 +267,11 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
             "agent_state": (info.get("agent_state") or "") if normalize_empty else info.get("agent_state"),
             "agent_mode": (info.get("agent_mode") or "") if normalize_empty else info.get("agent_mode"),
             "last_seen": info.get("last_seen"),
-            "idle_seconds": max(0, int(time.time() - info["last_seen"])) if info.get("last_seen") is not None else None,
+            "idle_seconds": (
+                0
+                if info.get("last_seen") is not None and info.get("agent_state") != "idle"
+                else max(0, int(time.time() - info["last_seen"])) if info.get("last_seen") is not None else None
+            ),
             "todos_version": info.get("todos_version", 0),
             "last_agent_sender": (
                 (info.get("last_agent_sender") or "") if normalize_empty else info.get("last_agent_sender")
@@ -845,10 +849,20 @@ class TestListSessionsTool:
         sessions = {"ses_X": _make_session_info()}
         server._bridge = _make_bridge(sessions=sessions)
         server._bridge.registry.sessions["ses_X"]["last_seen"] = 100.0
+        server._bridge.registry.sessions["ses_X"]["agent_state"] = "idle"
         with patch("time.time", return_value=108.8):
             result = server._tool_list_sessions()
         assert result[0]["last_seen"] == 100.0
         assert result[0]["idle_seconds"] == 8
+
+    def test_list_running_session_reports_zero_idle_seconds(self, server: BridgeMCPServer):
+        sessions = {"ses_X": _make_session_info(agent_state="running")}
+        server._bridge = _make_bridge(sessions=sessions)
+        server._bridge.registry.sessions["ses_X"]["last_seen"] = 100.0
+        with patch("time.time", return_value=108.8):
+            result = server._tool_list_sessions()
+        assert result[0]["last_seen"] == 100.0
+        assert result[0]["idle_seconds"] == 0
 
 
 class TestTodoContextTools:

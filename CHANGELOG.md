@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.17] - 2026-03-13
+
+### Fixed
+- **`idle_seconds` no longer grows while a session is actively running** —
+  `get_context`, `list`, and MCP session listing now report `idle_seconds = 0`
+  unless the session state is actually `idle`, so live coordination views stop
+  misreporting busy agents as "idle for N seconds".
+
 ## [0.8.16] - 2026-03-12
 
 ### Fixed
