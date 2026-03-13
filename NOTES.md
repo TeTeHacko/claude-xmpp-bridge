@@ -62,7 +62,7 @@ Bridge `send_message(nudge=True)` uloží zprávu do SQLite inbox a pošle jen C
 **Výhody:** Klíč nikdy nevstoupí do sandboxu. Sandbox může být plně izolovaný (no-net nebo omezený net).
 **Priorita:** Medium — závisí na tom jak moc se sandbox používá pro SSH operace.
 
-### Návrh #6: Metadata zdroje zprávy v receive_messages (human vs. agent vs. system)
+### Návrh #6: Metadata zdroje zprávy v receive_messages (human vs. agent vs. system) ✅ implementováno v 0.8.18
 **Problém:** Agent nerozliší jestli zpráva přišla od TTH (přes XMPP) nebo od jiného agenta (relay). Prostý podpis `[TTH]` funguje ale je snadno napodobitelný.
 **Řešení:** Bridge přidá metadata při ukládání zprávy do SQLite inboxu — pole `source_type`:
 - `"human"` — zpráva přišla od TTH přes XMPP
@@ -73,8 +73,8 @@ Bridge `send_message(nudge=True)` uloží zprávu do SQLite inbox a pošle jen C
 {"text": "...", "source_type": "human", "from_session": null, "ts": "..."}
 {"text": "...", "source_type": "agent", "from_session": "ses_..._w3", "ts": "..."}
 ```
-**Zpětná kompatibilita:** Přidat jako opt-in parametr `structured=true` do `receive_messages`, nebo vždy vracet objekt (breaking change — agenti musí číst `.text`).
-**Priorita:** Medium.
+**Breaking change v 0.8.18:** `receive_messages` vždy vrací `list[dict]` — agenti musí číst `.text` místo prostého stringu.
+**Priorita:** Medium → Done.
 
 ---
 

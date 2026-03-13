@@ -1134,6 +1134,111 @@ def test_inbox_drain_with_senders_preserves_metadata(db_path):
         reg.close()
 
 
+def test_inbox_put_stores_source_and_message_type(db_path):
+    import sqlite3
+
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put(
+            "sess-b", "hello", from_session="sess-a", source_type="agent", message_type="relay"
+        )
+    finally:
+        reg.close()
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        "SELECT source_type, message_type FROM inbox WHERE to_session = 'sess-b'"
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "agent"
+    assert row[1] == "relay"
+
+
+def test_inbox_drain_full_returns_all_metadata(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put(
+            "sess-b", "msg1", from_session="sess-a", source_type="agent", message_type="relay"
+        )
+        reg.inbox_put("sess-b", "msg2", source_type="system", message_type="broadcast")
+        rows = reg.inbox_drain_full("sess-b")
+        assert len(rows) == 2
+        assert rows[0]["message"] == "msg1"
+        assert rows[0]["from_session"] == "sess-a"
+        assert rows[0]["source_type"] == "agent"
+        assert rows[0]["message_type"] == "relay"
+        assert isinstance(rows[0]["created_at"], float)
+        assert rows[1]["message"] == "msg2"
+        assert rows[1]["from_session"] is None
+        assert rows[1]["source_type"] == "system"
+        assert rows[1]["message_type"] == "broadcast"
+    finally:
+        reg.close()
+
+
+def test_inbox_drain_full_empty(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        rows = reg.inbox_drain_full("nonexistent")
+        assert rows == []
+    finally:
+        reg.close()
+
+
+def test_inbox_drain_full_deletes_after_drain(db_path):
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put("sess-b", "msg1", source_type="agent", message_type="relay")
+        rows = reg.inbox_drain_full("sess-b")
+        assert len(rows) == 1
+        # Second drain should be empty
+        rows2 = reg.inbox_drain_full("sess-b")
+        assert rows2 == []
+    finally:
+        reg.close()
+
+
+def test_inbox_migration_adds_columns_to_existing_db(db_path):
+    """Verify ALTER TABLE migration adds source_type/message_type columns."""
+    import sqlite3
+
+    # Create a DB without the new columns (simulate old schema)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS inbox ("
+        "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  to_session   TEXT    NOT NULL,"
+        "  from_session TEXT,"
+        "  message      TEXT    NOT NULL,"
+        "  created_at   REAL    NOT NULL"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO inbox (to_session, from_session, message, created_at) VALUES (?, ?, ?, ?)",
+        ("sess-b", "sess-a", "old-msg", 1000.0),
+    )
+    conn.commit()
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(inbox)")}
+    assert "source_type" not in cols
+    assert "message_type" not in cols
+    conn.close()
+
+    # Opening SessionRegistry should run migrations
+    reg = SessionRegistry(db_path)
+    try:
+        rows = reg.inbox_drain_full("sess-b")
+        assert len(rows) == 1
+        assert rows[0]["message"] == "old-msg"
+        assert rows[0]["from_session"] == "sess-a"
+        # Migrated rows have NULL for new columns
+        assert rows[0]["source_type"] is None
+        assert rows[0]["message_type"] is None
+    finally:
+        reg.close()
+
+
 def test_last_agent_sender_persists_across_restart(db_path):
     reg1 = SessionRegistry(db_path)
     try:
@@ -1146,5 +1251,253 @@ def test_last_agent_sender_persists_across_restart(db_path):
     reg2 = SessionRegistry(db_path)
     try:
         assert reg2.get_last_agent_sender("sess-b") == "sess-a"
+    finally:
+        reg2.close()
+
+
+# ---------------------------------------------------------------------------
+# Task delegation CRUD
+# ---------------------------------------------------------------------------
+
+
+def test_task_create_and_get(db_path):
+    """task_create stores a record retrievable via task_get."""
+    reg = SessionRegistry(db_path)
+    try:
+        task = reg.task_create(
+            task_id="abc123456789",
+            from_session="sess-a",
+            to_session="sess-b",
+            description="Build the widget",
+            context="See PR #42",
+        )
+        assert task["task_id"] == "abc123456789"
+        assert task["from_session"] == "sess-a"
+        assert task["to_session"] == "sess-b"
+        assert task["description"] == "Build the widget"
+        assert task["context"] == "See PR #42"
+        assert task["status"] == "pending"
+        assert task["result"] is None
+        assert isinstance(task["created_at"], float)
+        assert task["created_at"] == task["updated_at"]
+
+        fetched = reg.task_get("abc123456789")
+        assert fetched is not None
+        assert fetched["task_id"] == "abc123456789"
+        assert fetched["description"] == "Build the widget"
+        assert fetched["context"] == "See PR #42"
+        assert fetched["status"] == "pending"
+    finally:
+        reg.close()
+
+
+def test_task_create_sets_pending_status(db_path):
+    """Newly created tasks always have status='pending'."""
+    reg = SessionRegistry(db_path)
+    try:
+        task = reg.task_create(
+            task_id="pend000000aa",
+            from_session="s-1",
+            to_session="s-2",
+            description="Do stuff",
+        )
+        assert task["status"] == "pending"
+    finally:
+        reg.close()
+
+
+def test_task_create_without_context(db_path):
+    """context defaults to None when omitted."""
+    reg = SessionRegistry(db_path)
+    try:
+        task = reg.task_create(
+            task_id="noctx0000000",
+            from_session="s-1",
+            to_session="s-2",
+            description="No context task",
+        )
+        assert task["context"] is None
+        fetched = reg.task_get("noctx0000000")
+        assert fetched is not None
+        assert fetched["context"] is None
+    finally:
+        reg.close()
+
+
+def test_task_update_status_completed(db_path):
+    """task_update_status transitions to completed with a result."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.task_create(
+            task_id="upd000000001",
+            from_session="s-a",
+            to_session="s-b",
+            description="Run tests",
+        )
+        updated = reg.task_update_status("upd000000001", "completed", result="All 42 tests passed")
+        assert updated is not None
+        assert updated["status"] == "completed"
+        assert updated["result"] == "All 42 tests passed"
+        assert updated["updated_at"] >= updated["created_at"]
+
+        # Verify persisted
+        fetched = reg.task_get("upd000000001")
+        assert fetched is not None
+        assert fetched["status"] == "completed"
+        assert fetched["result"] == "All 42 tests passed"
+    finally:
+        reg.close()
+
+
+def test_task_update_status_nonexistent_returns_none(db_path):
+    """task_update_status with a bad ID returns None."""
+    reg = SessionRegistry(db_path)
+    try:
+        result = reg.task_update_status("nonexistent_id", "completed")
+        assert result is None
+    finally:
+        reg.close()
+
+
+def test_task_get_nonexistent_returns_none(db_path):
+    """task_get with unknown ID returns None."""
+    reg = SessionRegistry(db_path)
+    try:
+        result = reg.task_get("does_not_exist")
+        assert result is None
+    finally:
+        reg.close()
+
+
+def test_task_list_all(db_path):
+    """task_list without filters returns all tasks in created_at DESC order."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.task_create(task_id="t001", from_session="a", to_session="b", description="first")
+        reg.task_create(task_id="t002", from_session="a", to_session="c", description="second")
+        reg.task_create(task_id="t003", from_session="c", to_session="a", description="third")
+
+        tasks = reg.task_list()
+        assert len(tasks) == 3
+        # DESC order — newest first
+        assert tasks[0]["task_id"] == "t003"
+        assert tasks[1]["task_id"] == "t002"
+        assert tasks[2]["task_id"] == "t001"
+    finally:
+        reg.close()
+
+
+def test_task_list_filter_by_session_role_from(db_path):
+    """task_list with role='from' filters by from_session."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.task_create(task_id="tf01", from_session="alice", to_session="bob", description="d1")
+        reg.task_create(task_id="tf02", from_session="bob", to_session="alice", description="d2")
+        reg.task_create(task_id="tf03", from_session="alice", to_session="charlie", description="d3")
+
+        tasks = reg.task_list(session_id="alice", role="from")
+        assert len(tasks) == 2
+        ids = {t["task_id"] for t in tasks}
+        assert ids == {"tf01", "tf03"}
+    finally:
+        reg.close()
+
+
+def test_task_list_filter_by_session_role_to(db_path):
+    """task_list with role='to' filters by to_session."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.task_create(task_id="tt01", from_session="alice", to_session="bob", description="d1")
+        reg.task_create(task_id="tt02", from_session="bob", to_session="alice", description="d2")
+
+        tasks = reg.task_list(session_id="bob", role="to")
+        assert len(tasks) == 1
+        assert tasks[0]["task_id"] == "tt01"
+    finally:
+        reg.close()
+
+
+def test_task_list_filter_by_session_role_both(db_path):
+    """task_list with role='both' matches from_session OR to_session."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.task_create(task_id="tb01", from_session="alice", to_session="bob", description="d1")
+        reg.task_create(task_id="tb02", from_session="bob", to_session="charlie", description="d2")
+        reg.task_create(task_id="tb03", from_session="charlie", to_session="dave", description="d3")
+
+        tasks = reg.task_list(session_id="bob", role="both")
+        assert len(tasks) == 2
+        ids = {t["task_id"] for t in tasks}
+        assert ids == {"tb01", "tb02"}
+    finally:
+        reg.close()
+
+
+def test_task_list_filter_by_status(db_path):
+    """task_list filters by status when specified."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.task_create(task_id="ts01", from_session="a", to_session="b", description="d1")
+        reg.task_create(task_id="ts02", from_session="a", to_session="c", description="d2")
+        reg.task_update_status("ts02", "completed", result="done")
+
+        tasks = reg.task_list(status="pending")
+        assert len(tasks) == 1
+        assert tasks[0]["task_id"] == "ts01"
+
+        tasks = reg.task_list(status="completed")
+        assert len(tasks) == 1
+        assert tasks[0]["task_id"] == "ts02"
+    finally:
+        reg.close()
+
+
+def test_task_list_combined_filters(db_path):
+    """task_list with both session_id and status filters."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.task_create(task_id="tc01", from_session="a", to_session="b", description="d1")
+        reg.task_create(task_id="tc02", from_session="a", to_session="c", description="d2")
+        reg.task_create(task_id="tc03", from_session="b", to_session="a", description="d3")
+        reg.task_update_status("tc01", "completed")
+        reg.task_update_status("tc03", "completed")
+
+        # session_id=a, role=from, status=completed → only tc01
+        tasks = reg.task_list(session_id="a", role="from", status="completed")
+        assert len(tasks) == 1
+        assert tasks[0]["task_id"] == "tc01"
+
+        # session_id=a, role=both, status=completed → tc01 and tc03
+        tasks = reg.task_list(session_id="a", role="both", status="completed")
+        assert len(tasks) == 2
+        ids = {t["task_id"] for t in tasks}
+        assert ids == {"tc01", "tc03"}
+    finally:
+        reg.close()
+
+
+def test_task_persists_across_restart(db_path):
+    """Tasks survive a registry close/reopen cycle."""
+    reg1 = SessionRegistry(db_path)
+    try:
+        reg1.task_create(
+            task_id="persist00001",
+            from_session="s-a",
+            to_session="s-b",
+            description="Persist me",
+            context="ctx",
+        )
+        reg1.task_update_status("persist00001", "accepted")
+    finally:
+        reg1.close()
+
+    reg2 = SessionRegistry(db_path)
+    try:
+        fetched = reg2.task_get("persist00001")
+        assert fetched is not None
+        assert fetched["task_id"] == "persist00001"
+        assert fetched["description"] == "Persist me"
+        assert fetched["context"] == "ctx"
+        assert fetched["status"] == "accepted"
     finally:
         reg2.close()

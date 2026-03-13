@@ -262,6 +262,9 @@ claude-xmpp-client ping                             # exit 0 if bridge is runnin
 claude-xmpp-client list                             # list all registered sessions as JSON
 claude-xmpp-client relay --to SESSION_ID "message"  # send message to a specific session
 claude-xmpp-client broadcast --session-id SELF_ID "message"  # send to all other sessions
+claude-xmpp-client delegate --to SESSION_ID "task description"  # delegate a task to another agent
+claude-xmpp-client task-result TASK_ID completed "result text"  # report task result
+claude-xmpp-client list-tasks --session-id SID --role from      # list delegated tasks
 claude-xmpp-client state '{"session_id":"abc","state":"idle"}'  # report agent state
 ```
 
@@ -338,6 +341,14 @@ claude-xmpp-client remove-todo ses_abc123_w4 abc123def456
 claude-xmpp-client acquire-lock ses_abc123_w4 src/app.py --reason "editing"
 claude-xmpp-client release-lock ses_abc123_w4 src/app.py
 claude-xmpp-client cleanup-locks --project /home/user/project
+
+# Task delegation
+claude-xmpp-client delegate --to ses_abc123_w5 "Run integration tests"
+claude-xmpp-client delegate --to ses_abc123_w5 "Deploy to staging" --context "Use the staging branch"
+claude-xmpp-client task-result abc123def456 completed "All 42 tests passed"
+claude-xmpp-client task-result abc123def456 failed "Timeout after 60s"
+claude-xmpp-client list-tasks
+claude-xmpp-client list-tasks --session-id ses_abc123_w4 --role from --status pending
 ```
 
 ### MCP server (port 7878)
@@ -348,7 +359,7 @@ The bridge also exposes an HTTP MCP server on port 7878 (streamable-HTTP transpo
 |------|-------------|
 | `send_message(to, message, screen=True, nudge=False, sender_session_id="")` | Deliver a message to a session; `screen=False` enqueues to inbox only; `nudge=True` sends only a CR to wake the agent (message stored in inbox, delivered on next `session.idle`); pass `sender_session_id` so the recipient can reply directly to the originating agent; if omitted, the MCP server reuses the same caller's last known `session_id` from earlier session-scoped tool calls, keyed by FastMCP `client_id` and streamable-HTTP `mcp-session-id` when available |
 | `broadcast_message(message, sender_session_id)` | Deliver to all sessions except sender |
-| `receive_messages(session_id)` | Drain inbox — returns messages sent to this session |
+| `receive_messages(session_id)` | Drain inbox — returns `list[dict]` with keys: `text`, `source_type`, `from_session`, `message_id`, `ts`, `type`; bridge-generated envelopes are automatically stripped |
 | `list_sessions()` | Enumerate all sessions with metadata, state/mode, last_seen/idle_seconds, last_agent_sender, plugin version, sty/window, and inbox/todo/lock counts |
 | `reply_to_last_sender(session_id, message, nudge=True)` | Reply to the last non-null relay sender remembered for this session; the bridge learns it from `receive_messages(session_id)` and sends the reply back agent-to-agent |
 | `get_session_context(session_id)` | Return one session's metadata, todos, bridge-native file locks, and coordination counters, including `todos_version`, `last_agent_sender`, `last_seen`, and `idle_seconds` |
@@ -357,6 +368,9 @@ The bridge also exposes an HTTP MCP server on port 7878 (streamable-HTTP transpo
 | `add_todo(session_id, content, status="pending", priority="medium", expected_version=None)` | Append one todo item and return its `todo_id` and new `todos_version`; optional optimistic-lock version check |
 | `update_todo(session_id, todo_id, ..., expected_version=None)` | Update one todo item by id and return the updated item plus new `todos_version`; optional optimistic-lock version check |
 | `remove_todo(session_id, todo_id, expected_version=None)` | Remove one todo item by id and return the new `todos_version`; optional optimistic-lock version check |
+| `delegate_task(to, description, context="", sender_session_id="", nudge=True)` | Delegate a task to another agent; creates a tracked task record, delivers a `task_request` message to the target, and sends an XMPP notification |
+| `report_task_result(task_id, status, result="", sender_session_id="", nudge=True)` | Report the result of a delegated task; updates the tracked record, delivers a `task_result` message to the delegator, and sends an XMPP notification |
+| `list_delegated_tasks(session_id="", role="both", status="")` | List tracked delegated tasks, optionally filtered by session, role (`from`/`to`/`both`), and status |
 | `acquire_file_lock(session_id, filepath, project="", reason="")` | Acquire a bridge-native file lock for a session; returns the current owner on conflict |
 | `release_file_lock(session_id, filepath, force=False)` | Release a bridge-native file lock owned by a session |
 | `list_file_locks(project="", include_stale=True)` | List bridge-native file locks plus legacy lock hints from `~/.claude/working`, optionally filtered by project and/or hiding stale locks |

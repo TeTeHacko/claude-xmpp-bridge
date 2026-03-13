@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.18] - 2026-03-13
+
+### Added
+- **Task delegation pattern** — Full inter-agent task delegation with DB tracking:
+  new MCP tools `delegate_task`, `report_task_result`, `list_delegated_tasks`;
+  socket commands `delegate`, `task_result`, `list_tasks`;
+  CLI commands `delegate`, `task-result`, `list-tasks`.
+  Tasks flow through states `pending` → `accepted` → `completed`/`failed` (or `cancelled`),
+  with XMPP JSON notifications for human observer and audit logging.
+
+### Changed
+- **`receive_messages` now returns `list[dict]` instead of `list[str]`** (BREAKING) —
+  Each message is a dict with keys: `text`, `source_type` (`agent`/`system`/`human`/`null`),
+  `from_session`, `message_id`, `ts`, `type`. The envelope from bridge-generated
+  messages is automatically stripped; agents get clean text plus structured metadata.
+  Implements NOTES #6.
+
 ## [0.8.17] - 2026-03-13
 
 ### Fixed

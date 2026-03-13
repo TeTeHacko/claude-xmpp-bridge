@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 from dataclasses import fields
 
-from claude_xmpp_bridge.messages import Messages, format_generated_agent_message, load_messages
+from claude_xmpp_bridge.messages import (
+    Messages,
+    format_generated_agent_message,
+    load_messages,
+    parse_generated_agent_message,
+)
 
 
 class TestMessagesDefaults:
@@ -198,3 +203,80 @@ class TestGeneratedAgentMessage:
         twice = format_generated_agent_message(msg_type="relay", message=once)
         assert twice == once
         assert twice.count("[bridge-generated message]") == 1
+
+
+class TestParseGeneratedAgentMessage:
+    """Tests for parse_generated_agent_message()."""
+
+    def test_parse_wrapped_relay(self):
+        wrapped = format_generated_agent_message(
+            msg_type="relay",
+            message="hello world",
+            from_session_id="ses_A",
+            to_session_id="ses_B",
+            mode="nudge",
+            message_id="abc123def456",
+        )
+        text, meta = parse_generated_agent_message(wrapped)
+        assert text == "hello world"
+        assert meta["type"] == "relay"
+        assert meta["generated"] is True
+        assert meta["from"] == "ses_A"
+        assert meta["to"] == "ses_B"
+        assert meta["mode"] == "nudge"
+        assert meta["message_id"] == "abc123def456"
+        assert isinstance(meta["ts"], float)
+
+    def test_parse_plain_text_returns_full_text_empty_meta(self):
+        text, meta = parse_generated_agent_message("just plain text")
+        assert text == "just plain text"
+        assert meta == {}
+
+    def test_parse_empty_string(self):
+        text, meta = parse_generated_agent_message("")
+        assert text == ""
+        assert meta == {}
+
+    def test_parse_multiline_body(self):
+        wrapped = format_generated_agent_message(
+            msg_type="broadcast",
+            message="line 1\nline 2\nline 3",
+        )
+        text, meta = parse_generated_agent_message(wrapped)
+        assert text == "line 1\nline 2\nline 3"
+        assert meta["type"] == "broadcast"
+
+    def test_parse_empty_body(self):
+        wrapped = format_generated_agent_message(msg_type="relay", message="")
+        text, meta = parse_generated_agent_message(wrapped)
+        assert text == ""
+        assert meta["type"] == "relay"
+
+    def test_parse_invalid_json_returns_raw(self):
+        raw = "[bridge-generated message]\nnot-json\n\nhello"
+        text, meta = parse_generated_agent_message(raw)
+        assert text == raw
+        assert meta == {}
+
+    def test_parse_non_generated_json_returns_raw(self):
+        raw = '[bridge-generated message]\n{"type": "relay"}\n\nhello'
+        text, meta = parse_generated_agent_message(raw)
+        # Missing "generated": True → treated as non-generated
+        assert text == raw
+        assert meta == {}
+
+    def test_roundtrip_format_parse(self):
+        original = "the quick brown fox"
+        wrapped = format_generated_agent_message(
+            msg_type="relay",
+            message=original,
+            from_session_id="sender",
+            to_session_id="receiver",
+            mode="screen",
+            message_id="deadbeef1234",
+        )
+        text, meta = parse_generated_agent_message(wrapped)
+        assert text == original
+        assert meta["from"] == "sender"
+        assert meta["to"] == "receiver"
+        assert meta["message_id"] == "deadbeef1234"

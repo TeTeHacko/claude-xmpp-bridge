@@ -37,3 +37,20 @@ When working in this repository, you MUST follow these rules:
    ```
 
    All other XMPP messages (notify, ask, response, system) remain plain text.
+
+6. **Task delegation XMPP notifications** (since v0.8.18):
+   Tests must parse `json.loads(sent)` and assert on individual fields.
+
+   **Task request format** (socket `delegate` command and MCP `delegate_task` tool):
+   ```json
+   {"type": "task_request", "task_id": "hex12chars", "from": "delegator_session_id|null", "to": "target_session_id", "description": "task description", "ts": 1741612800.123}
+   ```
+
+   **Task result format** (socket `task_result` command and MCP `report_task_result` tool):
+   ```json
+   {"type": "task_result", "task_id": "hex12chars", "from": "assignee_session_id", "to": "delegator_session_id", "status": "accepted|completed|failed|cancelled", "result": "result text (first 200 chars)", "ts": 1741612800.123}
+   ```
+
+7. **`receive_messages` returns `list[dict]`** (since v0.8.18, BREAKING):
+   Each dict has keys: `text`, `source_type`, `from_session`, `message_id`, `ts`, `type`.
+   Tests should assert on dict fields, not raw strings.

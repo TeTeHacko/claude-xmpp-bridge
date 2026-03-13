@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.17"
+  const PLUGIN_VERSION = "0.8.18"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -466,16 +466,30 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const text = await mcpRes.text().catch(() => null)
         const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
         const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null
-        // receive_messages returns each message as a separate content item (type=text)
+        // receive_messages returns each message as a separate content item (type=text).
+        // Each item.text is a JSON-encoded dict with keys: text, from_session,
+        // source_type, message_type, message_id, ts, type.
         const contentItems = body?.result?.content
         if (Array.isArray(contentItems) && contentItems.length > 0) {
+          // Parse each content item from JSON dict and extract the clean message body.
+          const parseItem = (item) => {
+            if (!item?.text) return null
+            try {
+              const parsed = JSON.parse(item.text)
+              return parsed?.text || null
+            } catch {
+              // Legacy fallback: if not JSON, use raw text
+              return item.text
+            }
+          }
           // Injektovat pouze PRVNÍ zprávu; zbytek do lokálního bufferu.
           // Každá další zpráva se injektuje až po session.idle (model zpracoval předchozí).
-          const first = contentItems[0]?.text
+          const first = parseItem(contentItems[0])
           if (first) {
             // Přidat zbytek do bufferu (budou injektovány postupně při dalších poll cycles)
             for (const item of contentItems.slice(1)) {
-              if (item?.text) messageBuffer.push(item.text)
+              const msg = parseItem(item)
+              if (msg) messageBuffer.push(msg)
             }
             // Inject into session via raw exec (ne bun shell — chrání metaznaky ve zprávách)
             const relayRes = await rawRelay(registeredSessionID, first)

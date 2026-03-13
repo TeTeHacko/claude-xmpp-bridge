@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 import mcp.types as mcp_types
 from mcp.server.fastmcp import Context, FastMCP
 
-from .messages import format_generated_agent_message
+from .messages import format_generated_agent_message, parse_generated_agent_message
 
 if TYPE_CHECKING:
     from .bridge import XMPPBridge
@@ -88,7 +88,15 @@ class BridgeMCPServer:
     # Public API used by XMPPBridge
     # ------------------------------------------------------------------
 
-    def enqueue(self, session_id: str, message: str, *, from_session: str | None = None) -> None:
+    def enqueue(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        from_session: str | None = None,
+        source_type: str | None = None,
+        message_type: str | None = None,
+    ) -> None:
         """Put a message into the SQLite inbox for *session_id*.
 
         Called from bridge relay/broadcast handlers so that MCP clients
@@ -98,7 +106,13 @@ class BridgeMCPServer:
         if self._bridge is None:
             log.warning("enqueue called before bridge initialised — dropping message for %s", session_id)
             return
-        self._bridge.registry.inbox_put(session_id, message, from_session=from_session)
+        self._bridge.registry.inbox_put(
+            session_id,
+            message,
+            from_session=from_session,
+            source_type=source_type,
+            message_type=message_type,
+        )
 
     async def start(self, bridge: XMPPBridge) -> None:
         """Initialise the FastMCP server and launch it as a background task."""
@@ -227,7 +241,7 @@ class BridgeMCPServer:
             )
 
         @mcp.tool()
-        async def receive_messages(session_id: str, ctx: MCPContext | None = None) -> list[str]:
+        async def receive_messages(session_id: str, ctx: MCPContext | None = None) -> list[dict[str, Any]]:
             """Drain and return all pending messages in the inbox for *session_id*.
 
             Messages are queued here when another agent calls ``send_message`` or
@@ -238,7 +252,14 @@ class BridgeMCPServer:
                 session_id: Your own session_id (as shown by list_sessions).
 
             Returns:
-                List of pending message strings (may be empty).
+                List of message dicts, each containing:
+                  - text: the clean message body (envelope stripped)
+                  - from_session: sender session_id or null
+                  - source_type: "agent", "human", "system" or null
+                  - message_type: "relay", "broadcast", etc. or null
+                  - message_id: unique hex ID or null
+                  - ts: timestamp (epoch float)
+                  - type: envelope type ("relay", "broadcast", etc.) or null
             """
             return server._tool_receive_messages(session_id=session_id, client_id=ctx.client_id if ctx else None)
 
@@ -436,6 +457,102 @@ class BridgeMCPServer:
                 Summary dict with removed count and removed lock entries.
             """
             return server._tool_cleanup_stale_locks(project=project)
+
+        @mcp.tool()
+        async def delegate_task(
+            to: str,
+            description: str,
+            context: str = "",
+            sender_session_id: str = "",
+            nudge: bool = True,
+            ctx: MCPContext | None = None,
+        ) -> dict[str, Any]:
+            """Delegate a task to another agent session.
+
+            Creates a tracked task record and delivers a ``task_request`` message
+            to the target agent.  The target can accept the task and later report
+            its result via ``report_task_result``.
+
+            Args:
+                to: Target session_id to assign the task to.
+                description: What the target agent should do.
+                context: Optional additional context or data for the task.
+                sender_session_id: Caller's own session_id (delegator).
+                nudge: If True (default), nudge the target to pick up the task.
+
+            Returns:
+                Dict with ``ok``, ``task_id``, and delivery status.
+            """
+            return await server._tool_delegate_task(
+                to=to,
+                description=description,
+                context=context or None,
+                sender_session_id=sender_session_id,
+                nudge=nudge,
+                client_id=ctx.client_id if ctx else None,
+                request_info=server._context_request_info(ctx),
+            )
+
+        @mcp.tool()
+        async def report_task_result(
+            task_id: str,
+            status: str,
+            result: str = "",
+            sender_session_id: str = "",
+            nudge: bool = True,
+            ctx: MCPContext | None = None,
+        ) -> dict[str, Any]:
+            """Report the result of a delegated task.
+
+            Called by the assignee agent to update the task status and deliver
+            the result back to the delegator.
+
+            Args:
+                task_id: The task ID (from the ``task_request`` message).
+                status: New status — ``"completed"``, ``"failed"``, or ``"accepted"``.
+                result: Result text (required for completed/failed, optional for accepted).
+                sender_session_id: Caller's own session_id (assignee).
+                nudge: If True (default), nudge the delegator to pick up the result.
+
+            Returns:
+                Dict with ``ok`` and updated task info.
+            """
+            return await server._tool_report_task_result(
+                task_id=task_id,
+                status=status,
+                result=result or None,
+                sender_session_id=sender_session_id,
+                nudge=nudge,
+                client_id=ctx.client_id if ctx else None,
+                request_info=server._context_request_info(ctx),
+            )
+
+        @mcp.tool()
+        async def list_delegated_tasks(
+            session_id: str = "",
+            role: str = "both",
+            status: str = "",
+            ctx: MCPContext | None = None,
+        ) -> list[dict[str, Any]]:
+            """List delegated tasks, optionally filtered by session and role.
+
+            Args:
+                session_id: If set, only tasks involving this session.
+                role: ``"from"`` (tasks I delegated), ``"to"`` (tasks assigned to me),
+                      or ``"both"`` (default).
+                status: If set, only tasks with this status
+                        (pending/accepted/completed/failed/cancelled).
+
+            Returns:
+                List of task dicts with task_id, from_session, to_session,
+                description, status, result, created_at, updated_at.
+            """
+            return server._tool_list_delegated_tasks(
+                session_id=session_id or None,
+                role=role,
+                status=status or None,
+                client_id=ctx.client_id if ctx else None,
+            )
 
         return mcp
 
@@ -690,9 +807,17 @@ class BridgeMCPServer:
                     target_info,
                     wrapped_message,
                     from_session=sender_session_id or None,
+                    source_type="agent",
+                    message_type="relay",
                 )
             else:
-                self.enqueue(to, wrapped_message, from_session=sender_session_id or None)
+                self.enqueue(
+                    to,
+                    wrapped_message,
+                    from_session=sender_session_id or None,
+                    source_type="agent",
+                    message_type="relay",
+                )
                 ok = True
             bridge._xmpp_send(
                 json.dumps(
@@ -781,7 +906,13 @@ class BridgeMCPServer:
                 return bridge.messages.mcp_send_failed.format(project=self._short_path(target_info["project"]))
         else:
             # screen=False: only enqueue in MCP inbox, no terminal relay
-            self.enqueue(to, wrapped_message, from_session=sender_session_id or None)
+            self.enqueue(
+                to,
+                wrapped_message,
+                from_session=sender_session_id or None,
+                source_type="agent",
+                message_type="relay",
+            )
             bridge._xmpp_send(
                 json.dumps(
                     {
@@ -863,10 +994,18 @@ class BridgeMCPServer:
                             info,
                             wrapped_message,
                             from_session=sender_session_id or None,
+                            source_type="agent",
+                            message_type="broadcast",
                         )
                     )
                 else:
-                    self.enqueue(sid, wrapped_message, from_session=sender_session_id or None)
+                    self.enqueue(
+                        sid,
+                        wrapped_message,
+                        from_session=sender_session_id or None,
+                        source_type="agent",
+                        message_type="broadcast",
+                    )
                     results.append(True)
         else:
             results = await asyncio.gather(
@@ -882,7 +1021,12 @@ class BridgeMCPServer:
             elif not nudge:
                 # Screen relay failed — enqueue in MCP inbox as fallback so
                 # the plugin can pick it up on the next session.idle poll.
-                self.enqueue(sid, wrapped_message)
+                self.enqueue(
+                    sid,
+                    wrapped_message,
+                    source_type="agent",
+                    message_type="broadcast",
+                )
 
         mode = "nudge" if nudge else "screen"
         bridge._xmpp_send(
@@ -1171,25 +1315,49 @@ class BridgeMCPServer:
             )
         return {"removed": len(removed), "locks": removed}
 
-    def _tool_receive_messages(self, *, session_id: str, client_id: str | None = None) -> list[str]:
-        """Implementation of the receive_messages tool — drains the SQLite inbox."""
+    def _tool_receive_messages(
+        self, *, session_id: str, client_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Implementation of the receive_messages tool — drains the SQLite inbox.
+
+        Returns a list of dicts, each containing:
+          - ``text``: clean message body (envelope stripped)
+          - ``from_session``: sender session_id or ``None``
+          - ``source_type``: ``"agent"``, ``"human"``, ``"system"`` or ``None``
+          - ``message_type``: ``"relay"``, ``"broadcast"``, etc. or ``None``
+          - ``message_id``: hex ID from envelope metadata, or ``None``
+          - ``ts``: timestamp (epoch float)
+          - ``type``: envelope type (``"relay"``, ``"broadcast"``, etc.) or ``None``
+        """
         bridge = self._bridge
         if bridge is None:
             return []
         self._remember_client_session(client_id, session_id)
         self._bind_request_to_session({"client_id": client_id} if client_id else {}, session_id)
-        rows = bridge.registry.inbox_drain_with_senders(session_id)
-        messages = [message for message, _sender in rows]
-        for _message, sender_session_id in rows:
-            if sender_session_id:
-                bridge.registry.set_last_agent_sender(session_id, sender_session_id)
-        if messages:
+        inbox_rows = bridge.registry.inbox_drain_full(session_id)
+        results: list[dict[str, Any]] = []
+        for row in inbox_rows:
+            if row["from_session"]:
+                bridge.registry.set_last_agent_sender(session_id, row["from_session"])
+            text, meta = parse_generated_agent_message(row["message"])
+            results.append(
+                {
+                    "text": text,
+                    "from_session": row["from_session"] or meta.get("from"),
+                    "source_type": row["source_type"],
+                    "message_type": row["message_type"],
+                    "message_id": meta.get("message_id"),
+                    "ts": row["created_at"],
+                    "type": meta.get("type"),
+                }
+            )
+        if results:
             bridge.audit.log(
                 "MCP_RECEIVE",
                 session_id=session_id,
-                count=len(messages),
+                count=len(results),
             )
-        return messages
+        return results
 
     async def _tool_reply_to_last_sender(
         self,
@@ -1217,6 +1385,222 @@ class BridgeMCPServer:
             screen=not nudge,
             sender_session_id=session_id,
         )
+
+    async def _tool_delegate_task(
+        self,
+        *,
+        to: str,
+        description: str,
+        context: str | None = None,
+        sender_session_id: str = "",
+        nudge: bool = True,
+        client_id: str | None = None,
+        request_info: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Implementation of the delegate_task tool."""
+        bridge = self._bridge
+        if bridge is None:
+            return {"ok": False, "error": "bridge not initialised"}
+        if not to:
+            return {"ok": False, "error": "missing target session_id (to)"}
+        if not description:
+            return {"ok": False, "error": "missing task description"}
+
+        sender_session_id = self._resolve_sender_session_id(sender_session_id, client_id, request_info)
+
+        target_info = bridge.registry.get(to)
+        if target_info is None:
+            return {"ok": False, "error": f"unknown target session: {to}"}
+
+        task_id = uuid.uuid4().hex[:12]
+        task = bridge.registry.task_create(
+            task_id=task_id,
+            from_session=sender_session_id or "unknown",
+            to_session=to,
+            description=description,
+            context=context,
+        )
+
+        # Build a task_request message for the target agent's inbox
+        task_msg = json.dumps(
+            {
+                "type": "task_request",
+                "task_id": task_id,
+                "from": sender_session_id or None,
+                "description": description,
+                "context": context,
+            },
+            ensure_ascii=False,
+        )
+        wrapped = format_generated_agent_message(
+            msg_type="task_request",
+            message=task_msg,
+            from_session_id=sender_session_id or None,
+            to_session_id=to,
+            mode="nudge" if nudge else "inbox",
+            message_id=task_id,
+        )
+
+        # Deliver to target
+        ok = True
+        if nudge and target_info.get("backend"):
+            ok = await bridge._nudge_session(
+                to,
+                target_info,
+                wrapped,
+                from_session=sender_session_id or None,
+                source_type="agent",
+                message_type="task_request",
+            )
+        else:
+            self.enqueue(
+                to,
+                wrapped,
+                from_session=sender_session_id or None,
+                source_type="agent",
+                message_type="task_request",
+            )
+
+        # XMPP observer notification
+        bridge._xmpp_send(
+            json.dumps(
+                {
+                    "type": "task_request",
+                    "task_id": task_id,
+                    "from": sender_session_id or None,
+                    "to": to,
+                    "description": description,
+                    "ts": time.time(),
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        bridge.audit.log(
+            "MCP_TASK_DELEGATE",
+            task_id=task_id,
+            from_session_id=sender_session_id or None,
+            to_session_id=to,
+            description=description[:100],
+            ok=ok,
+        )
+
+        return {"ok": ok, "task_id": task_id, "task": dict(task)}
+
+    async def _tool_report_task_result(
+        self,
+        *,
+        task_id: str,
+        status: str,
+        result: str | None = None,
+        sender_session_id: str = "",
+        nudge: bool = True,
+        client_id: str | None = None,
+        request_info: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Implementation of the report_task_result tool."""
+        bridge = self._bridge
+        if bridge is None:
+            return {"ok": False, "error": "bridge not initialised"}
+        if not task_id:
+            return {"ok": False, "error": "missing task_id"}
+        valid_statuses = {"accepted", "completed", "failed", "cancelled"}
+        if status not in valid_statuses:
+            return {"ok": False, "error": f"invalid status: {status} (must be one of {sorted(valid_statuses)})"}
+
+        sender_session_id = self._resolve_sender_session_id(sender_session_id, client_id, request_info)
+
+        task = bridge.registry.task_update_status(task_id, status, result)
+        if task is None:
+            return {"ok": False, "error": f"task not found: {task_id}"}
+
+        # Deliver result notification to the delegator
+        delegator = task["from_session"]
+        delegator_info = bridge.registry.get(delegator)
+
+        result_msg = json.dumps(
+            {
+                "type": "task_result",
+                "task_id": task_id,
+                "from": sender_session_id or task["to_session"],
+                "status": status,
+                "result": result,
+                "description": task["description"],
+            },
+            ensure_ascii=False,
+        )
+        wrapped = format_generated_agent_message(
+            msg_type="task_result",
+            message=result_msg,
+            from_session_id=sender_session_id or task["to_session"],
+            to_session_id=delegator,
+            mode="nudge" if nudge else "inbox",
+            message_id=task_id,
+        )
+
+        ok = True
+        if delegator_info is not None:
+            if nudge and delegator_info.get("backend"):
+                ok = await bridge._nudge_session(
+                    delegator,
+                    delegator_info,
+                    wrapped,
+                    from_session=sender_session_id or task["to_session"],
+                    source_type="agent",
+                    message_type="task_result",
+                )
+            else:
+                self.enqueue(
+                    delegator,
+                    wrapped,
+                    from_session=sender_session_id or task["to_session"],
+                    source_type="agent",
+                    message_type="task_result",
+                )
+
+        # XMPP observer notification
+        bridge._xmpp_send(
+            json.dumps(
+                {
+                    "type": "task_result",
+                    "task_id": task_id,
+                    "from": sender_session_id or task["to_session"],
+                    "to": delegator,
+                    "status": status,
+                    "result": (result or "")[:200],
+                    "ts": time.time(),
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        bridge.audit.log(
+            "MCP_TASK_RESULT",
+            task_id=task_id,
+            from_session_id=sender_session_id or task["to_session"],
+            to_session_id=delegator,
+            status=status,
+            ok=ok,
+        )
+
+        return {"ok": ok, "task": dict(task)}
+
+    def _tool_list_delegated_tasks(
+        self,
+        *,
+        session_id: str | None = None,
+        role: str = "both",
+        status: str | None = None,
+        client_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Implementation of the list_delegated_tasks tool."""
+        bridge = self._bridge
+        if bridge is None:
+            return []
+        if session_id:
+            self._remember_client_session(client_id, session_id)
+        tasks = bridge.registry.task_list(session_id=session_id, role=role, status=status)
+        return [dict(t) for t in tasks]
 
     def _tool_list_sessions(self) -> list[dict[str, Any]]:
         """Implementation of the list_sessions tool."""

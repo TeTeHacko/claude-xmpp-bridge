@@ -295,3 +295,188 @@ class TestAskMissingMessage:
         with pytest.raises(SystemExit) as exc_info:
             ask_main()
         assert exc_info.value.code == 0
+
+
+class TestDelegateCommand:
+    """CLI delegate subcommand tests."""
+
+    def test_delegate_prints_json(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "delegate", "--to", "sess-target", "Run the tests"],
+        )
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {"ok": True, "task_id": "abc123456789", "task": {"status": "pending"}},
+        )
+        client_main()
+        out = capsys.readouterr().out
+        assert '"task_id": "abc123456789"' in out
+        assert '"ok": true' in out
+
+    def test_delegate_no_description_tty_exits(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["claude-xmpp-client", "delegate", "--to", "sess-target"])
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 1
+
+    def test_delegate_uses_bridge_session_id_from_env(self, monkeypatch):
+        monkeypatch.setenv("BRIDGE_SESSION_ID", "sess-env")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "delegate", "--to", "sess-target", "Do stuff"],
+        )
+        captured = {}
+
+        def _send(req, *_args, **_kwargs):
+            captured.update(req)
+            return {"ok": True, "task_id": "xxx", "task": {}}
+
+        monkeypatch.setattr("claude_xmpp_bridge.client.send_to_bridge", _send)
+        client_main()
+        assert captured["session_id"] == "sess-env"
+        assert captured["cmd"] == "delegate"
+        assert captured["to"] == "sess-target"
+
+    def test_delegate_error_exits_nonzero(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "delegate", "--to", "sess-target", "Do stuff"],
+        )
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {"ok": False, "error": "unknown target session"},
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 1
+        assert "unknown target session" in capsys.readouterr().err
+
+    def test_delegate_bridge_not_running_exits(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "delegate", "--to", "sess-target", "Do stuff"],
+        )
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: None,
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 1
+        assert "bridge not running" in capsys.readouterr().err
+
+
+class TestTaskResultCommand:
+    """CLI task-result subcommand tests."""
+
+    def test_task_result_prints_json(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "task-result", "abc123", "completed", "All tests passed"],
+        )
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {"ok": True, "task": {"status": "completed"}},
+        )
+        client_main()
+        out = capsys.readouterr().out
+        assert '"ok": true' in out
+        assert '"status": "completed"' in out
+
+    def test_task_result_error_exits_nonzero(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "task-result", "bad_id", "completed"],
+        )
+        # No result text provided — simulate non-tty empty stdin
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr(sys.stdin, "read", lambda: "")
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {"ok": False, "error": "task not found"},
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 1
+        assert "task not found" in capsys.readouterr().err
+
+    def test_task_result_sends_correct_request(self, monkeypatch):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "task-result", "t001", "failed", "Timeout"],
+        )
+        captured = {}
+
+        def _send(req, *_args, **_kwargs):
+            captured.update(req)
+            return {"ok": True, "task": {}}
+
+        monkeypatch.setattr("claude_xmpp_bridge.client.send_to_bridge", _send)
+        client_main()
+        assert captured["cmd"] == "task_result"
+        assert captured["task_id"] == "t001"
+        assert captured["status"] == "failed"
+        assert captured["result"] == "Timeout"
+
+
+class TestListTasksCommand:
+    """CLI list-tasks subcommand tests."""
+
+    def test_list_tasks_prints_json(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "list-tasks"],
+        )
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {
+                "ok": True,
+                "tasks": [{"task_id": "t1", "status": "pending"}],
+            },
+        )
+        client_main()
+        out = capsys.readouterr().out
+        assert '"task_id": "t1"' in out
+
+    def test_list_tasks_with_filters(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "list-tasks", "--session-id", "s1", "--role", "from", "--status", "pending"],
+        )
+        captured = {}
+
+        def _send(req, *_args, **_kwargs):
+            captured.update(req)
+            return {"ok": True, "tasks": []}
+
+        monkeypatch.setattr("claude_xmpp_bridge.client.send_to_bridge", _send)
+        client_main()
+        assert captured["cmd"] == "list_tasks"
+        assert captured["session_id"] == "s1"
+        assert captured["role"] == "from"
+        assert captured["status"] == "pending"
+
+    def test_list_tasks_error_exits(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["claude-xmpp-client", "list-tasks"],
+        )
+        monkeypatch.setattr(
+            "claude_xmpp_bridge.client.send_to_bridge",
+            lambda *a, **kw: {"error": "bridge error"},
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            client_main()
+        assert exc_info.value.code == 1

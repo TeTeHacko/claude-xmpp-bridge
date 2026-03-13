@@ -287,6 +287,8 @@ class XMPPBridge:
         message: str,
         *,
         from_session: str | None = None,
+        source_type: str | None = None,
+        message_type: str | None = None,
     ) -> bool:
         """Enqueue *message* to the MCP inbox and send a bare CR nudge to the session.
 
@@ -304,7 +306,13 @@ class XMPPBridge:
         if not mux:
             log.warning("No backend for nudge (project=%s)", info["project"])
             return False
-        self._enqueue_for_mcp(session_id, message, from_session=from_session)
+        self._enqueue_for_mcp(
+            session_id,
+            message,
+            from_session=from_session,
+            source_type=source_type,
+            message_type=message_type,
+        )
         ok = await mux.send_nudge(info["sty"], info["window"])
         if ok:
             self.audit.log(
@@ -382,10 +390,24 @@ class XMPPBridge:
         if exc is not None:
             log.error("Email task raised unexpected error: %s", exc)
 
-    def _enqueue_for_mcp(self, session_id: str, message: str, *, from_session: str | None = None) -> None:
+    def _enqueue_for_mcp(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        from_session: str | None = None,
+        source_type: str | None = None,
+        message_type: str | None = None,
+    ) -> None:
         """Queue *message* into the MCP inbox for *session_id* (no-op if MCP disabled)."""
         if self.mcp_server is not None:
-            self.mcp_server.enqueue(session_id, message, from_session=from_session)
+            self.mcp_server.enqueue(
+                session_id,
+                message,
+                from_session=from_session,
+                source_type=source_type,
+                message_type=message_type,
+            )
 
     @staticmethod
     def _short_path(path: str) -> str:
@@ -816,6 +838,12 @@ class XMPPBridge:
             response = self._handle_release_file_lock(req)
         elif cmd == "cleanup_stale_locks":
             response = self._handle_cleanup_stale_locks(req)
+        elif cmd == "delegate":
+            response = await self._handle_delegate(req)
+        elif cmd == "task_result":
+            response = await self._handle_task_result(req)
+        elif cmd == "list_tasks":
+            response = self._handle_list_tasks(req)
         elif cmd == "ping":
             response = {"ok": True}
         else:
@@ -1101,9 +1129,17 @@ class XMPPBridge:
                     target_info,
                     wrapped_message,
                     from_session=sender_id or None,
+                    source_type="agent",
+                    message_type="relay",
                 )
             else:
-                self._enqueue_for_mcp(target_id, wrapped_message, from_session=sender_id or None)
+                self._enqueue_for_mcp(
+                    target_id,
+                    wrapped_message,
+                    from_session=sender_id or None,
+                    source_type="agent",
+                    message_type="relay",
+                )
                 ok = True
         else:
             ok = await self._stuff_to_session(target_id, target_info, wrapped_message)
@@ -1181,8 +1217,21 @@ class XMPPBridge:
         if nudge:
             async def _deliver_nudge(sid: str, info: SessionInfo) -> bool:
                 if info.get("backend"):
-                    return await self._nudge_session(sid, info, wrapped_message, from_session=sender_id or None)
-                self._enqueue_for_mcp(sid, wrapped_message, from_session=sender_id or None)
+                    return await self._nudge_session(
+                        sid,
+                        info,
+                        wrapped_message,
+                        from_session=sender_id or None,
+                        source_type="agent",
+                        message_type="broadcast",
+                    )
+                self._enqueue_for_mcp(
+                    sid,
+                    wrapped_message,
+                    from_session=sender_id or None,
+                    source_type="agent",
+                    message_type="broadcast",
+                )
                 return True
 
             results = await asyncio.gather(*(_deliver_nudge(sid, info) for sid, info in targets.items()))
@@ -1204,7 +1253,12 @@ class XMPPBridge:
                 failed.append(self._session_prefix(info))
                 if not nudge:
                     # Screen relay failed — enqueue as fallback for pollInbox().
-                    self._enqueue_for_mcp(_sid, wrapped_message)
+                    self._enqueue_for_mcp(
+                        _sid,
+                        wrapped_message,
+                        source_type="agent",
+                        message_type="broadcast",
+                    )
 
         self.audit.log(
             "BROADCAST_SENT",
@@ -1522,9 +1576,17 @@ class XMPPBridge:
                     target_info,
                     wrapped_message,
                     from_session=session_id,
+                    source_type="agent",
+                    message_type="relay",
                 )
             else:
-                self._enqueue_for_mcp(last_sender, wrapped_message, from_session=session_id)
+                self._enqueue_for_mcp(
+                    last_sender,
+                    wrapped_message,
+                    from_session=session_id,
+                    source_type="agent",
+                    message_type="relay",
+                )
                 ok = True
         else:
             if not target_info.get("backend"):
@@ -1600,6 +1662,217 @@ class XMPPBridge:
         project = str(req.get("project", ""))
         removed = self._cleanup_stale_lock_payloads(project=project)
         return {"ok": True, "removed": len(removed), "locks": removed}
+
+    # --- Task delegation ---
+
+    async def _handle_delegate(self, req: dict[str, object]) -> dict[str, object]:
+        """Delegate a task to another agent via the bridge.
+
+        Protocol fields:
+          - ``to``           : target session_id (required)
+          - ``description``  : what the target should do (required)
+          - ``context``      : optional additional context
+          - ``session_id``   : sender (delegator) session_id
+          - ``nudge``        : if True, nudge target (default: True)
+        """
+        description = str(req.get("description", ""))
+        if not description:
+            return {"ok": False, "error": "missing description"}
+
+        to_raw = req.get("to")
+        if not to_raw:
+            return {"ok": False, "error": "missing target session_id (to)"}
+        target_id = str(to_raw)
+        target_info = self.registry.get(target_id)
+        if not target_info:
+            return {"ok": False, "error": f"unknown target session: {target_id}"}
+
+        sender_id = str(req.get("session_id", ""))
+        context = str(req.get("context", "")) or None
+        nudge = bool(req.get("nudge", True))
+
+        task_id = uuid.uuid4().hex[:12]
+        task = self.registry.task_create(
+            task_id=task_id,
+            from_session=sender_id or "unknown",
+            to_session=target_id,
+            description=description,
+            context=context,
+        )
+
+        # Build task_request message
+        task_msg = json.dumps(
+            {
+                "type": "task_request",
+                "task_id": task_id,
+                "from": sender_id or None,
+                "description": description,
+                "context": context,
+            },
+            ensure_ascii=False,
+        )
+        wrapped = format_generated_agent_message(
+            msg_type="task_request",
+            message=task_msg,
+            from_session_id=sender_id or None,
+            to_session_id=target_id,
+            mode="nudge" if nudge else "inbox",
+            message_id=task_id,
+        )
+
+        ok = True
+        if nudge and target_info.get("backend"):
+            ok = await self._nudge_session(
+                target_id,
+                target_info,
+                wrapped,
+                from_session=sender_id or None,
+                source_type="agent",
+                message_type="task_request",
+            )
+        else:
+            self._enqueue_for_mcp(
+                target_id,
+                wrapped,
+                from_session=sender_id or None,
+                source_type="agent",
+                message_type="task_request",
+            )
+
+        self._xmpp_send(
+            json.dumps(
+                {
+                    "type": "task_request",
+                    "task_id": task_id,
+                    "from": sender_id or None,
+                    "to": target_id,
+                    "description": description,
+                    "ts": time.time(),
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.audit.log(
+            "TASK_DELEGATE",
+            task_id=task_id,
+            from_session_id=sender_id or None,
+            to_session_id=target_id,
+            description=description[:100],
+            ok=ok,
+        )
+
+        return {"ok": ok, "task_id": task_id, "task": dict(task)}
+
+    async def _handle_task_result(self, req: dict[str, object]) -> dict[str, object]:
+        """Report the result of a delegated task.
+
+        Protocol fields:
+          - ``task_id``      : task ID (required)
+          - ``status``       : new status — accepted/completed/failed/cancelled (required)
+          - ``result``       : result text (optional)
+          - ``session_id``   : sender (assignee) session_id
+          - ``nudge``        : if True, nudge the delegator (default: True)
+        """
+        task_id = str(req.get("task_id", ""))
+        if not task_id:
+            return {"ok": False, "error": "missing task_id"}
+        status = str(req.get("status", ""))
+        valid_statuses = {"accepted", "completed", "failed", "cancelled"}
+        if status not in valid_statuses:
+            return {"ok": False, "error": f"invalid status: {status} (must be one of {sorted(valid_statuses)})"}
+
+        sender_id = str(req.get("session_id", ""))
+        result = str(req.get("result", "")) or None
+        nudge = bool(req.get("nudge", True))
+
+        task = self.registry.task_update_status(task_id, status, result)
+        if task is None:
+            return {"ok": False, "error": f"task not found: {task_id}"}
+
+        # Deliver result to the delegator
+        delegator = task["from_session"]
+        delegator_info = self.registry.get(delegator)
+
+        result_msg = json.dumps(
+            {
+                "type": "task_result",
+                "task_id": task_id,
+                "from": sender_id or task["to_session"],
+                "status": status,
+                "result": result,
+                "description": task["description"],
+            },
+            ensure_ascii=False,
+        )
+        wrapped = format_generated_agent_message(
+            msg_type="task_result",
+            message=result_msg,
+            from_session_id=sender_id or task["to_session"],
+            to_session_id=delegator,
+            mode="nudge" if nudge else "inbox",
+            message_id=task_id,
+        )
+
+        ok = True
+        if delegator_info is not None:
+            if nudge and delegator_info.get("backend"):
+                ok = await self._nudge_session(
+                    delegator,
+                    delegator_info,
+                    wrapped,
+                    from_session=sender_id or task["to_session"],
+                    source_type="agent",
+                    message_type="task_result",
+                )
+            else:
+                self._enqueue_for_mcp(
+                    delegator,
+                    wrapped,
+                    from_session=sender_id or task["to_session"],
+                    source_type="agent",
+                    message_type="task_result",
+                )
+
+        self._xmpp_send(
+            json.dumps(
+                {
+                    "type": "task_result",
+                    "task_id": task_id,
+                    "from": sender_id or task["to_session"],
+                    "to": delegator,
+                    "status": status,
+                    "result": (result or "")[:200],
+                    "ts": time.time(),
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.audit.log(
+            "TASK_RESULT",
+            task_id=task_id,
+            from_session_id=sender_id or task["to_session"],
+            to_session_id=delegator,
+            status=status,
+            ok=ok,
+        )
+
+        return {"ok": ok, "task": dict(task)}
+
+    def _handle_list_tasks(self, req: dict[str, object]) -> dict[str, object]:
+        """List delegated tasks, optionally filtered.
+
+        Protocol fields:
+          - ``session_id``  : filter by session (optional)
+          - ``role``        : ``"from"``, ``"to"``, or ``"both"`` (default)
+          - ``status``      : filter by status (optional)
+        """
+        session_id = str(req.get("session_id", "")) or None
+        role = str(req.get("role", "both"))
+        status = str(req.get("status", "")) or None
+        tasks = self.registry.task_list(session_id=session_id, role=role, status=status)
+        return {"ok": True, "tasks": [dict(t) for t in tasks]}
 
     # --- Lifecycle ---
 

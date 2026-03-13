@@ -224,6 +224,28 @@ OpenCode reconnects and issues tool calls in practice.
 The same reply flow is also available over the local bridge socket/CLI as
 `claude-xmpp-client reply-last SESSION_ID MESSAGE`.
 
+## Task Delegation (v0.8.18+)
+
+Agents can delegate tasks to other agents and track their progress:
+
+```bash
+# Delegate a task to another agent
+claude-xmpp-client delegate --to ses_abc123_w5 "Run integration tests"
+claude-xmpp-client delegate --to ses_abc123_w5 "Deploy to staging" --context "Use staging branch"
+
+# Report task result
+claude-xmpp-client task-result TASK_ID completed "All 42 tests passed"
+claude-xmpp-client task-result TASK_ID failed "Timeout after 60s"
+
+# List tasks
+claude-xmpp-client list-tasks --session-id ses_abc123_w4 --role from
+```
+
+The same operations are available as MCP tools: `delegate_task`, `report_task_result`,
+`list_delegated_tasks`. Tasks are tracked in the bridge database with states
+`pending` → `accepted` → `completed`/`failed` (or `cancelled` from any state).
+All task events are forwarded to the XMPP observer as structured JSON.
+
 ## Coexistence with Claude Code
 
 Claude Code and OpenCode sessions in the **same project directory coexist** — the bridge tracks them separately by `source`. Neither tool's session evicts the other's.

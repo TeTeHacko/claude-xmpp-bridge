@@ -52,6 +52,30 @@ class FileLockInfo(TypedDict):
     locked_at: str
 
 
+class InboxMessage(TypedDict):
+    """Type for inbox message rows returned by ``inbox_drain_full()``."""
+
+    message: str
+    from_session: str | None
+    source_type: str | None
+    message_type: str | None
+    created_at: float
+
+
+class DelegatedTask(TypedDict):
+    """Type for delegated task records stored in the registry."""
+
+    task_id: str
+    from_session: str
+    to_session: str
+    description: str
+    context: str | None
+    status: str  # pending, accepted, completed, failed, cancelled
+    result: str | None
+    created_at: float
+    updated_at: float
+
+
 class TodoInfo(TypedDict):
     """Type for per-session todo items stored in the registry."""
 
@@ -133,6 +157,25 @@ class SessionRegistry:
         self._db.execute("CREATE INDEX IF NOT EXISTS inbox_to_session ON inbox (to_session, id)")
         self._db.execute("CREATE INDEX IF NOT EXISTS file_locks_session_id ON file_locks (session_id)")
         self._db.execute("CREATE INDEX IF NOT EXISTS todos_session_id ON todos (session_id, position)")
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS delegated_tasks ("
+            "  task_id     TEXT PRIMARY KEY,"
+            "  from_session TEXT NOT NULL,"
+            "  to_session   TEXT NOT NULL,"
+            "  description  TEXT NOT NULL,"
+            "  context      TEXT,"
+            "  status       TEXT NOT NULL DEFAULT 'pending',"
+            "  result       TEXT,"
+            "  created_at   REAL NOT NULL,"
+            "  updated_at   REAL NOT NULL"
+            ")"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS delegated_tasks_from ON delegated_tasks (from_session, status)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS delegated_tasks_to ON delegated_tasks (to_session, status)"
+        )
         self._db.commit()
         # Migrations: add columns for existing databases that predate these fields
         cols = {row[1] for row in self._db.execute("PRAGMA table_info(sessions)")}
@@ -150,6 +193,11 @@ class SessionRegistry:
             self._db.execute("ALTER TABLE sessions ADD COLUMN todos_version INTEGER NOT NULL DEFAULT 0")
         if "last_agent_sender" not in cols:
             self._db.execute("ALTER TABLE sessions ADD COLUMN last_agent_sender TEXT")
+        inbox_cols = {row[1] for row in self._db.execute("PRAGMA table_info(inbox)")}
+        if "source_type" not in inbox_cols:
+            self._db.execute("ALTER TABLE inbox ADD COLUMN source_type TEXT")
+        if "message_type" not in inbox_cols:
+            self._db.execute("ALTER TABLE inbox ADD COLUMN message_type TEXT")
         todo_cols = {row[1] for row in self._db.execute("PRAGMA table_info(todos)")}
         if todo_cols and "todo_id" not in todo_cols:
             self._db.execute("ALTER TABLE todos ADD COLUMN todo_id TEXT")
@@ -346,12 +394,26 @@ class SessionRegistry:
             return self.last_active, self.sessions[self.last_active]
         return None, None
 
-    def inbox_put(self, to_session: str, message: str, from_session: str | None = None) -> None:
+    def inbox_put(
+        self,
+        to_session: str,
+        message: str,
+        from_session: str | None = None,
+        *,
+        source_type: str | None = None,
+        message_type: str | None = None,
+    ) -> None:
         """Persistently enqueue a message in the inbox for *to_session*.
 
         If the inbox already contains MAX_INBOX_SIZE messages for this session,
         the oldest one is dropped to make room (same policy as the previous
         in-memory asyncio.Queue with maxsize=100).
+
+        Args:
+            source_type: Origin of the message — ``"agent"``, ``"human"``, or
+                ``"system"``.  Defaults to ``None`` (legacy callers).
+            message_type: Semantic type — ``"relay"``, ``"broadcast"``,
+                ``"task_request"``, ``"task_result"``, etc.
         """
         with self._db:
             count: int = self._db.execute("SELECT COUNT(*) FROM inbox WHERE to_session = ?", (to_session,)).fetchone()[
@@ -364,8 +426,9 @@ class SessionRegistry:
                     (to_session, to_session),
                 )
             self._db.execute(
-                "INSERT INTO inbox (to_session, from_session, message, created_at) VALUES (?, ?, ?, ?)",
-                (to_session, from_session, message, time.time()),
+                "INSERT INTO inbox (to_session, from_session, message, created_at, source_type, message_type)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (to_session, from_session, message, time.time(), source_type, message_type),
             )
 
     def inbox_drain(self, session_id: str) -> list[str]:
@@ -402,6 +465,36 @@ class SessionRegistry:
                     ids,
                 )
         return [(r[1], r[2]) for r in rows]
+
+    def inbox_drain_full(self, session_id: str) -> list[InboxMessage]:
+        """Atomically drain messages with full metadata.
+
+        Returns a list of :class:`InboxMessage` dicts containing all stored
+        columns: ``message``, ``from_session``, ``source_type``,
+        ``message_type``, and ``created_at``.
+        """
+        with self._db:
+            rows = self._db.execute(
+                "SELECT id, message, from_session, source_type, message_type, created_at"
+                " FROM inbox WHERE to_session = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+            if rows:
+                ids = [r[0] for r in rows]
+                self._db.execute(
+                    f"DELETE FROM inbox WHERE id IN ({','.join('?' * len(ids))})",  # noqa: S608
+                    ids,
+                )
+        return [
+            InboxMessage(
+                message=r[1],
+                from_session=r[2],
+                source_type=r[3],
+                message_type=r[4],
+                created_at=float(r[5]),
+            )
+            for r in rows
+        ]
 
     def set_last_agent_sender(self, session_id: str, sender_session_id: str | None) -> bool:
         """Persist the last replyable agent sender for a session."""
@@ -758,6 +851,140 @@ class SessionRegistry:
             self._db.execute("UPDATE sessions SET todos_version = ? WHERE session_id = ?", (new_version, session_id))
         info["todos_version"] = new_version
         return True, new_version
+
+    def task_create(
+        self,
+        *,
+        task_id: str,
+        from_session: str,
+        to_session: str,
+        description: str,
+        context: str | None = None,
+    ) -> DelegatedTask:
+        """Create a new delegated task record.
+
+        Returns the created :class:`DelegatedTask` dict.
+        """
+        now = time.time()
+        task = DelegatedTask(
+            task_id=task_id,
+            from_session=from_session,
+            to_session=to_session,
+            description=description,
+            context=context,
+            status="pending",
+            result=None,
+            created_at=now,
+            updated_at=now,
+        )
+        with self._db:
+            self._db.execute(
+                "INSERT INTO delegated_tasks"
+                " (task_id, from_session, to_session, description, context, status, result, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (task_id, from_session, to_session, description, context, "pending", None, now, now),
+            )
+        return task
+
+    def task_update_status(
+        self,
+        task_id: str,
+        status: str,
+        result: str | None = None,
+    ) -> DelegatedTask | None:
+        """Update the status (and optionally the result) of a delegated task.
+
+        Valid status transitions: pending → accepted → completed|failed,
+        or any → cancelled.  Returns the updated task, or None if not found.
+        """
+        now = time.time()
+        with self._db:
+            row = self._db.execute(
+                "SELECT task_id, from_session, to_session, description, context,"
+                "       status, result, created_at, updated_at"
+                " FROM delegated_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            self._db.execute(
+                "UPDATE delegated_tasks SET status = ?, result = ?, updated_at = ? WHERE task_id = ?",
+                (status, result, now, task_id),
+            )
+        return DelegatedTask(
+            task_id=row[0],
+            from_session=row[1],
+            to_session=row[2],
+            description=row[3],
+            context=row[4],
+            status=status,
+            result=result if result is not None else row[6],
+            created_at=float(row[7]),
+            updated_at=now,
+        )
+
+    def task_get(self, task_id: str) -> DelegatedTask | None:
+        """Return a single delegated task by ID, or None if not found."""
+        row = self._db.execute(
+            "SELECT task_id, from_session, to_session, description, context,"
+            "       status, result, created_at, updated_at"
+            " FROM delegated_tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_task(row)
+
+    def task_list(
+        self,
+        *,
+        session_id: str | None = None,
+        role: str = "both",
+        status: str | None = None,
+    ) -> list[DelegatedTask]:
+        """List delegated tasks, optionally filtered.
+
+        Args:
+            session_id: If set, only tasks involving this session.
+            role: ``"from"`` (delegator), ``"to"`` (assignee), or ``"both"``.
+            status: If set, only tasks with this status.
+        """
+        clauses: list[str] = []
+        params: list[str] = []
+        if session_id:
+            if role == "from":
+                clauses.append("from_session = ?")
+                params.append(session_id)
+            elif role == "to":
+                clauses.append("to_session = ?")
+                params.append(session_id)
+            else:
+                clauses.append("(from_session = ? OR to_session = ?)")
+                params.extend([session_id, session_id])
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (  # noqa: S608 – clauses are hardcoded strings, not user input
+            "SELECT task_id, from_session, to_session, description, context,"
+            " status, result, created_at, updated_at FROM delegated_tasks"
+        ) + where + " ORDER BY created_at DESC"
+        rows = self._db.execute(sql, params).fetchall()
+        return [self._row_to_task(r) for r in rows]
+
+    @staticmethod
+    def _row_to_task(row: sqlite3.Row | tuple[object, ...]) -> DelegatedTask:
+        return DelegatedTask(
+            task_id=str(row[0]),
+            from_session=str(row[1]),
+            to_session=str(row[2]),
+            description=str(row[3]),
+            context=str(row[4]) if row[4] is not None else None,
+            status=str(row[5]),
+            result=str(row[6]) if row[6] is not None else None,
+            created_at=float(str(row[7])),
+            updated_at=float(str(row[8])),
+        )
 
     def close(self) -> None:
         """Close the database connection."""

@@ -374,6 +374,7 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     bridge.registry.update_todo = MagicMock(side_effect=_update_todo)
     bridge.registry.remove_todo = MagicMock(side_effect=_remove_todo)
     bridge.registry.inbox_count = MagicMock(side_effect=_inbox_count)
+    bridge.registry.inbox_drain_full = MagicMock(return_value=[])
     bridge.registry.set_last_agent_sender = MagicMock(side_effect=_set_last_agent_sender)
     bridge.registry.get_last_agent_sender = MagicMock(side_effect=_get_last_agent_sender)
     bridge.registry.unregister = MagicMock(side_effect=_unregister)
@@ -449,66 +450,104 @@ class TestEnqueueAndReceive:
     def test_enqueue_calls_registry_inbox_put(self, started_server: BridgeMCPServer):
         started_server._bridge.registry.inbox_put = MagicMock()
         started_server.enqueue("ses_AAA", "hello")
-        started_server._bridge.registry.inbox_put.assert_called_once_with("ses_AAA", "hello", from_session=None)
+        started_server._bridge.registry.inbox_put.assert_called_once_with(
+            "ses_AAA", "hello", from_session=None, source_type=None, message_type=None
+        )
 
     def test_enqueue_passes_from_session(self, started_server: BridgeMCPServer):
         started_server._bridge.registry.inbox_put = MagicMock()
         started_server.enqueue("ses_AAA", "hello", from_session="ses_BBB")
-        started_server._bridge.registry.inbox_put.assert_called_once_with("ses_AAA", "hello", from_session="ses_BBB")
+        started_server._bridge.registry.inbox_put.assert_called_once_with(
+            "ses_AAA", "hello", from_session="ses_BBB", source_type=None, message_type=None
+        )
 
     def test_enqueue_before_bridge_logs_warning_no_crash(self, server: BridgeMCPServer):
         """enqueue() before bridge is set should not raise."""
         server.enqueue("ses_AAA", "hello")  # must not raise
 
     def test_receive_calls_registry_inbox_drain(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(
-            return_value=[("msg1", None), ("msg2", None)]
+        started_server._bridge.registry.inbox_drain_full = MagicMock(
+            return_value=[
+                {
+                    "message": "msg1", "from_session": None,
+                    "source_type": None, "message_type": None, "created_at": 1000.0,
+                },
+                {
+                    "message": "msg2", "from_session": None,
+                    "source_type": None, "message_type": None, "created_at": 1001.0,
+                },
+            ]
         )
         msgs = started_server._tool_receive_messages(session_id="ses_AAA")
-        assert msgs == ["msg1", "msg2"]
-        started_server._bridge.registry.inbox_drain_with_senders.assert_called_once_with("ses_AAA")
+        assert len(msgs) == 2
+        assert msgs[0]["text"] == "msg1"
+        assert msgs[1]["text"] == "msg2"
+        started_server._bridge.registry.inbox_drain_full.assert_called_once_with("ses_AAA")
 
     def test_receive_drains_queue(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(
-            return_value=[("msg1", None), ("msg2", None)]
+        started_server._bridge.registry.inbox_drain_full = MagicMock(
+            return_value=[
+                {
+                    "message": "msg1", "from_session": None,
+                    "source_type": None, "message_type": None, "created_at": 1000.0,
+                },
+                {
+                    "message": "msg2", "from_session": None,
+                    "source_type": None, "message_type": None, "created_at": 1001.0,
+                },
+            ]
         )
         msgs = started_server._tool_receive_messages(session_id="ses_AAA")
-        assert msgs == ["msg1", "msg2"]
+        assert len(msgs) == 2
+        assert msgs[0]["text"] == "msg1"
+        assert msgs[1]["text"] == "msg2"
 
     def test_receive_empty_inbox_returns_empty_list(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[])
+        started_server._bridge.registry.inbox_drain_full = MagicMock(return_value=[])
         assert started_server._tool_receive_messages(session_id="ses_AAA") == []
 
     def test_receive_unknown_session_returns_empty(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[])
+        started_server._bridge.registry.inbox_drain_full = MagicMock(return_value=[])
         assert started_server._tool_receive_messages(session_id="ses_UNKNOWN") == []
 
     def test_receive_without_bridge_returns_empty(self, server: BridgeMCPServer):
         assert server._tool_receive_messages(session_id="ses_X") == []
 
     def test_receive_logs_audit_when_messages_present(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[("hello", None)])
+        started_server._bridge.registry.inbox_drain_full = MagicMock(
+            return_value=[{
+                "message": "hello", "from_session": None,
+                "source_type": None, "message_type": None, "created_at": 1000.0,
+            }]
+        )
         started_server._tool_receive_messages(session_id="ses_AAA")
         started_server._bridge.audit.log.assert_called()
         event_arg = started_server._bridge.audit.log.call_args[0][0]
         assert event_arg == "MCP_RECEIVE"
 
     def test_receive_no_audit_when_empty(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[])
+        started_server._bridge.registry.inbox_drain_full = MagicMock(return_value=[])
         started_server._tool_receive_messages(session_id="ses_AAA")
         started_server._bridge.audit.log.assert_not_called()
 
     def test_receive_updates_last_agent_sender_from_inbox_metadata(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[("hello", "ses_BBB")])
+        started_server._bridge.registry.inbox_drain_full = MagicMock(
+            return_value=[{
+                "message": "hello", "from_session": "ses_BBB",
+                "source_type": "agent", "message_type": "relay", "created_at": 1000.0,
+            }]
+        )
         started_server._bridge.registry.set_last_agent_sender = MagicMock(return_value=True)
 
         msgs = started_server._tool_receive_messages(session_id="ses_AAA")
 
-        assert msgs == ["hello"]
+        assert len(msgs) == 1
+        assert msgs[0]["text"] == "hello"
+        assert msgs[0]["from_session"] == "ses_BBB"
         started_server._bridge.registry.set_last_agent_sender.assert_called_once_with("ses_AAA", "ses_BBB")
 
     def test_receive_remembers_client_session_for_future_tools(self, started_server: BridgeMCPServer):
-        started_server._bridge.registry.inbox_drain_with_senders = MagicMock(return_value=[])
+        started_server._bridge.registry.inbox_drain_full = MagicMock(return_value=[])
 
         started_server._tool_receive_messages(session_id="ses_AAA", client_id="client-123")
 
@@ -1308,7 +1347,9 @@ class TestEnqueueForMcp:
             assert bridge.mcp_server is not None
         bridge.mcp_server.enqueue = MagicMock()
         bridge._enqueue_for_mcp("ses_TEST", "hello")
-        bridge.mcp_server.enqueue.assert_called_once_with("ses_TEST", "hello", from_session=None)
+        bridge.mcp_server.enqueue.assert_called_once_with(
+            "ses_TEST", "hello", from_session=None, source_type=None, message_type=None
+        )
 
     def test_enqueue_for_mcp_noop_when_disabled(self):
         from unittest.mock import patch
@@ -1502,3 +1543,219 @@ class TestTodoToolErrors:
         result = started_server._tool_remove_todo(session_id="ses_UNKNOWN", todo_id="todo-1")
         assert result["ok"] is False
         assert result["error"] == "unknown session_id: ses_UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# Task delegation tools
+# ---------------------------------------------------------------------------
+
+
+class TestDelegateTask:
+    """Tests for the delegate_task MCP tool."""
+
+    async def test_delegate_task_success(self, started_server: BridgeMCPServer):
+        """Successful delegation creates task, nudges target, sends XMPP, returns ok+task_id."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        fake_task = {
+            "task_id": "fake12345678",
+            "from_session": "ses_AAA",
+            "to_session": "ses_BBB",
+            "description": "Run the tests",
+            "context": None,
+            "status": "pending",
+            "result": None,
+            "created_at": 1000.0,
+            "updated_at": 1000.0,
+        }
+        started_server._bridge.registry.task_create = MagicMock(return_value=fake_task)
+
+        result = await started_server._tool_delegate_task(
+            to="ses_BBB",
+            description="Run the tests",
+            sender_session_id="ses_AAA",
+        )
+
+        assert result["ok"] is True
+        assert "task_id" in result
+        started_server._bridge.registry.task_create.assert_called_once()
+        started_server._bridge._nudge_session.assert_awaited_once()
+        # Verify nudge kwargs
+        nudge_kwargs = started_server._bridge._nudge_session.await_args.kwargs
+        assert nudge_kwargs["source_type"] == "agent"
+        assert nudge_kwargs["message_type"] == "task_request"
+        # XMPP notification sent
+        started_server._bridge._xmpp_send.assert_called_once()
+        xmpp_arg = started_server._bridge._xmpp_send.call_args[0][0]
+        payload = json.loads(xmpp_arg)
+        assert payload["type"] == "task_request"
+        assert payload["to"] == "ses_BBB"
+        assert payload["description"] == "Run the tests"
+        # Audit logged
+        started_server._bridge.audit.log.assert_called()
+        assert started_server._bridge.audit.log.call_args[0][0] == "MCP_TASK_DELEGATE"
+
+    async def test_delegate_task_missing_to(self, started_server: BridgeMCPServer):
+        result = await started_server._tool_delegate_task(to="", description="Do stuff")
+        assert result["ok"] is False
+        assert "to" in result["error"].lower() or "missing" in result["error"].lower()
+
+    async def test_delegate_task_missing_description(self, started_server: BridgeMCPServer):
+        result = await started_server._tool_delegate_task(to="ses_BBB", description="")
+        assert result["ok"] is False
+        assert "description" in result["error"].lower()
+
+    async def test_delegate_task_unknown_target(self, started_server: BridgeMCPServer):
+        result = await started_server._tool_delegate_task(
+            to="ses_UNKNOWN", description="Do something"
+        )
+        assert result["ok"] is False
+        assert "unknown" in result["error"].lower()
+
+    async def test_delegate_task_no_bridge(self, server: BridgeMCPServer):
+        """When bridge is not attached, returns error."""
+        result = await server._tool_delegate_task(to="ses_BBB", description="Do stuff")
+        assert result["ok"] is False
+        assert "bridge" in result["error"].lower()
+
+    async def test_delegate_task_no_backend_enqueues(self, started_server: BridgeMCPServer):
+        """Target without backend gets the task enqueued instead of nudged."""
+        started_server._bridge.registry.sessions["ses_NOBACK"] = _make_session_info(
+            project="/home/user/noback", backend=None
+        )
+        started_server._bridge.registry.get = MagicMock(
+            side_effect=lambda sid: started_server._bridge.registry.sessions.get(sid)
+        )
+        fake_task = {
+            "task_id": "enq123456789",
+            "from_session": "ses_AAA",
+            "to_session": "ses_NOBACK",
+            "description": "Enqueued task",
+            "context": None,
+            "status": "pending",
+            "result": None,
+            "created_at": 1000.0,
+            "updated_at": 1000.0,
+        }
+        started_server._bridge.registry.task_create = MagicMock(return_value=fake_task)
+
+        result = await started_server._tool_delegate_task(
+            to="ses_NOBACK", description="Enqueued task", sender_session_id="ses_AAA"
+        )
+        assert result["ok"] is True
+        started_server._bridge._nudge_session.assert_not_called()
+
+
+class TestReportTaskResult:
+    """Tests for the report_task_result MCP tool."""
+
+    async def test_report_task_result_success(self, started_server: BridgeMCPServer):
+        """Successful report updates task, nudges delegator, sends XMPP."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=True)
+        updated_task = {
+            "task_id": "task_001",
+            "from_session": "ses_AAA",
+            "to_session": "ses_BBB",
+            "description": "Run tests",
+            "context": None,
+            "status": "completed",
+            "result": "All passed",
+            "created_at": 1000.0,
+            "updated_at": 2000.0,
+        }
+        started_server._bridge.registry.task_update_status = MagicMock(return_value=updated_task)
+
+        result = await started_server._tool_report_task_result(
+            task_id="task_001",
+            status="completed",
+            result="All passed",
+            sender_session_id="ses_BBB",
+        )
+
+        assert result["ok"] is True
+        assert result["task"]["status"] == "completed"
+        started_server._bridge.registry.task_update_status.assert_called_once_with(
+            "task_001", "completed", "All passed"
+        )
+        # Nudge sent to the delegator (ses_AAA)
+        started_server._bridge._nudge_session.assert_awaited_once()
+        nudge_args = started_server._bridge._nudge_session.await_args
+        assert nudge_args.args[0] == "ses_AAA"  # delegator session
+        assert nudge_args.kwargs["message_type"] == "task_result"
+        # XMPP notification
+        started_server._bridge._xmpp_send.assert_called_once()
+        xmpp_payload = json.loads(started_server._bridge._xmpp_send.call_args[0][0])
+        assert xmpp_payload["type"] == "task_result"
+        assert xmpp_payload["status"] == "completed"
+        assert xmpp_payload["to"] == "ses_AAA"
+        # Audit
+        started_server._bridge.audit.log.assert_called()
+        assert started_server._bridge.audit.log.call_args[0][0] == "MCP_TASK_RESULT"
+
+    async def test_report_task_result_missing_task_id(self, started_server: BridgeMCPServer):
+        result = await started_server._tool_report_task_result(task_id="", status="completed")
+        assert result["ok"] is False
+        assert "task_id" in result["error"].lower()
+
+    async def test_report_task_result_invalid_status(self, started_server: BridgeMCPServer):
+        result = await started_server._tool_report_task_result(task_id="task_001", status="bogus")
+        assert result["ok"] is False
+        assert "invalid status" in result["error"].lower()
+
+    async def test_report_task_result_task_not_found(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.task_update_status = MagicMock(return_value=None)
+        result = await started_server._tool_report_task_result(task_id="nonexistent", status="completed")
+        assert result["ok"] is False
+        assert "not found" in result["error"].lower()
+
+    async def test_report_task_result_no_bridge(self, server: BridgeMCPServer):
+        result = await server._tool_report_task_result(task_id="task_001", status="completed")
+        assert result["ok"] is False
+        assert "bridge" in result["error"].lower()
+
+
+class TestListDelegatedTasks:
+    """Tests for the list_delegated_tasks MCP tool."""
+
+    def test_list_delegated_tasks_returns_list(self, started_server: BridgeMCPServer):
+        fake_tasks = [
+            {
+                "task_id": "t1",
+                "from_session": "a",
+                "to_session": "b",
+                "description": "d1",
+                "context": None,
+                "status": "pending",
+                "result": None,
+                "created_at": 1000.0,
+                "updated_at": 1000.0,
+            },
+            {
+                "task_id": "t2",
+                "from_session": "b",
+                "to_session": "c",
+                "description": "d2",
+                "context": "ctx",
+                "status": "completed",
+                "result": "done",
+                "created_at": 2000.0,
+                "updated_at": 3000.0,
+            },
+        ]
+        started_server._bridge.registry.task_list = MagicMock(return_value=fake_tasks)
+
+        result = started_server._tool_list_delegated_tasks(session_id="a", role="from")
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["task_id"] == "t1"
+        started_server._bridge.registry.task_list.assert_called_once_with(
+            session_id="a", role="from", status=None
+        )
+
+    def test_list_delegated_tasks_empty(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.task_list = MagicMock(return_value=[])
+        result = started_server._tool_list_delegated_tasks()
+        assert result == []
+
+    def test_list_delegated_tasks_no_bridge(self, server: BridgeMCPServer):
+        result = server._tool_list_delegated_tasks()
+        assert result == []

@@ -7,6 +7,7 @@ import time
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -107,3 +108,34 @@ def format_generated_agent_message(
         "ts": time.time(),
     }
     return "[bridge-generated message]\n" + json.dumps(meta, ensure_ascii=False) + "\n\n" + message
+
+
+def parse_generated_agent_message(raw: str) -> tuple[str, dict[str, Any]]:
+    """Parse a bridge-generated envelope and return ``(text, metadata)``.
+
+    If *raw* is a properly wrapped message (starts with
+    ``[bridge-generated message]\\n`` followed by a JSON metadata line), the
+    function strips the envelope and returns the clean body text plus the
+    parsed metadata dict.
+
+    If *raw* is NOT a generated envelope (legacy or plain text), the full
+    string is returned as ``text`` with an empty metadata dict.
+    """
+    if not raw.startswith("[bridge-generated message]\n"):
+        return raw, {}
+
+    lines = raw.split("\n", 3)  # header, json, blank, body
+    if len(lines) < 2:
+        return raw, {}
+
+    try:
+        meta = json.loads(lines[1])
+    except (json.JSONDecodeError, IndexError):
+        return raw, {}
+
+    if not isinstance(meta, dict) or meta.get("generated") is not True:
+        return raw, {}
+
+    # Body is everything after header + json + blank line
+    body = lines[3] if len(lines) > 3 else ""
+    return body, meta

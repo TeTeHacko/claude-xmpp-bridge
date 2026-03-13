@@ -193,6 +193,32 @@ def client_main() -> None:
     p_cleanup_locks = sub.add_parser("cleanup-locks", help="Remove stale file locks")
     p_cleanup_locks.add_argument("--project", default="")
 
+    # task delegation
+    p_delegate = sub.add_parser(
+        "delegate",
+        help="Delegate a task to another agent session",
+    )
+    p_delegate.add_argument("description", nargs="*", help="Task description (reads stdin if omitted)")
+    p_delegate.add_argument("--to", metavar="SESSION_ID", required=True, help="Target session ID")
+    p_delegate.add_argument("--context", default="", help="Additional context for the task")
+    p_delegate.add_argument("--session-id", default=None, help="Sender (delegator) session ID")
+    p_delegate.add_argument("--no-nudge", action="store_true", help="Don't nudge the target")
+
+    p_task_result = sub.add_parser(
+        "task-result",
+        help="Report the result of a delegated task",
+    )
+    p_task_result.add_argument("task_id", help="Task ID")
+    p_task_result.add_argument("status", choices=["accepted", "completed", "failed", "cancelled"])
+    p_task_result.add_argument("result", nargs="*", help="Result text (reads stdin if omitted)")
+    p_task_result.add_argument("--session-id", default=None, help="Sender (assignee) session ID")
+    p_task_result.add_argument("--no-nudge", action="store_true", help="Don't nudge the delegator")
+
+    p_list_tasks = sub.add_parser("list-tasks", help="List delegated tasks as JSON")
+    p_list_tasks.add_argument("--session-id", default=None, help="Filter by session ID")
+    p_list_tasks.add_argument("--role", choices=["from", "to", "both"], default="both")
+    p_list_tasks.add_argument("--status", default="")
+
     # ping
     sub.add_parser("ping", help="Check if bridge daemon is running (exit 0 = running)")
 
@@ -524,6 +550,82 @@ def client_main() -> None:
         elif "error" in result:
             print(f"Error: {result['error']}", file=sys.stderr)
             sys.exit(1)
+
+    elif args.command == "delegate":
+        desc_parts: list[str] = args.description or []
+        if desc_parts:
+            description = " ".join(desc_parts)
+        elif not sys.stdin.isatty():
+            description = sys.stdin.read().strip()
+        else:
+            print("Error: no description provided", file=sys.stderr)
+            sys.exit(1)
+        if not description:
+            sys.exit(0)
+        delegate_req: dict[str, object] = {
+            "cmd": "delegate",
+            "to": args.to,
+            "description": description,
+            "nudge": not args.no_nudge,
+        }
+        if args.context:
+            delegate_req["context"] = args.context
+        sender_session_id = _default_bridge_session_id(args.session_id)
+        if sender_session_id:
+            delegate_req["session_id"] = sender_session_id
+        result = send_to_bridge(delegate_req, socket_path)
+        if result is None:
+            print("Error: bridge not running", file=sys.stderr)
+            sys.exit(1)
+        elif not result.get("ok"):
+            print(f"Error: {result.get('error', 'unknown')}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(json.dumps(result))
+
+    elif args.command == "task-result":
+        result_parts: list[str] = args.result or []
+        if result_parts:
+            result_text = " ".join(result_parts)
+        elif not sys.stdin.isatty():
+            result_text = sys.stdin.read().strip()
+        else:
+            result_text = ""
+        task_result_req: dict[str, object] = {
+            "cmd": "task_result",
+            "task_id": args.task_id,
+            "status": args.status,
+            "nudge": not args.no_nudge,
+        }
+        if result_text:
+            task_result_req["result"] = result_text
+        sender_session_id = _default_bridge_session_id(args.session_id)
+        if sender_session_id:
+            task_result_req["session_id"] = sender_session_id
+        result = send_to_bridge(task_result_req, socket_path)
+        if result is None:
+            print("Error: bridge not running", file=sys.stderr)
+            sys.exit(1)
+        elif not result.get("ok"):
+            print(f"Error: {result.get('error', 'unknown')}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(json.dumps(result))
+
+    elif args.command == "list-tasks":
+        list_tasks_req: dict[str, object] = {
+            "cmd": "list_tasks",
+            "role": args.role,
+        }
+        if args.session_id:
+            list_tasks_req["session_id"] = args.session_id
+        if args.status:
+            list_tasks_req["status"] = args.status
+        result = send_to_bridge(list_tasks_req, socket_path)
+        if result and result.get("ok"):
+            print(json.dumps(result.get("tasks", []), indent=2))
+        else:
+            _print_bridge_error(result)
 
     else:
         parser.print_help()

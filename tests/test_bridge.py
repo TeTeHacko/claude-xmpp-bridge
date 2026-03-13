@@ -4721,7 +4721,9 @@ class TestNudgePattern:
             ok = await bridge._nudge_session("agent-b", info, "nudge me!")
 
         assert ok is True
-        bridge.mcp_server.enqueue.assert_called_once_with("agent-b", "nudge me!", from_session=None)
+        bridge.mcp_server.enqueue.assert_called_once_with(
+            "agent-b", "nudge me!", from_session=None, source_type=None, message_type=None
+        )
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_nudge_session_passes_from_session_to_inbox(self, MockXMPP, tmp_path):
@@ -4738,7 +4740,9 @@ class TestNudgePattern:
             ok = await bridge._nudge_session("agent-b", info, "nudge me!", from_session="agent-a")
 
         assert ok is True
-        bridge.mcp_server.enqueue.assert_called_once_with("agent-b", "nudge me!", from_session="agent-a")
+        bridge.mcp_server.enqueue.assert_called_once_with(
+            "agent-b", "nudge me!", from_session="agent-a", source_type=None, message_type=None
+        )
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -4878,7 +4882,7 @@ class TestNudgePattern:
 
         nudged: list[str] = []
 
-        async def _mock_nudge(session_id, info, text, from_session=None):
+        async def _mock_nudge(session_id, info, text, from_session=None, source_type=None, message_type=None):
             nudged.append(session_id)
             return True
 
@@ -5094,4 +5098,211 @@ class TestXmppSendEmailRelay:
 
         mock_ct.assert_not_called()
         conn.send.assert_called_once_with("user@example.com", exact_msg)
+        bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# Task delegation via socket
+# ---------------------------------------------------------------------------
+
+
+class TestTaskDelegationViaSocket:
+    """End-to-end socket tests for delegate, task_result, list_tasks commands."""
+
+    def _make_bridge_with_sessions(self, tmp_path, MockXMPP):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register(
+            session_id="agent-a",
+            sty="12345.pts-0",
+            window="1",
+            project="/home/user/project-a",
+            backend="screen",
+        )
+        bridge.registry.register(
+            session_id="agent-b",
+            sty="12345.pts-0",
+            window="2",
+            project="/home/user/project-b",
+            backend="screen",
+        )
+        return bridge, conn
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_delegate_via_socket(self, MockXMPP, tmp_path):
+        """delegate command via socket creates task and returns ok+task_id."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        await bridge.socket_server.start()
+        try:
+            with (
+                patch.object(bridge, "_screen_socket_alive", return_value=True),
+                patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+            ):
+                resp = await _socket_request(
+                    bridge.config.socket_path,
+                    {
+                        "cmd": "delegate",
+                        "session_id": "agent-a",
+                        "to": "agent-b",
+                        "description": "Run the integration tests",
+                    },
+                )
+            assert resp["ok"] is True
+            assert "task_id" in resp
+            assert len(resp["task_id"]) == 12
+            assert resp["task"]["status"] == "pending"
+            assert resp["task"]["from_session"] == "agent-a"
+            assert resp["task"]["to_session"] == "agent-b"
+            # XMPP observer notification sent
+            conn.send.assert_called()
+            xmpp_body = conn.send.call_args[0][1]
+            payload = json.loads(xmpp_body)
+            assert payload["type"] == "task_request"
+            assert payload["to"] == "agent-b"
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_delegate_missing_description(self, MockXMPP, tmp_path):
+        """delegate without description returns an error."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        resp = await bridge._handle_delegate({"session_id": "agent-a", "to": "agent-b"})
+        assert resp["ok"] is False
+        assert "description" in str(resp["error"]).lower()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_delegate_missing_to(self, MockXMPP, tmp_path):
+        """delegate without target returns an error."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        resp = await bridge._handle_delegate({"session_id": "agent-a", "description": "Do stuff"})
+        assert resp["ok"] is False
+        assert "to" in str(resp["error"]).lower() or "missing" in str(resp["error"]).lower()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_delegate_unknown_target(self, MockXMPP, tmp_path):
+        """delegate to nonexistent session returns an error."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        resp = await bridge._handle_delegate(
+            {"session_id": "agent-a", "to": "agent-xyz", "description": "Hello"}
+        )
+        assert resp["ok"] is False
+        assert "unknown" in str(resp["error"]).lower()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_task_result_via_socket(self, MockXMPP, tmp_path):
+        """Full flow: delegate a task then report its result."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            # 1. Delegate
+            del_resp = await bridge._handle_delegate(
+                {"session_id": "agent-a", "to": "agent-b", "description": "Run tests"}
+            )
+            assert del_resp["ok"] is True
+            task_id = del_resp["task_id"]
+
+            # 2. Report result
+            conn.send.reset_mock()
+            res_resp = await bridge._handle_task_result(
+                {"task_id": task_id, "session_id": "agent-b", "status": "completed", "result": "All passed"}
+            )
+
+        assert res_resp["ok"] is True
+        assert res_resp["task"]["status"] == "completed"
+        assert res_resp["task"]["result"] == "All passed"
+
+        # XMPP notification for task_result sent
+        conn.send.assert_called()
+        xmpp_body = conn.send.call_args[0][1]
+        payload = json.loads(xmpp_body)
+        assert payload["type"] == "task_result"
+        assert payload["status"] == "completed"
+        assert payload["to"] == "agent-a"  # delegator
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_task_result_not_found(self, MockXMPP, tmp_path):
+        """task_result for nonexistent task returns error."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        resp = await bridge._handle_task_result(
+            {"task_id": "nonexistent123", "status": "completed"}
+        )
+        assert resp["ok"] is False
+        assert "not found" in str(resp["error"]).lower()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_task_result_invalid_status(self, MockXMPP, tmp_path):
+        """task_result with invalid status returns error."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        resp = await bridge._handle_task_result(
+            {"task_id": "some_id", "status": "bogus"}
+        )
+        assert resp["ok"] is False
+        assert "invalid status" in str(resp["error"]).lower()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_list_tasks_via_socket(self, MockXMPP, tmp_path):
+        """list_tasks returns tasks created via delegate."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            await bridge._handle_delegate(
+                {"session_id": "agent-a", "to": "agent-b", "description": "Task 1"}
+            )
+            await bridge._handle_delegate(
+                {"session_id": "agent-b", "to": "agent-a", "description": "Task 2"}
+            )
+
+        # List all
+        resp = bridge._handle_list_tasks({})
+        assert resp["ok"] is True
+        assert len(resp["tasks"]) == 2
+
+        # Filter by session_id + role
+        resp = bridge._handle_list_tasks({"session_id": "agent-a", "role": "from"})
+        assert resp["ok"] is True
+        assert len(resp["tasks"]) == 1
+        assert resp["tasks"][0]["description"] == "Task 1"
+
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_delegate_with_context(self, MockXMPP, tmp_path):
+        """delegate with context stores it in the task."""
+        bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            resp = await bridge._handle_delegate(
+                {
+                    "session_id": "agent-a",
+                    "to": "agent-b",
+                    "description": "Deploy v2",
+                    "context": "Use the staging environment",
+                }
+            )
+
+        assert resp["ok"] is True
+        assert resp["task"]["context"] == "Use the staging environment"
         bridge.registry.close()
