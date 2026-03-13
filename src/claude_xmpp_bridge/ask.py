@@ -12,6 +12,8 @@ from .config import NotifyConfig
 from .xmpp import XMPPConnection
 
 DEFAULT_TIMEOUT = 300
+DEFAULT_CONNECTION_TIMEOUT = 30.0
+DEFAULT_DISCONNECT_GRACE = 1.0
 
 log = logging.getLogger(__name__)
 
@@ -19,7 +21,10 @@ log = logging.getLogger(__name__)
 async def send_and_wait(
     config: NotifyConfig,
     message: str,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: int | float = DEFAULT_TIMEOUT,
+    *,
+    connection_timeout: float = DEFAULT_CONNECTION_TIMEOUT,
+    disconnect_grace: float = DEFAULT_DISCONNECT_GRACE,
 ) -> str | None:
     """Send a message and wait for a reply from the recipient. Returns reply text or None on timeout."""
     reply_text: str | None = None
@@ -41,9 +46,12 @@ async def send_and_wait(
     try:
         conn.start()
         try:
-            await asyncio.wait_for(conn.connected.wait(), timeout=30)
+            await asyncio.wait_for(conn.connected.wait(), timeout=connection_timeout)
         except TimeoutError:
-            raise ConnectionError("XMPP connection timeout (30s) — server may be unavailable") from None
+            raise ConnectionError(
+                f"XMPP connection timeout ({connection_timeout}s)"
+                " — server may be unavailable"
+            ) from None
         if not conn.send(config.recipient, message):
             raise ConnectionError("XMPP send failed — not connected")
 
@@ -51,6 +59,7 @@ async def send_and_wait(
             await asyncio.wait_for(got_reply.wait(), timeout=timeout)
     finally:
         conn.disconnect()
-        await asyncio.sleep(1)
+        if disconnect_grace > 0:
+            await asyncio.sleep(disconnect_grace)
 
     return reply_text

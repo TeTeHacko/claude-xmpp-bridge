@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.19] - 2026-03-13
+
+### Changed
+- **`send_notification()` and `send_and_wait()` accept `connection_timeout` and
+  `disconnect_grace` keyword arguments** — defaults unchanged (30s / 1s), but tests
+  now pass `connection_timeout=0.1, disconnect_grace=0` to avoid the 30-second real
+  waits that made the test suite appear to hang.
+- Test suite completes in ~18s instead of 40s+.
+
 ## [0.8.18] - 2026-03-13
 
 ### Added

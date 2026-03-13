@@ -19,6 +19,10 @@ def _make_config() -> NotifyConfig:
     )
 
 
+# Keyword args to make tests fast (skip real 30s connection timeout & 1s grace sleep).
+_FAST = {"connection_timeout": 0.1, "disconnect_grace": 0}
+
+
 class TestSendNotification:
     """send_notification must connect, send, and disconnect."""
 
@@ -30,7 +34,7 @@ class TestSendNotification:
         conn.connected.set()
         MockXMPP.return_value = conn
 
-        await send_notification(config, "hello")
+        await send_notification(config, "hello", **_FAST)
 
         MockXMPP.assert_called_once_with("bot@example.com", "secret")
 
@@ -42,7 +46,7 @@ class TestSendNotification:
         conn.connected.set()
         MockXMPP.return_value = conn
 
-        await send_notification(config, "hello")
+        await send_notification(config, "hello", **_FAST)
 
         conn.start.assert_called_once()
 
@@ -61,7 +65,7 @@ class TestSendNotification:
             connected_event.set()
 
         asyncio.get_event_loop().create_task(set_later())
-        await send_notification(config, "hello")
+        await send_notification(config, "hello", **_FAST)
 
         # If we got here without hanging, connected.wait() was properly awaited
         conn.send.assert_called_once()
@@ -74,7 +78,7 @@ class TestSendNotification:
         conn.connected.set()
         MockXMPP.return_value = conn
 
-        await send_notification(config, "test message")
+        await send_notification(config, "test message", **_FAST)
 
         conn.send.assert_called_once_with("user@example.com", "test message")
 
@@ -86,7 +90,7 @@ class TestSendNotification:
         conn.connected.set()
         MockXMPP.return_value = conn
 
-        await send_notification(config, "hello")
+        await send_notification(config, "hello", **_FAST)
 
         conn.disconnect.assert_called_once()
 
@@ -108,7 +112,7 @@ class TestSendNotification:
         conn.disconnect.side_effect = lambda: call_order.append("disconnect")
         MockXMPP.return_value = conn
 
-        await send_notification(config, "hello")
+        await send_notification(config, "hello", **_FAST)
 
         assert call_order == ["start", "send", "disconnect"]
 
@@ -125,7 +129,7 @@ class TestConnectionTimeout:
         MockXMPP.return_value = conn
 
         with pytest.raises(ConnectionError, match="XMPP connection timeout"):
-            await send_notification(config, "hello")
+            await send_notification(config, "hello", **_FAST)
 
         conn.disconnect.assert_called_once()
 
@@ -137,7 +141,7 @@ class TestConnectionTimeout:
         MockXMPP.return_value = conn
 
         with pytest.raises(ConnectionError):
-            await send_notification(config, "hello")
+            await send_notification(config, "hello", **_FAST)
 
 
 class TestSendFailure:
@@ -153,6 +157,6 @@ class TestSendFailure:
         MockXMPP.return_value = conn
 
         with pytest.raises(ConnectionError, match="send failed"):
-            await send_notification(config, "hello")
+            await send_notification(config, "hello", **_FAST)
 
         conn.disconnect.assert_called_once()

@@ -20,6 +20,10 @@ def _make_config() -> NotifyConfig:
     )
 
 
+# Keyword args to make tests fast (skip real 30s connection timeout & 1s grace sleep).
+_FAST = {"connection_timeout": 0.1, "disconnect_grace": 0}
+
+
 class TestSendAndWaitWithReply:
     """send_and_wait must return the reply body when a message arrives."""
 
@@ -49,7 +53,7 @@ class TestSendAndWaitWithReply:
             await captured_callback(fake_msg)
 
         task = asyncio.create_task(simulate_reply())
-        result = await send_and_wait(config, "confirm?", timeout=5)
+        result = await send_and_wait(config, "confirm?", timeout=5, **_FAST)
         await task
 
         assert result == "yes"
@@ -78,7 +82,7 @@ class TestSendAndWaitWithReply:
             await captured_callback(fake_msg)
 
         task = asyncio.create_task(simulate_reply())
-        await send_and_wait(config, "hello?", timeout=5)
+        await send_and_wait(config, "hello?", timeout=5, **_FAST)
         await task
 
         conn.send.assert_called_once_with("user@example.com", "hello?")
@@ -108,7 +112,7 @@ class TestSendAndWaitWithReply:
             await captured_callback(fake_msg)
 
         task = asyncio.create_task(simulate_wrong_sender())
-        result = await send_and_wait(config, "hello?", timeout=0.2)
+        result = await send_and_wait(config, "hello?", timeout=0.2, **_FAST)
         await task
 
         assert result is None
@@ -137,7 +141,7 @@ class TestSendAndWaitWithReply:
             await captured_callback(fake_msg)
 
         task = asyncio.create_task(simulate_groupchat())
-        result = await send_and_wait(config, "hello?", timeout=0.2)
+        result = await send_and_wait(config, "hello?", timeout=0.2, **_FAST)
         await task
 
         assert result is None
@@ -166,7 +170,7 @@ class TestSendAndWaitWithReply:
             await captured_callback(fake_msg)
 
         task = asyncio.create_task(simulate_reply())
-        await send_and_wait(config, "hello?", timeout=5)
+        await send_and_wait(config, "hello?", timeout=5, **_FAST)
         await task
 
         conn.disconnect.assert_called_once()
@@ -185,7 +189,7 @@ class TestSendAndWaitTimeout:
         conn.on_message.side_effect = lambda cb: None  # Register but never call
         MockXMPP.return_value = conn
 
-        result = await send_and_wait(config, "hello?", timeout=0.1)
+        result = await send_and_wait(config, "hello?", timeout=0.1, **_FAST)
 
         assert result is None
 
@@ -199,7 +203,7 @@ class TestSendAndWaitTimeout:
         conn.on_message.side_effect = lambda cb: None
         MockXMPP.return_value = conn
 
-        await send_and_wait(config, "hello?", timeout=0.1)
+        await send_and_wait(config, "hello?", timeout=0.1, **_FAST)
 
         conn.disconnect.assert_called_once()
 
@@ -213,7 +217,7 @@ class TestSendAndWaitTimeout:
         conn.on_message.side_effect = lambda cb: None
         MockXMPP.return_value = conn
 
-        await send_and_wait(config, "are you there?", timeout=0.1)
+        await send_and_wait(config, "are you there?", timeout=0.1, **_FAST)
 
         conn.send.assert_called_once_with("user@example.com", "are you there?")
 
@@ -231,7 +235,7 @@ class TestConnectionTimeout:
         MockXMPP.return_value = conn
 
         with pytest.raises(ConnectionError, match="XMPP connection timeout"):
-            await send_and_wait(config, "hello?", timeout=5)
+            await send_and_wait(config, "hello?", timeout=5, **_FAST)
 
         conn.disconnect.assert_called_once()
 
@@ -250,6 +254,6 @@ class TestSendFailure:
         MockXMPP.return_value = conn
 
         with pytest.raises(ConnectionError, match="send failed"):
-            await send_and_wait(config, "hello?", timeout=5)
+            await send_and_wait(config, "hello?", timeout=5, **_FAST)
 
         conn.disconnect.assert_called_once()
