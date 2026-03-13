@@ -424,6 +424,7 @@ class TestPluginTitleFallback:
         assert body, "tool.execute.before handler not found in plugin"
         assert "scheduleTitle" not in body, "tool.execute.before must not schedule title updates"
         assert "applyTitleNow" not in body, "tool.execute.before must not update title directly"
+        assert "isIdle = false" in body, "tool.execute.before must clear idle flag before reporting running"
         assert 'reportState("running")' in body, "tool.execute.before must still report running state"
 
     def test_dispose_clears_pending_title_timer(self):

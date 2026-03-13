@@ -19,6 +19,7 @@ from claude_xmpp_bridge.setup import (
     PLUGIN_MODE_TITLE_ONLY,
     _ask_components,
     _confirm,
+    _confirm_replace_with_symlink,
     _find_hooks_dir,
     _find_opencode_dir,
     _install_symlink,
@@ -276,6 +277,26 @@ class TestStepHooks:
         assert ok is True
         assert not hooks_dir.exists()
 
+    def test_preserves_custom_symlink_when_replacement_declined(self, monkeypatch, tmp_path):
+        hooks_dir = tmp_path / "hooks"
+        hooks_dir.mkdir()
+        custom_src = tmp_path / "custom-title.sh"
+        custom_src.write_text("#!/bin/bash\n# custom")
+        dst = hooks_dir / "session-start-title.sh"
+        dst.symlink_to(custom_src.resolve())
+        settings_path = tmp_path / "settings.json"
+        monkeypatch.setattr(setup, "HOOKS_DIR", hooks_dir)
+        monkeypatch.setattr(setup, "CLAUDE_SETTINGS", settings_path)
+
+        answers = iter(["y", "n", "y"])
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+
+        ok = _step_hooks(yes_mode=False, with_bridge=False)
+
+        assert ok is True
+        assert dst.is_symlink()
+        assert dst.resolve() == custom_src.resolve()
+
 
 # ---------------------------------------------------------------------------
 # _step_switches
@@ -345,6 +366,23 @@ class TestStepSystemd:
 
         assert ok is True
         assert old_unit.is_symlink(), "plain file must be replaced with symlink on upgrade"
+
+    def test_preserves_custom_symlink_when_replacement_declined(self, monkeypatch, tmp_path):
+        systemd_dir = tmp_path / "systemd"
+        systemd_dir.mkdir(parents=True)
+        custom_unit = tmp_path / "custom.service"
+        custom_unit.write_text("[Unit]\nDescription=custom\n")
+        dst = systemd_dir / "claude-xmpp-bridge.service"
+        dst.symlink_to(custom_unit.resolve())
+        monkeypatch.setattr(setup, "SYSTEMD_DIR", systemd_dir)
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/systemctl")
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        ok = _step_systemd(yes_mode=False)
+
+        assert ok is True
+        assert dst.is_symlink()
+        assert dst.resolve() == custom_unit.resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +554,28 @@ class TestStepOpencode:
         assert ok is True
         assert not plugins_dir.exists()
 
+    def test_preserves_custom_symlink_when_replacement_declined(self, monkeypatch, tmp_path):
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir(parents=True)
+        custom_plugin = tmp_path / "custom.js"
+        custom_plugin.write_text("export default {}\n")
+        dst = plugins_dir / "xmpp-bridge.js"
+        dst.symlink_to(custom_plugin.resolve())
+        settings_path = tmp_path / "opencode.json"
+        legacy_plugin = tmp_path / "legacy" / "plugins" / "xmpp-bridge.js"
+        monkeypatch.setattr(setup, "OPENCODE_PLUGINS_DIR", plugins_dir)
+        monkeypatch.setattr(setup, "OPENCODE_SETTINGS", settings_path)
+        monkeypatch.setattr(setup, "LEGACY_OPENCODE_PLUGIN_DST", legacy_plugin)
+
+        answers = iter(["y", "n", "y"])
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+
+        ok = _step_opencode(yes_mode=False)
+
+        assert ok is True
+        assert dst.is_symlink()
+        assert dst.resolve() == custom_plugin.resolve()
+
     def test_skips_when_source_not_found(self, monkeypatch, tmp_path):
         monkeypatch.setattr(setup, "_find_opencode_dir", lambda: None)
         plugins_dir = tmp_path / "plugins"
@@ -613,6 +673,63 @@ class TestInstallSymlink:
         assert src.stat().st_mode & 0o100, "source must be made executable"
 
 
+class TestConfirmReplaceWithSymlink:
+    def test_allows_missing_destination(self, tmp_path):
+        src = tmp_path / "src"
+        src.write_text("x")
+        dst = tmp_path / "dst"
+
+        assert _confirm_replace_with_symlink(src, dst, prompt="Replace?", yes_mode=False, upgrade=False) is True
+
+    def test_allows_matching_symlink_without_prompt(self, monkeypatch, tmp_path):
+        src = tmp_path / "src"
+        src.write_text("x")
+        dst = tmp_path / "dst"
+        dst.symlink_to(src.resolve())
+        called = False
+
+        def fake_confirm(*args, **kwargs):
+            nonlocal called
+            called = True
+            return False
+
+        monkeypatch.setattr(setup, "_confirm", fake_confirm)
+
+        assert _confirm_replace_with_symlink(src, dst, prompt="Replace?", yes_mode=False, upgrade=False) is True
+        assert called is False
+
+    def test_prompts_for_wrong_symlink(self, monkeypatch, tmp_path):
+        src = tmp_path / "src"
+        src.write_text("x")
+        other = tmp_path / "other"
+        other.write_text("y")
+        dst = tmp_path / "dst"
+        dst.symlink_to(other.resolve())
+
+        monkeypatch.setattr(setup, "_confirm", lambda *args, **kwargs: False)
+
+        assert _confirm_replace_with_symlink(src, dst, prompt="Replace?", yes_mode=False, upgrade=False) is False
+
+    def test_yes_mode_skips_prompt_for_wrong_symlink(self, monkeypatch, tmp_path):
+        src = tmp_path / "src"
+        src.write_text("x")
+        other = tmp_path / "other"
+        other.write_text("y")
+        dst = tmp_path / "dst"
+        dst.symlink_to(other.resolve())
+        called = False
+
+        def fake_confirm(*args, **kwargs):
+            nonlocal called
+            called = True
+            return False
+
+        monkeypatch.setattr(setup, "_confirm", fake_confirm)
+
+        assert _confirm_replace_with_symlink(src, dst, prompt="Replace?", yes_mode=True, upgrade=False) is True
+        assert called is False
+
+
 # ---------------------------------------------------------------------------
 # _step_sandbox
 # ---------------------------------------------------------------------------
@@ -654,6 +771,22 @@ class TestStepSandbox:
 
         assert ok is True
         assert sandbox_dst.is_symlink(), "plain file must be replaced with symlink on upgrade"
+
+    def test_preserves_custom_symlink_when_replacement_declined(self, monkeypatch, tmp_path):
+        sandbox_dst = tmp_path / "sandbox"
+        custom_sandbox = tmp_path / "custom-sandbox"
+        custom_sandbox.write_text("#!/bin/bash\n")
+        sandbox_dst.symlink_to(custom_sandbox.resolve())
+        completion_dst = tmp_path / "completion" / "sandbox"
+        monkeypatch.setattr(setup, "SANDBOX_DST", sandbox_dst)
+        monkeypatch.setattr(setup, "SANDBOX_COMPLETION_DST", completion_dst)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        ok = _step_sandbox(yes_mode=False)
+
+        assert ok is True
+        assert sandbox_dst.is_symlink()
+        assert sandbox_dst.resolve() == custom_sandbox.resolve()
 
 
 # ---------------------------------------------------------------------------

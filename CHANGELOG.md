@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.16] - 2026-03-12
+
+### Fixed
+- **OpenCode plugin no longer reports active sessions as idle during tool runs** —
+  `tool.execute.before` now clears the internal `isIdle` flag before sending
+  `state=running`, so periodic heartbeats and `get_context` stay consistent while
+  the agent is actively working.
+
+### Changed
+- **Setup wizard now protects user-managed custom symlinks on fresh installs** —
+  hooks, OpenCode plugin, sandbox targets, bash completion, and systemd unit now
+  prompt before replacing any existing non-canonical symlink, not just plain files.
+
 ## [0.8.15] - 2026-03-12
 
 ### Changed

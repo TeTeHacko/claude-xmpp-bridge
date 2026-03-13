@@ -225,6 +225,29 @@ def _install_symlink(src: Path, dst: Path, *, make_executable: bool = False) -> 
     return True
 
 
+def _confirm_replace_with_symlink(
+    src: Path,
+    dst: Path,
+    *,
+    prompt: str,
+    yes_mode: bool,
+    upgrade: bool,
+) -> bool:
+    """Return True when it is OK to replace an existing non-canonical target.
+
+    On fresh installs we keep user-managed files and symlinks safe by asking
+    before replacing any existing destination that does not already match the
+    canonical source. In ``--yes`` and upgrade mode we proceed automatically.
+    """
+    if upgrade or yes_mode:
+        return True
+    if not (dst.exists() or dst.is_symlink()):
+        return True
+    if not _needs_update(src, dst):
+        return True
+    return _confirm(prompt, default=True)
+
+
 def _ask_components(yes_mode: bool, default_all: bool = True) -> set[str]:
     """Interactively ask which components to select.
 
@@ -398,12 +421,12 @@ def _step_hooks(yes_mode: bool, upgrade: bool = False, with_bridge: bool = True)
         dst = HOOKS_DIR / dst_name
         if not src.is_file():
             continue
-        if (
-            not upgrade
-            and dst.exists()
-            and not dst.is_symlink()
-            and not yes_mode
-            and not _confirm(f"    Replace {dst.name} with symlink?", default=True)
+        if not _confirm_replace_with_symlink(
+            src,
+            dst,
+            prompt=f"    Replace {dst.name} with symlink?",
+            yes_mode=yes_mode,
+            upgrade=upgrade,
         ):
             continue
         changed = _install_symlink(src, dst, make_executable=True)
@@ -505,12 +528,12 @@ def _step_opencode(yes_mode: bool, upgrade: bool = False, plugin_mode: str = PLU
     canonical_src = _resolve_plugin_source(opencode_source)
     dst = OPENCODE_PLUGINS_DIR / "xmpp-bridge.js"
 
-    if (
-        not upgrade
-        and dst.exists()
-        and not dst.is_symlink()
-        and not yes_mode
-        and not _confirm("    Replace xmpp-bridge.js with symlink?", default=True)
+    if not _confirm_replace_with_symlink(
+        Path(canonical_src),
+        dst,
+        prompt="    Replace xmpp-bridge.js with symlink?",
+        yes_mode=yes_mode,
+        upgrade=upgrade,
     ):
         pass  # user declined
     else:
@@ -575,12 +598,12 @@ def _step_systemd(yes_mode: bool, upgrade: bool = False) -> bool:
     SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
     dst = SYSTEMD_DIR / "claude-xmpp-bridge.service"
 
-    if (
-        not upgrade
-        and dst.exists()
-        and not dst.is_symlink()
-        and not yes_mode
-        and not _confirm(f"    Replace {dst.name} with symlink?", default=True)
+    if not _confirm_replace_with_symlink(
+        unit_src,
+        dst,
+        prompt=f"    Replace {dst.name} with symlink?",
+        yes_mode=yes_mode,
+        upgrade=upgrade,
     ):
         return True
 
@@ -605,12 +628,12 @@ def _step_sandbox(yes_mode: bool, upgrade: bool = False) -> bool:
         print("  Warning: sandbox script source not found, skipping")
         return True
 
-    if (
-        not upgrade
-        and SANDBOX_DST.exists()
-        and not SANDBOX_DST.is_symlink()
-        and not yes_mode
-        and not _confirm("  Replace sandbox script with symlink?", default=True)
+    if not _confirm_replace_with_symlink(
+        sandbox_src,
+        SANDBOX_DST,
+        prompt="  Replace sandbox script with symlink?",
+        yes_mode=yes_mode,
+        upgrade=upgrade,
     ):
         pass  # user declined
     else:
@@ -622,7 +645,13 @@ def _step_sandbox(yes_mode: bool, upgrade: bool = False) -> bool:
 
     # Install bash completion
     comp_src = _find_sandbox_completion()
-    if comp_src:
+    if comp_src and _confirm_replace_with_symlink(
+        comp_src,
+        SANDBOX_COMPLETION_DST,
+        prompt="  Replace bash completion with symlink?",
+        yes_mode=yes_mode,
+        upgrade=upgrade,
+    ):
         changed = _install_symlink(comp_src, SANDBOX_COMPLETION_DST)
         if changed:
             print(f"  bash completion: {'updated' if upgrade else 'installed'} (symlink → {comp_src.resolve()})")

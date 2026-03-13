@@ -47,7 +47,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.15"
+  const PLUGIN_VERSION = "0.8.16"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -814,6 +814,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     // -------------------------------------------------------------------------
     "tool.execute.before": async (_input, _output) => {
       try {
+        isIdle = false
         await reportState("running")
       } catch (err) {
         await logCaught("tool.execute.before", err, "tool-execute-before-error")
