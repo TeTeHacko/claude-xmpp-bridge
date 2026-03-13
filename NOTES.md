@@ -39,14 +39,15 @@
 ### Návrh #1: Perzistentní inbox v SQLite ✅ implementováno v 0.7.6
 Inbox přesunut z `asyncio.Queue` do SQLite tabulky `inbox` v `bridge.db`. Zprávy přežijí restart bridge i re-registraci session.
 
-### Návrh #2: Strukturovaný protokol zpráv (JSON envelope)
+### Návrh #2: Strukturovaný protokol zpráv (JSON envelope) ✅ implementováno postupně v 0.8.18+
 **Problém:** Agent nerozliší strojovou zprávu od lidského vstupu — vše je prostý text.
 **Řešení:** Volitelný JSON wrapper:
 ```json
 {"from": "ses_..._w5", "type": "task|ping|result", "payload": "...", "reply_to": "ses_..._w6"}
 ```
-**Status:** Nice-to-have, nezávisí na bridge změně, agenti si mohou sami dohodnout formát.
-**Priorita:** Nízká.
+**Stav:** Prakticky splněno. Bridge-generated inter-agent zprávy už mají JSON envelope přes `format_generated_agent_message()` / `parse_generated_agent_message()` a `receive_messages` od 0.8.18 vrací strukturované `dict` s metadaty (`text`, `source_type`, `from_session`, `message_id`, `ts`, `type`).
+**Poznámka:** Původně navržené explicitní typy `ping`/`ack` se neukázaly jako nutné; současný envelope + task delegation protokol pokrývá reálné potřeby.
+**Priorita:** Done.
 
 ### Návrh #3: Polling + nudge pattern ✅ implementováno v 0.7.7
 Bridge `send_message(nudge=True)` uloží zprávu do SQLite inbox a pošle jen CR. Agent si zprávu přečte sám přes `receive_messages` MCP tool při `session.idle` — zpráva nikdy nepřeruší agenta při práci.
@@ -82,4 +83,4 @@ Bridge `send_message(nudge=True)` uloží zprávu do SQLite inbox a pošle jen C
 
 - **MCP reconnect po restartu bridge:** OpenCode ztratí `xmpp-bridge_*` MCP nástroje po restartu bridge service. Je potřeba buď hot-reload bez restartu, nebo OpenCode MCP reconnect mechanismus.
 - **screen relay spolehlivost:** `at N# stuff` je synchronní (exit 0 = success), ale nezaručuje zpracování pokud readline není aktivní. To je systémové omezení GNU Screen — řeší nudge pattern.
-- **pollInbox() HTTP overhead:** Plugin vytváří nové HTTP spojení pro každý poll (initialize + tools/call). Bylo by efektivnější persistent SSE spojení, ale to vyžaduje změny v MCP server logice.
+- **pollInbox() HTTP overhead:** Od 0.8.20 plugin cachuje `mcp-session-id`, takže běžný poll dělá už jen jeden `tools/call` request místo dvojice `initialize` + `tools/call`. Persistent SSE spojení by overhead snížilo ještě víc, ale vyžadovalo by změny v MCP server logice.

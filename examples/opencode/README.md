@@ -192,6 +192,10 @@ The plugin polls the MCP server (`http://127.0.0.1:7878`) for messages sent by o
 - Immediately on each `session.idle` event
 - Every 30 s while the session is idle
 
+The plugin caches the active MCP `mcp-session-id` between polls, so steady-state
+polling usually sends only a single `tools/call` request. It falls back to a fresh
+`initialize` only after bridge unavailability or MCP request failure.
+
 If the bridge/MCP server is unavailable, the plugin enters a quiet degraded mode:
 
 - bridge calls are suppressed during cooldown instead of retrying on every idle event

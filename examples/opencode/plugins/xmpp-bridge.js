@@ -38,6 +38,7 @@
  * MCP inbox polling:
  *   - Při session.idle: okamžitý poll
  *   - Každých 30 s (IDLE_POLL_INTERVAL_MS): periodický poll, pouze pokud je agent idle.
+ *   - MCP session ID se cachuje mezi polly; po výpadku bridge se cache invaliduje.
  *
  * Zapínání/vypínání:
  *   touch ~/.config/xmpp-notify/notify-enabled   # XMPP notifikace při session.idle
@@ -47,7 +48,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.19"
+  const PLUGIN_VERSION = "0.8.20"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -229,6 +230,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   let recoveryTimer = null
   let polling = false  // guard against concurrent pollInbox calls
   let bridgeUnavailableUntil = 0
+  let cachedMcpSessionId = null
   let desiredBridgeSessionID = null
   let desiredProjectDir = directory
 
@@ -348,6 +350,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
   const markBridgeUnavailable = async (reason) => {
     bridgeUnavailableUntil = Date.now() + BRIDGE_RETRY_MS
+    cachedMcpSessionId = null
     await warn(
       `bridge unavailable (${reason}); suppressing bridge calls for ${BRIDGE_RETRY_MS} ms`,
       `bridge-unavailable:${reason}`
@@ -418,24 +421,28 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // Step 1: initialize — get mcp-session-id
-      const initRes = await fetch("http://127.0.0.1:7878/mcp", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
-        body: JSON.stringify({
-          jsonrpc: "2.0", id: 1, method: "initialize",
-          params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "opencode-plugin", version: "1.0" } },
-        }),
-      }).catch(async (e) => {
-        await markBridgeUnavailable("mcp-init")
-        await errlog("MCP init fetch error: " + e, "mcp-init-error")
-        return null
-      })
-
-      const mcpSessionId = initRes?.headers?.get("mcp-session-id")
+      let mcpSessionId = cachedMcpSessionId
       if (!mcpSessionId) {
-        await markBridgeUnavailable("mcp-init-no-session")
-        return
+        // Step 1: initialize — get mcp-session-id
+        const initRes = await fetch("http://127.0.0.1:7878/mcp", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1, method: "initialize",
+            params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "opencode-plugin", version: "1.0" } },
+          }),
+        }).catch(async (e) => {
+          await markBridgeUnavailable("mcp-init")
+          await errlog("MCP init fetch error: " + e, "mcp-init-error")
+          return null
+        })
+
+        mcpSessionId = initRes?.headers?.get("mcp-session-id")
+        if (!mcpSessionId) {
+          await markBridgeUnavailable("mcp-init-no-session")
+          return
+        }
+        cachedMcpSessionId = mcpSessionId
       }
 
       // Step 2: tools/call with session header
@@ -456,13 +463,21 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           },
         }),
       }).catch(async (e) => {
+        cachedMcpSessionId = null
         await markBridgeUnavailable("mcp-tools-call")
         await errlog("MCP tools/call fetch error: " + e, "mcp-tools-call-error")
         return null
       })
 
       if (!mcpRes) return
-      if (mcpRes && mcpRes.ok) {
+      if (!mcpRes.ok) {
+        cachedMcpSessionId = null
+        await markBridgeUnavailable("mcp-tools-call-status")
+        await errlog("MCP tools/call HTTP status: " + mcpRes.status, "mcp-tools-call-status")
+        return
+      }
+
+      if (mcpRes.ok) {
         const text = await mcpRes.text().catch(() => null)
         const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
         const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null

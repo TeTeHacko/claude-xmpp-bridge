@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.20] - 2026-03-13
+
+### Changed
+- **OpenCode plugin caches the MCP `mcp-session-id` between inbox polls** — `pollInbox()` now reuses the current MCP streamable-HTTP session and only falls back to `initialize` after bridge unavailability or MCP request failure, cutting the steady-state poll overhead from two HTTP requests to one.
+- **Structured JSON envelope proposal is now considered complete** — `NOTES.md` marks the old protocol proposal as implemented in practice via bridge-generated JSON envelopes and structured `receive_messages` metadata.
+
 ## [0.8.19] - 2026-03-13
 
 ### Changed
