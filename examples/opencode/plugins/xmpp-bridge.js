@@ -6,6 +6,7 @@
  *  - session.created          → registrace nové top-level session (při /new)
  *  - session.deleted          → odhlásí session z bridge
  *  - session.idle             → XMPP notifikace s poslední odpovědí + MCP inbox poll
+ *                               + detekce question (🔴 pokud agent čeká na odpověď)
  *  - session.status (busy)    → model začal generovat (stav 🔵, agent se nemění)
  *  - message.updated          → detekce aktivního agenta (pole info.agent)
  *  - tool.execute.before      → report state=running do bridge (bez title update)
@@ -29,9 +30,9 @@
  *     export BRIDGE_AGENT_LOCAL=🩵
  *
  *   Stav (pravý kruh — lifecycle agenta):
- *     🟢 idle        — čeká na vstup
+ *     🟢 idle        — čeká na vstup (dokončil úkol)
  *     🔵 running     — model generuje výstup nebo pokračuje po permission
- *     🔴 interaction — permission dialog otevřen v TUI
+ *     🔴 interaction — permission dialog nebo otázka agenta (čeká na odpověď)
  *
  *   Příklady: ⚪🟢 projekt  |  🟠🔵 projekt  |  🔵🔴 projekt
  *
@@ -48,7 +49,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.20"
+  const PLUGIN_VERSION = "0.8.21"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -951,10 +952,11 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- SESSION IDLE: semafor 🟢 + XMPP notifikace + MCP inbox poll ---
+      // --- SESSION IDLE: semafor 🟢/🔴 + XMPP notifikace + MCP inbox poll ---
         if (event.type === "session.idle") {
           isIdle = true
-          // Titulek: zachovat agent ikonu (ukazuje posledního aktivního agenta) + 🟢
+          // Výchozí titulek: 🟢 (idle). Přepíše se na 🔴 pokud agent čeká na odpověď
+          // na otázku (question part v poslední assistant zprávě).
           scheduleTitle(buildTitle("🟢"), buildAscii("AI.", projectName))
           if (bridgeDisabled) return
           const stateFailed = await reportState("idle")
@@ -988,6 +990,18 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           .reverse()
           .find(m => m.info.role === "assistant")
         if (!lastAssistant) return
+
+        // --- Detekce question: pokud agent čeká na odpověď, přepnout na 🔴 ---
+        // OpenCode Question tool generuje part s type "question" v assistant zprávě.
+        // Detekujeme i typ "ask" pro případ budoucích změn v OpenCode SDK.
+        const hasQuestion = lastAssistant.parts.some(
+          p => p.type === "question" || p.type === "ask"
+        )
+        if (hasQuestion) {
+          scheduleTitle(buildTitle("🔴"), buildAscii("AI?", projectName), { immediate: true })
+          await reportState("interaction")
+          await dbg("question detected in last assistant message — showing 🔴")
+        }
 
         const textPart = lastAssistant.parts.find(p => p.type === "text")
         if (!textPart) return
