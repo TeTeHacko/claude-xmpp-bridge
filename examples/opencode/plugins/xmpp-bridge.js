@@ -17,17 +17,23 @@
  * Titulky oken — semafor: {agentKolečko}{stavKruh} projekt
  *
  *   Agent (levý symbol — barevné kolečko odpovídající barvě agenta v OpenCode TUI):
- *     ⚪ neznámý    — před první odpovědí nebo po /new
- *     🔵 build      — výchozí agent (secondary = modrá)
- *     🟣 plan       — plánovací agent (accent = fialová)
- *     🟠 coder      — coding agent (primary = oranžová)
- *     🩵 local      — lokální agent (info = tyrkysová)
+ *     ⚪ neznámý      — před první odpovědí nebo po /new
+ *     🟢 coder        — coding agent (success = zelená)
+ *     🔴 architect    — orchestrátor (error = červená)
+ *     🟠 monitor      — monitoring (custom #ff6b35 = oranžová)
+ *     🩵 home         — Home Assistant (custom #03a9f4 = světle modrá)
+ *     🔵 google       — Google Workspace (custom #4285f4 = modrá)
+ *     🟡 reviewer     — code review (warning = žlutá)
+ *     ⚪ researcher   — research (secondary = šedá)
  *
  *   Ikony jsou konfigurovatelné přes env proměnné BRIDGE_AGENT_<JMÉNO> (uppercase):
- *     export BRIDGE_AGENT_BUILD=🔵
- *     export BRIDGE_AGENT_PLAN=🟣
- *     export BRIDGE_AGENT_CODER=🟠
- *     export BRIDGE_AGENT_LOCAL=🩵
+ *     export BRIDGE_AGENT_CODER=🟢
+ *     export BRIDGE_AGENT_ARCHITECT=🔴
+ *     export BRIDGE_AGENT_MONITOR=🟠
+ *     export BRIDGE_AGENT_HOME=🩵
+ *     export BRIDGE_AGENT_GOOGLE=🔵
+ *     export BRIDGE_AGENT_REVIEWER=🟡
+ *     export BRIDGE_AGENT_RESEARCHER=⚪
  *
  *   Stav (pravý kruh — lifecycle agenta):
  *     🟢 idle        — čeká na vstup (dokončil úkol)
@@ -49,7 +55,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.21"
+  const PLUGIN_VERSION = "0.8.22"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -242,27 +248,35 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // ---------------------------------------------------------------------------
   let messageBuffer = []
 
-  // ---------------------------------------------------------------------------
-  // Agent ikony — barevné kolečko odpovídající barvě agenta v OpenCode TUI.
-  //
-  // Výchozí mapování (agent name → emoji):
-  //   build → 🔵  (secondary = modrá,    index 0 v paletě)
-  //   plan  → 🟣  (accent    = fialová,  index 1)
-  //   coder → 🟠  (primary   = oranžová, color: "primary" v opencode.json)
-  //   local → 🩵  (info      = tyrkysová, color: "info" v opencode.json)
-  //
-  // Přizpůsobení přes env proměnné BRIDGE_AGENT_<JMÉNO> (uppercase):
-  //   export BRIDGE_AGENT_BUILD=🔵
-  //   export BRIDGE_AGENT_PLAN=🟣
-  //   export BRIDGE_AGENT_CODER=🟠
-  //   export BRIDGE_AGENT_LOCAL=🩵
-  // ---------------------------------------------------------------------------
-  const DEFAULT_AGENT_ICONS = {
-    build: "🔵",
-    plan:  "🟣",
-    coder: "🟠",
-    local: "🩵",
-  }
+   // Agent ikony — barevné kolečko odpovídající barvě agenta v OpenCode TUI.
+   //
+   // Výchozí mapování (agent name → emoji):
+   //   coder      → 🟢  (success    = zelená)
+   //   architect  → 🔴  (error      = červená)
+   //   monitor    → 🟠  (#ff6b35    = oranžová)
+   //   home       → 🩵  (#03a9f4    = světle modrá)
+   //   google     → 🔵  (#4285f4    = modrá)
+   //   reviewer   → 🟡  (warning    = žlutá)
+   //   researcher → ⚪  (secondary  = šedá)
+   //
+   // Přizpůsobení přes env proměnné BRIDGE_AGENT_<JMÉNO> (uppercase):
+   //   export BRIDGE_AGENT_CODER=🟢
+   //   export BRIDGE_AGENT_ARCHITECT=🔴
+   //   export BRIDGE_AGENT_MONITOR=🟠
+   //   export BRIDGE_AGENT_HOME=🩵
+   //   export BRIDGE_AGENT_GOOGLE=🔵
+   //   export BRIDGE_AGENT_REVIEWER=🟡
+   //   export BRIDGE_AGENT_RESEARCHER=⚪
+   // ---------------------------------------------------------------------------
+   const DEFAULT_AGENT_ICONS = {
+     coder:      "🟢",
+     architect:  "🔴",
+     monitor:    "🟠",
+     home:       "🩵",
+     google:     "🔵",
+     reviewer:   "🟡",
+     researcher: "⚪",
+   }
 
   // Vrátí ikonu pro daného agenta — nejdřív env, pak default, pak ⚪.
   const agentIcon = (name) => {

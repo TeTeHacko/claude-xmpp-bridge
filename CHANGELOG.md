@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.22] - 2026-03-21
+
+### Changed
+- **OpenCode plugin: update agent icons to match current agent setup** — replaced obsolete agent icons (build/plan/local) with current agents (coder 🟢, architect 🔴, monitor 🟠, home 🩵, google 🔵, reviewer 🟡, researcher ⚪) matching their TUI color configuration.
+
 ## [0.8.21] - 2026-03-16
 
 ### Added
