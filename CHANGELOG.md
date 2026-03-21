@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.25] - 2026-03-21
+
+### Fixed
+- **OpenCode plugin: report `asking` state to bridge** — plugin now calls `reportState("asking")` on `permission.asked` event and `reportState("running")` on `permission.replied`. This enables the asking guard (added in v0.8.24) to actually detect when an agent is waiting for a permission prompt and fall back to inbox delivery instead of screen inject.
+
 ## [0.8.24] - 2026-03-21
 
 ### Added

@@ -57,7 +57,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-   const PLUGIN_VERSION = "0.8.24"
+   const PLUGIN_VERSION = "0.8.25"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -1055,14 +1055,17 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      // --- PERMISSION ASKED: semafor 🔴 + informativní XMPP notifikace ---
-      // OpenCode nečeká na výsledek event handlerů — TUI dialog nelze zavřít
-      // z pluginu přes permission.asked event. Posíláme tedy jen notifikaci
-      // co se chystá spustit; potvrzení musí jít přes TUI.
-        if (event.type === "permission.asked") {
-          // Titulek: zachovat agent ikonu, přepnout stav na 🔴
-          scheduleTitle(buildTitle("🔴"), buildAscii("AI!", projectName), { immediate: true })
-          if (bridgeDisabled) return
+      // --- PERMISSION ASKED: semafor 🔴 + report asking state + XMPP notifikace ---
+       // OpenCode nečeká na výsledek event handlerů — TUI dialog nelze zavřít
+       // z pluginu přes permission.asked event. Posíláme tedy jen notifikaci
+       // co se chystá spustit; potvrzení musí jít přes TUI.
+         if (event.type === "permission.asked") {
+           // Titulek: zachovat agent ikonu, přepnout stav na 🔴
+           scheduleTitle(buildTitle("🔴"), buildAscii("AI!", projectName), { immediate: true })
+           // Report asking state — bridge asking guard fallbackne na inbox místo screen inject
+           isIdle = false
+           await reportState("asking")
+           if (bridgeDisabled) return
 
           const askEnabled =
             await $`test -f ${process.env.HOME}/.config/xmpp-notify/ask-enabled`.nothrow()
@@ -1108,10 +1111,12 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       }
 
       // --- PERMISSION REPLIED: obnovit 🔵 (dialog uzavřen, model pokračuje) ---
-      if (event.type === "permission.replied") {
-        scheduleTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
-        return
-      }
+       if (event.type === "permission.replied") {
+         scheduleTitle(buildTitle("🔵"), buildAscii("AI*", projectName))
+         // Report running state — agent pokračuje po permission dialogu
+         await reportState("running")
+         return
+       }
       } catch (err) {
         await logCaught(`event:${event.type}`, err, `event-error:${event.type}`)
       }
