@@ -58,6 +58,8 @@ MCPContext = Context[Any, Any, Any]
 
 log = logging.getLogger(__name__)
 
+MAX_MESSAGE_SIZE = 1_000_000  # max length of outgoing relay/broadcast/delegate message (1 MB)
+
 
 class _BearerAuthMiddleware:
     """ASGI middleware that requires ``Authorization: Bearer <token>`` on every request.
@@ -875,6 +877,8 @@ class BridgeMCPServer:
             return bridge.messages.mcp_send_missing_to
         if not message:
             return bridge.messages.mcp_send_missing_message
+        if len(message) > MAX_MESSAGE_SIZE:
+            return f"Error: message too large ({len(message)} chars, max {MAX_MESSAGE_SIZE})"
 
         sender_session_id = self._resolve_sender_session_id(sender_session_id, client_id, request_info)
         if not sender_session_id and request_info:
@@ -1070,6 +1074,8 @@ class BridgeMCPServer:
             return "Error: bridge not initialised"
         if not message:
             return bridge.messages.broadcast_no_message
+        if len(message) > MAX_MESSAGE_SIZE:
+            return f"Error: message too large ({len(message)} chars, max {MAX_MESSAGE_SIZE})"
 
         sender_session_id = self._resolve_sender_session_id(sender_session_id, client_id, request_info)
         if not sender_session_id and request_info:
@@ -1539,6 +1545,8 @@ class BridgeMCPServer:
             return {"ok": False, "error": "missing target session_id (to)"}
         if not description:
             return {"ok": False, "error": "missing task description"}
+        if len(description) > MAX_MESSAGE_SIZE:
+            return {"ok": False, "error": f"description too large ({len(description)} chars, max {MAX_MESSAGE_SIZE})"}
 
         sender_session_id = self._resolve_sender_session_id(sender_session_id, client_id, request_info)
 

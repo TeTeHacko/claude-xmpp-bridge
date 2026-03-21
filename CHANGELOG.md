@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.12] - 2026-03-22
+
+### Fixed
+- **README documentation update** — `/list` icons updated from stale `⏸`/`▶` to current `🟢`/`🔵`. OpenCode README agent icons table updated from old agents (build/plan/coder/local) to current set (coder/architect/monitor/home/google/reviewer/researcher/cml). Replaced outdated `prompt_async` HTTP API references with current TUI `appendPrompt`+`submitPrompt` mechanism.
+- **Ask queue safety** — `_ask_queue.remove()` in `bridge.py` now uses `contextlib.suppress(ValueError)` to prevent crash if pending item was already removed by another coroutine.
+- **`_optional_int` input validation** — `_optional_int()` now raises `ValueError` with a descriptive message for non-integer values. All 4 call sites (replace_todos, add_todo, update_todo, remove_todo) catch the error and return a proper `{"error": ...}` response instead of causing an unhandled exception.
+- **Message size limit** — New `MAX_MESSAGE_SIZE` (1 MB) enforced on relay, broadcast, and delegate commands in both socket and MCP paths. Prevents memory/performance issues from oversized messages.
+
 ## [0.9.11] - 2026-03-22
 
 ### Added

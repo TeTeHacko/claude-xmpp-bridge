@@ -233,7 +233,7 @@ Send these from your Jabber client to the bot:
 
 | Command | Description |
 |---------|-------------|
-| `/list` or `/l` | List active sessions with state (`⏸` idle / `▶` running) and plugin version |
+| `/list` or `/l` | List active sessions with state (`🟢` idle / `🔵` running) and plugin version |
 | `/N message` | Send message to session #N |
 | `/help` | Show help |
 | _plain text_ | Send to last active session |

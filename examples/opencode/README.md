@@ -127,22 +127,30 @@ not present or not executable.
 
 Each circle colour matches the agent's colour in the OpenCode TUI:
 
-| Icon | Agent | TUI colour | When |
-|------|-------|-----------|------|
-| `⚪` | unknown | — | startup, after `/new`, before first response |
-| `🔵` | `build` | secondary (blue) | default built-in agent |
-| `🟣` | `plan` | accent (purple) | planning/read-only agent |
-| `🟠` | `coder` | primary (orange) | custom coding agent |
-| `🩵` | `local` | info (cyan) | custom local Ollama agent |
+| Icon | Agent | When |
+|------|-------|------|
+| `⚪` | unknown | startup, after `/new`, before first response |
+| `🟢` | `coder` | coding agent |
+| `🔴` | `architect` | architecture/planning agent |
+| `🟠` | `monitor` | monitoring agent |
+| `🩵` | `home` | home automation agent |
+| `🔵` | `google` | Google Workspace agent |
+| `🟡` | `reviewer` | code review agent |
+| `⚪` | `researcher` | research agent |
+| `🧠` | `cml` | CML orchestrator agent |
 
 Agent is detected from `message.updated` events — the only reliable server-side signal (Tab-switching is client-side only, with no server event).
 
 Icons are configurable via environment variables `BRIDGE_AGENT_<NAME>` (uppercase agent name):
 ```bash
-export BRIDGE_AGENT_BUILD=🔵
-export BRIDGE_AGENT_PLAN=🟣
-export BRIDGE_AGENT_CODER=🟠
-export BRIDGE_AGENT_LOCAL=🩵
+export BRIDGE_AGENT_CODER=🟢
+export BRIDGE_AGENT_ARCHITECT=🔴
+export BRIDGE_AGENT_MONITOR=🟠
+export BRIDGE_AGENT_HOME=🩵
+export BRIDGE_AGENT_GOOGLE=🔵
+export BRIDGE_AGENT_REVIEWER=🟡
+export BRIDGE_AGENT_RESEARCHER=⚪
+export BRIDGE_AGENT_CML=🧠
 ```
 
 ### State circles
@@ -157,9 +165,9 @@ export BRIDGE_AGENT_LOCAL=🩵
 
 ```
 ⚪🟢 my-project    ← idle, agent not yet known (just started or /new)
-🟠🔵 my-project    ← coder agent running
-🔵🟢 my-project    ← build agent idle
-🟣🔴 my-project    ← plan agent, permission required
+🟢🔵 my-project    ← coder agent running
+🟠🟢 my-project    ← monitor agent idle
+🔴🔴 my-project    ← architect agent, permission required
 ```
 
 ## Agent State and Plugin Build
@@ -173,8 +181,8 @@ This information appears in `/list` XMPP output as icons before the backend brac
 
 ```
 Sessions:
-  /1  🧠🟠⏸  [screen #2]  @abc1234  ~/projects/my-app  *
-  /2  🧠🔵▶  [screen #4]  @abc1234  ~/projects/other
+  /1  🧠🟢🟢  [screen #2]  @abc1234  ~/projects/my-app  *
+  /2  🧠🔵🔵  [screen #4]  @abc1234  ~/projects/other
 
 * = active session
 ```
@@ -189,12 +197,12 @@ Session context exposed through MCP now also includes `todos_version`, `todo_cou
 
 The plugin uses push-based delivery for inter-agent messages. On each
 `session.idle` event, it drains the MCP inbox and injects **all** pending
-messages at once via the OpenCode HTTP API (`POST /session/{id}/prompt_async`).
+messages at once via the OpenCode TUI SDK (`appendPrompt` + `submitPrompt`).
 
 This replaces the previous rawRelay (screen stuff) architecture:
 - No messageBuffer — all messages concatenated into one prompt
-- No screen stuff relay — uses native OpenCode HTTP API
-- No 1.5s idle delay — prompt_async is fire-and-forget
+- No screen stuff relay — uses native OpenCode TUI injection
+- No 1.5s idle delay — TUI submit is fire-and-forget
 - Works without GNU Screen (tmux, bare terminal)
 - Fallback polling (5s, configurable via `XMPP_BRIDGE_IDLE_POLL_MS`) for idle agents
   on empty prompt where CR nudge is a no-op
@@ -260,8 +268,8 @@ In `/list` output, OpenCode sessions are distinguished by the `🧠` prefix (Cla
 
 ```
 Sessions:
-  /1  ⚡⏸    [screen #0]  ~/projects/my-app  *    ← Claude Code
-  /2  🧠🟠⏸  [screen #2]  ~/projects/my-app       ← OpenCode (coder agent)
+  /1  ⚡🟢    [screen #0]  ~/projects/my-app  *    ← Claude Code
+  /2  🧠🟢🟢  [screen #2]  ~/projects/my-app       ← OpenCode (coder agent, idle)
 
 * = active session
 ```

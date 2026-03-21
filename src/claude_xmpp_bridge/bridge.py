@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 MAX_SESSIONS = 50  # max registered sessions per bridge instance
 MAX_PROJECT_LEN = 4096  # max length of project path
 MAX_XMPP_BODY = 10_000  # max length of incoming XMPP message body (chars)
+MAX_MESSAGE_SIZE = 1_000_000  # max length of outgoing relay/broadcast/delegate message (1 MB)
 
 # Sessions registered without a terminal multiplexer (backend=None) are useful
 # for sending notifications but cannot receive messages.  They are automatically
@@ -160,7 +161,12 @@ class XMPPBridge:
     @staticmethod
     def _optional_int(value: object) -> int | None:
         """Convert a socket/MCP request field to int if present."""
-        return int(str(value)) if value is not None else None
+        if value is None:
+            return None
+        try:
+            return int(str(value))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"expected integer, got {value!r}") from exc
 
     async def _cmd_list(self) -> None:
         await self._cleanup_stale_sessions()
@@ -833,8 +839,9 @@ class XMPPBridge:
             # Remove from queue and send next
             if self._ask_queue and self._ask_queue[0] is pending:
                 self._ask_queue.popleft()
-            elif pending in self._ask_queue:
-                self._ask_queue.remove(pending)
+            else:
+                with contextlib.suppress(ValueError):
+                    self._ask_queue.remove(pending)
             self._send_next_ask()
 
     # --- Socket request handling ---
@@ -1141,6 +1148,8 @@ class XMPPBridge:
         message = str(req.get("message", ""))
         if not message:
             return {"ok": False, "error": "missing message"}
+        if len(message) > MAX_MESSAGE_SIZE:
+            return {"ok": False, "error": f"message too large ({len(message)} chars, max {MAX_MESSAGE_SIZE})"}
 
         nudge = bool(req.get("nudge", False))
 
@@ -1252,6 +1261,8 @@ class XMPPBridge:
         message = str(req.get("message", ""))
         if not message:
             return {"ok": False, "error": self.messages.broadcast_no_message}
+        if len(message) > MAX_MESSAGE_SIZE:
+            return {"ok": False, "error": f"message too large ({len(message)} chars, max {MAX_MESSAGE_SIZE})"}
 
         nudge = bool(req.get("nudge", False))
 
@@ -1520,7 +1531,10 @@ class XMPPBridge:
         if not isinstance(todos, list):
             return {"error": "todos must be a list"}
         expected_version_raw = req.get("expected_version")
-        expected_version = self._optional_int(expected_version_raw)
+        try:
+            expected_version = self._optional_int(expected_version_raw)
+        except ValueError:
+            return {"error": f"expected_version must be an integer, got {expected_version_raw!r}"}
         version = self.registry.replace_todos(session_id, todos, expected_version=expected_version)
         if version is None:
             return {"error": "todo version conflict", "current_version": info.get("todos_version", 0)}
@@ -1532,7 +1546,10 @@ class XMPPBridge:
         if not content:
             return {"error": "missing content"}
         expected_version_raw = req.get("expected_version")
-        expected_version = self._optional_int(expected_version_raw)
+        try:
+            expected_version = self._optional_int(expected_version_raw)
+        except ValueError:
+            return {"error": f"expected_version must be an integer, got {expected_version_raw!r}"}
         todo, version = self.registry.add_todo(
             session_id,
             content,
@@ -1557,7 +1574,10 @@ class XMPPBridge:
         if not info:
             return {"error": f"unknown session_id: {session_id}"}
         expected_version_raw = req.get("expected_version")
-        expected_version = self._optional_int(expected_version_raw)
+        try:
+            expected_version = self._optional_int(expected_version_raw)
+        except ValueError:
+            return {"error": f"expected_version must be an integer, got {expected_version_raw!r}"}
         todo, version = self.registry.update_todo(
             session_id,
             todo_id,
@@ -1581,7 +1601,10 @@ class XMPPBridge:
         if not info:
             return {"error": f"unknown session_id: {session_id}"}
         expected_version_raw = req.get("expected_version")
-        expected_version = self._optional_int(expected_version_raw)
+        try:
+            expected_version = self._optional_int(expected_version_raw)
+        except ValueError:
+            return {"error": f"expected_version must be an integer, got {expected_version_raw!r}"}
         removed, version = self.registry.remove_todo(session_id, todo_id, expected_version=expected_version)
         if version is None:
             if info and expected_version is not None and expected_version != info.get("todos_version", 0):
@@ -1718,6 +1741,8 @@ class XMPPBridge:
         description = str(req.get("description", ""))
         if not description:
             return {"ok": False, "error": "missing description"}
+        if len(description) > MAX_MESSAGE_SIZE:
+            return {"ok": False, "error": f"description too large ({len(description)} chars, max {MAX_MESSAGE_SIZE})"}
 
         to_raw = req.get("to")
         if not to_raw:
