@@ -59,7 +59,7 @@
 
 export const XmppBridgePlugin = async (input) => {
   const { client, directory, $ } = input
-   const PLUGIN_VERSION = "0.9.4"
+   const PLUGIN_VERSION = "0.9.5"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -348,11 +348,17 @@ export const XmppBridgePlugin = async (input) => {
       return { ok: false, error: "no opencodeSessionID" }
     }
     try {
+      // Check if SDK method exists (version compatibility)
+      if (typeof client.session?.promptAsync !== "function") {
+        await warn(`promptAsync not available on SDK client (keys: ${Object.keys(client.session ?? {}).join(",")})`, "inject-no-method")
+        return { ok: false, error: "promptAsync not available" }
+      }
       await dbg(`promptAsync → ${ocID} (${text.length} chars)`)
       const res = await client.session.promptAsync({
         sessionID: ocID,
         parts: [{ type: "text", text }],
       })
+      await dbg(`promptAsync result: status=${res?.response?.status} error=${!!res?.error} data=${JSON.stringify(res?.data).slice(0, 100)}`)
       if (res.error) {
         await warn(`promptAsync error: ${JSON.stringify(res.error).slice(0, 200)}`, "inject-sdk-error")
         return { ok: false, error: String(res.error) }
