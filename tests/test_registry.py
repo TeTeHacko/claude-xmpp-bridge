@@ -1501,3 +1501,87 @@ def test_task_persists_across_restart(db_path):
         assert fetched["status"] == "accepted"
     finally:
         reg2.close()
+
+
+# ---------------------------------------------------------------------------
+# Task state transition validation
+# ---------------------------------------------------------------------------
+
+
+def _create_task(reg: SessionRegistry, task_id: str, status: str = "pending") -> None:
+    """Helper: create a task and optionally advance it to *status*."""
+    reg.task_create(
+        task_id=task_id,
+        from_session="s-a",
+        to_session="s-b",
+        description="transition test",
+    )
+    # Advance through valid states to reach the desired starting status.
+    if status == "accepted":
+        reg.task_update_status(task_id, "accepted")
+    elif status == "completed":
+        reg.task_update_status(task_id, "accepted")
+        reg.task_update_status(task_id, "completed", result="done")
+    elif status == "failed":
+        reg.task_update_status(task_id, "accepted")
+        reg.task_update_status(task_id, "failed", result="err")
+    elif status == "cancelled":
+        reg.task_update_status(task_id, "cancelled")
+
+
+@pytest.mark.parametrize(
+    "start,target",
+    [
+        ("pending", "accepted"),
+        ("pending", "completed"),
+        ("pending", "failed"),
+        ("pending", "cancelled"),
+        ("accepted", "completed"),
+        ("accepted", "failed"),
+        ("accepted", "cancelled"),
+    ],
+)
+def test_task_valid_transitions(db_path, start, target):
+    """Valid task state transitions must succeed."""
+    reg = SessionRegistry(db_path)
+    try:
+        tid = f"vt_{start}_{target}"[:12].ljust(12, "0")
+        _create_task(reg, tid, start)
+        updated = reg.task_update_status(tid, target)
+        assert updated is not None
+        assert updated["status"] == target
+    finally:
+        reg.close()
+
+
+@pytest.mark.parametrize(
+    "start,target",
+    [
+        ("completed", "pending"),
+        ("completed", "accepted"),
+        ("completed", "failed"),
+        ("completed", "cancelled"),
+        ("failed", "pending"),
+        ("failed", "accepted"),
+        ("failed", "completed"),
+        ("failed", "cancelled"),
+        ("cancelled", "pending"),
+        ("cancelled", "accepted"),
+        ("cancelled", "completed"),
+        ("cancelled", "failed"),
+    ],
+)
+def test_task_invalid_transitions(db_path, start, target):
+    """Invalid task state transitions must raise ValueError."""
+    reg = SessionRegistry(db_path)
+    try:
+        tid = f"it_{start}_{target}"[:12].ljust(12, "0")
+        _create_task(reg, tid, start)
+        with pytest.raises(ValueError, match="invalid task transition"):
+            reg.task_update_status(tid, target)
+        # Verify the status was NOT changed.
+        fetched = reg.task_get(tid)
+        assert fetched is not None
+        assert fetched["status"] == start
+    finally:
+        reg.close()

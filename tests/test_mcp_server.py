@@ -1824,3 +1824,41 @@ class TestListDelegatedTasks:
     def test_list_delegated_tasks_no_bridge(self, server: BridgeMCPServer):
         result = server._tool_list_delegated_tasks()
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# prune_stale_client_sessions
+# ---------------------------------------------------------------------------
+
+
+class TestPruneStaleClientSessions:
+    def test_removes_entries_for_unregistered_sessions(self, started_server: BridgeMCPServer):
+        """Client session mappings pointing to unregistered sessions are pruned."""
+        started_server._client_sessions["client-1"] = "ses_AAA"
+        started_server._client_sessions["client-2"] = "ses_BBB"
+        started_server._client_sessions["mcp:mcp-1"] = "ses_AAA"
+        started_server._client_sessions["mcp:mcp-2"] = "ses_CCC"
+
+        # Only ses_AAA is still active.
+        pruned = started_server.prune_stale_client_sessions({"ses_AAA"})
+
+        assert pruned == 2
+        assert "client-1" in started_server._client_sessions
+        assert "mcp:mcp-1" in started_server._client_sessions
+        assert "client-2" not in started_server._client_sessions
+        assert "mcp:mcp-2" not in started_server._client_sessions
+
+    def test_no_pruning_when_all_active(self, started_server: BridgeMCPServer):
+        """Nothing is pruned when all mapped sessions are still active."""
+        started_server._client_sessions["c1"] = "ses_AAA"
+        started_server._client_sessions["c2"] = "ses_BBB"
+
+        pruned = started_server.prune_stale_client_sessions({"ses_AAA", "ses_BBB"})
+
+        assert pruned == 0
+        assert len(started_server._client_sessions) == 2
+
+    def test_empty_dict_is_noop(self, started_server: BridgeMCPServer):
+        """Pruning an empty mapping returns 0."""
+        pruned = started_server.prune_stale_client_sessions({"ses_AAA"})
+        assert pruned == 0

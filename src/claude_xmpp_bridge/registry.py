@@ -886,6 +886,17 @@ class SessionRegistry:
             )
         return task
 
+    # Valid state transitions for delegated tasks.
+    # ``cancelled`` is reachable from any non-terminal state.
+    _TASK_TRANSITIONS: dict[str, set[str]] = {
+        "pending": {"accepted", "completed", "failed", "cancelled"},
+        "accepted": {"completed", "failed", "cancelled"},
+        # Terminal states — no further transitions allowed.
+        "completed": set(),
+        "failed": set(),
+        "cancelled": set(),
+    }
+
     def task_update_status(
         self,
         task_id: str,
@@ -894,8 +905,12 @@ class SessionRegistry:
     ) -> DelegatedTask | None:
         """Update the status (and optionally the result) of a delegated task.
 
-        Valid status transitions: pending → accepted → completed|failed,
-        or any → cancelled.  Returns the updated task, or None if not found.
+        Valid status transitions: pending → accepted/completed/failed/cancelled,
+        accepted → completed/failed/cancelled.  Terminal states (completed,
+        failed, cancelled) do not allow further transitions.
+
+        Returns the updated task, or None if *task_id* is not found.
+        Raises ``ValueError`` if the transition is invalid.
         """
         now = time.time()
         with self._db:
@@ -907,6 +922,11 @@ class SessionRegistry:
             ).fetchone()
             if row is None:
                 return None
+            current_status = str(row[5])
+            allowed = self._TASK_TRANSITIONS.get(current_status, set())
+            if status not in allowed:
+                msg = f"invalid task transition: {current_status!r} → {status!r}"
+                raise ValueError(msg)
             self._db.execute(
                 "UPDATE delegated_tasks SET status = ?, result = ?, updated_at = ? WHERE task_id = ?",
                 (status, result, now, task_id),

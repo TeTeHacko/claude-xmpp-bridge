@@ -15,7 +15,7 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 
 # Allowed characters in multiplexer target (session name).
 # Colon is intentionally excluded to prevent tmux session:window injection.
-_TARGET_RE = re.compile(r"^[a-zA-Z0-9_.\-]{1,128}$")
+_TARGET_RE = re.compile(r"^[a-zA-Z0-9_.%\-]{1,128}$")
 
 # Timeout (seconds) for each subprocess invocation.
 _CMD_TIMEOUT = 5

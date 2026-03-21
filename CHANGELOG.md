@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.10] - 2026-03-22
+
+### Fixed
+- **Tmux pane ID support** — `_TARGET_RE` regex in `multiplexer.py` now includes `%` character, fixing delivery to tmux pane targets like `%3`.
+- **Task state transition validation** — `task_update_status` in `registry.py` now enforces valid state transitions (pending→accepted/completed/failed/cancelled, accepted→completed/failed/cancelled). Terminal states (completed, failed, cancelled) reject further changes. Raises `ValueError` on invalid transitions.
+- **MCP client session pruning** — `_client_sessions` dict in `mcp_server.py` is now pruned during stale session cleanup, preventing unbounded memory growth in long-running bridge processes.
+
 ## [0.9.9] - 2026-03-22
 
 ### Fixed

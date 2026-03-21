@@ -114,6 +114,20 @@ class BridgeMCPServer:
             message_type=message_type,
         )
 
+    def prune_stale_client_sessions(self, active_session_ids: set[str]) -> int:
+        """Remove ``_client_sessions`` entries whose value is not in *active_session_ids*.
+
+        Called by :meth:`XMPPBridge._cleanup_stale_sessions` to prevent the
+        mapping from growing unbounded over the lifetime of the bridge process.
+        Returns the number of pruned entries.
+        """
+        stale_keys = [k for k, v in self._client_sessions.items() if v not in active_session_ids]
+        for key in stale_keys:
+            del self._client_sessions[key]
+        if stale_keys:
+            log.debug("Pruned %d stale MCP client session mapping(s)", len(stale_keys))
+        return len(stale_keys)
+
     async def start(self, bridge: XMPPBridge) -> None:
         """Initialise the FastMCP server and launch it as a background task."""
         self._bridge = bridge
@@ -1511,7 +1525,10 @@ class BridgeMCPServer:
 
         sender_session_id = self._resolve_sender_session_id(sender_session_id, client_id, request_info)
 
-        task = bridge.registry.task_update_status(task_id, status, result)
+        try:
+            task = bridge.registry.task_update_status(task_id, status, result)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         if task is None:
             return {"ok": False, "error": f"task not found: {task_id}"}
 

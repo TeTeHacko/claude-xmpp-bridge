@@ -358,6 +358,18 @@ class TestTmuxMultiplexer:
         assert result is False
         mock_exec.assert_not_called()
 
+    async def test_accepts_tmux_pane_id_with_percent(self):
+        """Tmux pane IDs like %3 must be accepted by _TARGET_RE."""
+        mux = TmuxMultiplexer()
+        proc_ok = _make_process_mock(0)
+
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = proc_ok
+            result = await mux.send_text("%3", "0", "hello")
+
+        assert result is True
+        assert mock_exec.call_count >= 1
+
     async def test_sanitizes_input(self):
         """Control characters are stripped before sending to tmux."""
         mux = TmuxMultiplexer()

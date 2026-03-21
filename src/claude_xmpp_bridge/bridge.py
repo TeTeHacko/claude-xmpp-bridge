@@ -719,6 +719,10 @@ class XMPPBridge:
                 del self._screen_query_locks[sty]
             if stale_stys:
                 log.debug("Pruned %d stale screen query lock(s)", len(stale_stys))
+            # Prune MCP client→session mappings that point to unregistered sessions.
+            if self.mcp_server is not None:
+                active_sids = set(self.registry.sessions.keys())
+                self.mcp_server.prune_stale_client_sessions(active_sids)
         if legacy_removed:
             log.info("Cleaned %d stale legacy lock hint(s)", legacy_removed)
         return len(to_remove)
@@ -1820,7 +1824,10 @@ class XMPPBridge:
         result = str(req.get("result", "")) or None
         nudge = bool(req.get("nudge", True))
 
-        task = self.registry.task_update_status(task_id, status, result)
+        try:
+            task = self.registry.task_update_status(task_id, status, result)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         if task is None:
             return {"ok": False, "error": f"task not found: {task_id}"}
 
