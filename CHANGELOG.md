@@ -7,41 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.14] - 2026-03-22
 
+Code review follow-up — low-priority findings (L1, L2).
+
 ### Changed
-- **Deduplicate lock-reading logic** — extracted shared `locks.py` module with `short_path()`, `project_matches()`, and `read_legacy_lock_hints()`. Both `bridge.py` and `mcp_server.py` now delegate to these shared functions instead of maintaining near-identical implementations. Removes ~80 lines of duplication.
-- **Remove dead registry methods** — removed `inbox_drain()` and `inbox_drain_with_senders()` from `SessionRegistry`. Both were superseded by `inbox_drain_full()` (v0.8.18) and no production code called them. Tests updated to use `inbox_drain_full()`.
+- **(L1) Deduplicate lock-reading logic** — extracted shared `locks.py` module with `short_path()`, `project_matches()`, and `read_legacy_lock_hints()`. Both `bridge.py` and `mcp_server.py` now delegate to these shared functions instead of maintaining near-identical implementations (~80 lines of duplication removed).
+- **(L2) Remove dead registry methods** — removed `inbox_drain()` and `inbox_drain_with_senders()` from `SessionRegistry`. Both were superseded by `inbox_drain_full()` (v0.8.18) and no production code called them. Tests updated to use `inbox_drain_full()`.
 
 ## [0.9.13] - 2026-03-22
 
+Code review follow-up — medium-priority findings (M4–M7).
+
 ### Added
-- **SMTP STARTTLS support** — new `smtp_starttls` config option (`auto`/`always`/`never`). In `auto` mode (default), STARTTLS is used for non-localhost SMTP hosts. Configurable via TOML (`smtp_starttls`), env var (`CLAUDE_XMPP_SMTP_STARTTLS`).
-- **Rate limiting** — socket requests limited to 300/min per session, MCP tool calls to 600/min per client. New `rate_limit.py` module with sliding-window `RateLimiter`. Buckets cleaned up during stale session cleanup.
+- **(M4) SMTP STARTTLS support** — new `smtp_starttls` config option (`auto`/`always`/`never`). In `auto` mode (default), STARTTLS is used for non-localhost SMTP hosts. Configurable via TOML (`smtp_starttls`), env var (`CLAUDE_XMPP_SMTP_STARTTLS`).
+- **(M7) Rate limiting** — socket requests limited to 300/min per session, MCP tool calls to 600/min per client. New `rate_limit.py` module with sliding-window `RateLimiter`. Buckets cleaned up during stale session cleanup.
 
 ### Fixed
-- **SSE parsing in plugin** — `pollInbox` now accumulates all `data:` lines from SSE responses (using `.filter()` + `.join()`) instead of taking only the first `data:` line. Handles multi-line SSE events per the SSE specification.
-- **Claude Code hook registration** — `session-start-register.sh` now includes `source: "claude-code"` and `plugin_version: "hook"` fields in the registration payload for feature parity with the OpenCode plugin.
-- **Stale prompt_async references** — removed remaining `prompt_async` references in plugin comments and OpenCode README.
+- **(M5) SSE parsing in plugin** — `pollInbox` now accumulates all `data:` lines from SSE responses (using `.filter()` + `.join()`) instead of taking only the first `data:` line. Handles multi-line SSE events per the SSE specification.
+- **(M6) Claude Code hook registration** — `session-start-register.sh` now includes `source: "claude-code"` and `plugin_version: "hook"` fields in the registration payload for feature parity with the OpenCode plugin.
+- Removed remaining `prompt_async` references in plugin comments and OpenCode README.
 
 ## [0.9.12] - 2026-03-22
 
+Code review follow-up — high-priority documentation fix (H5), medium-priority hardening (M1–M3).
+
 ### Fixed
-- **README documentation update** — `/list` icons updated from stale `⏸`/`▶` to current `🟢`/`🔵`. OpenCode README agent icons table updated from old agents (build/plan/coder/local) to current set (coder/architect/monitor/home/google/reviewer/researcher/cml). Replaced outdated `prompt_async` HTTP API references with current TUI `appendPrompt`+`submitPrompt` mechanism.
-- **Ask queue safety** — `_ask_queue.remove()` in `bridge.py` now uses `contextlib.suppress(ValueError)` to prevent crash if pending item was already removed by another coroutine.
-- **`_optional_int` input validation** — `_optional_int()` now raises `ValueError` with a descriptive message for non-integer values. All 4 call sites (replace_todos, add_todo, update_todo, remove_todo) catch the error and return a proper `{"error": ...}` response instead of causing an unhandled exception.
-- **Message size limit** — New `MAX_MESSAGE_SIZE` (1 MB) enforced on relay, broadcast, and delegate commands in both socket and MCP paths. Prevents memory/performance issues from oversized messages.
+- **(H5) README documentation update** — `/list` icons updated from stale `⏸`/`▶` to current `🟢`/`🔵`. OpenCode README agent icons table rewritten from old agents (build/plan/coder/local) to current set (coder/architect/monitor/home/google/reviewer/researcher/cml). Replaced outdated `prompt_async` HTTP API references with current TUI `appendPrompt`+`submitPrompt` mechanism.
+- **(M1) Ask queue safety** — `_ask_queue.remove()` in `bridge.py` now uses `contextlib.suppress(ValueError)` to prevent crash if pending item was already removed by another coroutine.
+- **(M2) `_optional_int` input validation** — `_optional_int()` now raises `ValueError` with a descriptive message for non-integer values. All 4 call sites (replace_todos, add_todo, update_todo, remove_todo) catch the error and return a proper `{"error": ...}` response instead of causing an unhandled exception.
+- **(M3) Message size limit** — new `MAX_MESSAGE_SIZE` (1 MB) enforced on relay, broadcast, and delegate commands in both socket and MCP paths. Prevents memory/performance issues from oversized messages.
 
 ## [0.9.11] - 2026-03-22
 
+Code review follow-up — high-priority security findings (H2, H3).
+
 ### Added
-- **MCP bearer token authentication** — MCP HTTP server now requires `Authorization: Bearer <token>` header when `socket_token` is configured. Uses constant-time comparison (`hmac.compare_digest`). Unauthenticated requests receive 401 Unauthorized. Plugin reads token from `~/.config/claude-xmpp-bridge/socket_token` or `CLAUDE_XMPP_SOCKET_TOKEN` env var and includes it in all MCP fetch requests.
-- **MCP session ownership validation** — tools that operate on a specific session (`receive_messages`, `replace_todos`, `add_todo`, `update_todo`, `remove_todo`, `list_todos`, `get_session_context`, `acquire_file_lock`, `release_file_lock`, `reply_to_last_sender`) now verify that the calling MCP client is bound to the target session. Prevents agent A from draining agent B's inbox or manipulating agent B's todos/locks.
+- **(H2) MCP bearer token authentication** — MCP HTTP server now requires `Authorization: Bearer <token>` header when `socket_token` is configured. Uses constant-time comparison (`hmac.compare_digest`). Unauthenticated requests receive 401 Unauthorized. Plugin reads token from `~/.config/claude-xmpp-bridge/socket_token` or `CLAUDE_XMPP_SOCKET_TOKEN` env var and includes it in all MCP fetch requests.
+- **(H3) MCP session ownership validation** — tools that operate on a specific session (`receive_messages`, `replace_todos`, `add_todo`, `update_todo`, `remove_todo`, `list_todos`, `get_session_context`, `acquire_file_lock`, `release_file_lock`, `reply_to_last_sender`) now verify that the calling MCP client is bound to the target session. Prevents agent A from draining agent B's inbox or manipulating agent B's todos/locks.
 
 ## [0.9.10] - 2026-03-22
 
+Code review follow-up — high-priority bug fixes (H1, H4, H6).
+
 ### Fixed
-- **Tmux pane ID support** — `_TARGET_RE` regex in `multiplexer.py` now includes `%` character, fixing delivery to tmux pane targets like `%3`.
-- **Task state transition validation** — `task_update_status` in `registry.py` now enforces valid state transitions (pending→accepted/completed/failed/cancelled, accepted→completed/failed/cancelled). Terminal states (completed, failed, cancelled) reject further changes. Raises `ValueError` on invalid transitions.
-- **MCP client session pruning** — `_client_sessions` dict in `mcp_server.py` is now pruned during stale session cleanup, preventing unbounded memory growth in long-running bridge processes.
+- **(H1) Tmux pane ID support** — `_TARGET_RE` regex in `multiplexer.py` now includes `%` character, fixing delivery to tmux pane targets like `%3`. Previously all tmux deliveries would fail with "Rejected invalid tmux target".
+- **(H4) Task state transition validation** — `task_update_status` in `registry.py` now enforces valid state transitions (pending→accepted/completed/failed/cancelled, accepted→completed/failed/cancelled). Terminal states (completed, failed, cancelled) reject further changes. Raises `ValueError` on invalid transitions; both socket and MCP call sites handle the error gracefully.
+- **(H6) MCP client session pruning** — `_client_sessions` dict in `mcp_server.py` is now pruned during stale session cleanup via `prune_stale_client_sessions()`, preventing unbounded memory growth in long-running bridge processes.
 
 ## [0.9.9] - 2026-03-22
 
