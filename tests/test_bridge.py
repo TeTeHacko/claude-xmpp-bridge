@@ -2683,7 +2683,7 @@ class TestSecurityLimits:
         long_text = "A" * (MAX_XMPP_BODY + 5000)
         sent_texts: list[str] = []
 
-        async def mock_stuff(session_id, info, text):
+        async def mock_stuff(session_id, info, text, **kwargs):
             sent_texts.append(text)
             return True
 
@@ -3732,7 +3732,7 @@ class TestBroadcast:
 
         stuffed: list[tuple[str, str]] = []
 
-        async def _mock_stuff(session_id, info, text):
+        async def _mock_stuff(session_id, info, text, **kwargs):
             stuffed.append((session_id, text))
             return True
 
@@ -3859,7 +3859,7 @@ class TestBroadcast:
 
         call_count = [0]
 
-        async def _partial_stuff(session_id, info, text):
+        async def _partial_stuff(session_id, info, text, **kwargs):
             call_count[0] += 1
             # First target succeeds, second fails
             return call_count[0] == 1
@@ -4970,6 +4970,220 @@ class TestNudgePattern:
         finally:
             await bridge.socket_server.stop()
             bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# TestAskingGuard — asking_guard fallback in _stuff_to_session
+# ---------------------------------------------------------------------------
+
+
+class TestAskingGuard:
+    """When asking_guard=True and agent is in an asking state, _stuff_to_session
+    falls back to inbox enqueue + CR nudge instead of screen inject."""
+
+    def _make_bridge(self, tmp_path, MockXMPP, agent_state="asking"):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register(
+            session_id="agent-a",
+            sty="12345.pts-0",
+            window="1",
+            project="/home/user/project-a",
+            backend="screen",
+        )
+        bridge.registry.register(
+            session_id="agent-b",
+            sty="12345.pts-0",
+            window="2",
+            project="/home/user/project-b",
+            backend="screen",
+        )
+        if agent_state:
+            bridge.registry.update_state("agent-b", agent_state)
+        return bridge, conn
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_stuff_to_session_asking_guard_fallback(self, MockXMPP, tmp_path):
+        """_stuff_to_session with asking_guard=True and agent_state='asking'
+        falls back to inbox+nudge instead of screen inject."""
+        bridge, _conn = self._make_bridge(tmp_path, MockXMPP, agent_state="asking")
+        info = bridge.registry.get("agent-b")
+        assert info is not None
+
+        bridge._enqueue_for_mcp = MagicMock()
+        bridge.audit.log = MagicMock()
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            result = await bridge._stuff_to_session(
+                "agent-b",
+                info,
+                "hello",
+                asking_guard=True,
+                from_session="agent-a",
+                source_type="agent",
+                message_type="relay",
+            )
+
+        assert result is True
+        bridge._enqueue_for_mcp.assert_called_once_with(
+            "agent-b",
+            "hello",
+            from_session="agent-a",
+            source_type="agent",
+            message_type="relay",
+        )
+        bridge.audit.log.assert_called()
+        assert bridge.audit.log.call_args[0][0] == "TERMINAL_SEND_ASKING_FALLBACK"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_stuff_to_session_waiting_for_permission_fallback(self, MockXMPP, tmp_path):
+        """_stuff_to_session with asking_guard=True and agent_state='waiting_for_permission'
+        also triggers the fallback."""
+        bridge, _conn = self._make_bridge(tmp_path, MockXMPP, agent_state="waiting_for_permission")
+        info = bridge.registry.get("agent-b")
+        assert info is not None
+
+        bridge._enqueue_for_mcp = MagicMock()
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            result = await bridge._stuff_to_session(
+                "agent-b",
+                info,
+                "hello",
+                asking_guard=True,
+            )
+
+        assert result is True
+        bridge._enqueue_for_mcp.assert_called_once()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_stuff_to_session_no_fallback_when_idle(self, MockXMPP, tmp_path):
+        """_stuff_to_session with asking_guard=True but agent_state='idle'
+        does NOT trigger fallback — sends via screen normally."""
+        bridge, _conn = self._make_bridge(tmp_path, MockXMPP, agent_state="idle")
+        info = bridge.registry.get("agent-b")
+        assert info is not None
+
+        bridge._enqueue_for_mcp = MagicMock()
+        bridge.audit.log = MagicMock()
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            result = await bridge._stuff_to_session(
+                "agent-b",
+                info,
+                "hello",
+                asking_guard=True,
+            )
+
+        assert result is True
+        bridge._enqueue_for_mcp.assert_not_called()
+        # Should log TERMINAL_SEND, not TERMINAL_SEND_ASKING_FALLBACK
+        assert bridge.audit.log.call_args[0][0] == "TERMINAL_SEND"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_stuff_to_session_no_fallback_when_guard_disabled(self, MockXMPP, tmp_path):
+        """_stuff_to_session with asking_guard=False does NOT trigger fallback
+        even when agent is in asking state."""
+        bridge, _conn = self._make_bridge(tmp_path, MockXMPP, agent_state="asking")
+        info = bridge.registry.get("agent-b")
+        assert info is not None
+
+        bridge._enqueue_for_mcp = MagicMock()
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            result = await bridge._stuff_to_session(
+                "agent-b",
+                info,
+                "hello",
+                asking_guard=False,
+            )
+
+        assert result is True
+        bridge._enqueue_for_mcp.assert_not_called()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_screen_asking_guard_triggers_fallback(self, MockXMPP, tmp_path):
+        """Socket relay (nudge=False) with target in asking state triggers
+        asking guard fallback — message goes to inbox, not screen."""
+        bridge, conn = self._make_bridge(tmp_path, MockXMPP, agent_state="asking")
+
+        enqueued: list[tuple] = []
+        original_enqueue = bridge._enqueue_for_mcp
+
+        def _track_enqueue(session_id, message, **kwargs):
+            enqueued.append((session_id, message, kwargs))
+            return original_enqueue(session_id, message, **kwargs)
+
+        bridge._enqueue_for_mcp = _track_enqueue  # type: ignore[method-assign]
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            resp = await bridge._handle_relay(
+                {"session_id": "agent-a", "to": "agent-b", "message": "hi"}
+            )
+
+        assert resp == {"ok": True}
+        # The asking guard should have enqueued the message
+        assert len(enqueued) == 1
+        assert enqueued[0][0] == "agent-b"
+        assert enqueued[0][2]["source_type"] == "agent"
+        assert enqueued[0][2]["message_type"] == "relay"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_screen_asking_guard_triggers_fallback(self, MockXMPP, tmp_path):
+        """Socket broadcast (nudge=False) with target in asking state triggers
+        asking guard fallback for that target."""
+        bridge, conn = self._make_bridge(tmp_path, MockXMPP, agent_state="asking")
+
+        enqueued: list[tuple] = []
+        original_enqueue = bridge._enqueue_for_mcp
+
+        def _track_enqueue(session_id, message, **kwargs):
+            enqueued.append((session_id, message, kwargs))
+            return original_enqueue(session_id, message, **kwargs)
+
+        bridge._enqueue_for_mcp = _track_enqueue  # type: ignore[method-assign]
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            resp = await bridge._handle_broadcast(
+                {"session_id": "agent-a", "message": "hello all"}
+            )
+
+        assert resp["ok"] is True
+        assert resp["delivered"] == 1
+        # agent-b is in asking state, so asking guard should have enqueued
+        assert len(enqueued) == 1
+        assert enqueued[0][0] == "agent-b"
+        assert enqueued[0][2]["message_type"] == "broadcast"
+        bridge.registry.close()
 
 
 # ---------------------------------------------------------------------------

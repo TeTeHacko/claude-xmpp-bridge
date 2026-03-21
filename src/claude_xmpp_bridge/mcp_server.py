@@ -863,10 +863,19 @@ class BridgeMCPServer:
                 )
                 return bridge.messages.mcp_send_no_backend.format(project=self._short_path(target_info["project"]))
 
-            ok = await bridge._stuff_to_session(to, target_info, wrapped_message)
+            ok = await bridge._stuff_to_session(
+                to,
+                target_info,
+                wrapped_message,
+                asking_guard=True,
+                from_session=sender_session_id or None,
+                source_type="agent",
+                message_type="relay",
+            )
 
             if ok:
                 # screen=True delivers immediately to terminal — no inbox queuing needed.
+                # If asking_guard triggered, the message was enqueued to inbox automatically.
                 # Inbox is reserved for nudge/screen=False (async, idle-handler pickup).
                 bridge._xmpp_send(
                     json.dumps(
@@ -1009,7 +1018,18 @@ class BridgeMCPServer:
                     results.append(True)
         else:
             results = await asyncio.gather(
-                *(bridge._stuff_to_session(sid, info, wrapped_message) for sid, info in targets.items()),
+                *(
+                    bridge._stuff_to_session(
+                        sid,
+                        info,
+                        wrapped_message,
+                        asking_guard=True,
+                        from_session=sender_session_id or None,
+                        source_type="agent",
+                        message_type="broadcast",
+                    )
+                    for sid, info in targets.items()
+                ),
             )
 
         delivered = 0

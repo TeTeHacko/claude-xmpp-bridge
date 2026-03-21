@@ -254,11 +254,66 @@ class XMPPBridge:
         else:
             self._xmpp_send(self.messages.delivery_failed.format(project=self._short_path(info["project"])))
 
-    async def _stuff_to_session(self, session_id: str, info: SessionInfo, text: str) -> bool:
+    # Agent states that block direct screen injection.
+    # When the agent is in one of these states, screen inject would interfere
+    # with the permission prompt — text gets pasted into the ask dialog and
+    # the trailing CR confirms/rejects it with garbage input.
+    _ASKING_STATES: frozenset[str] = frozenset({"asking", "waiting_for_permission"})
+
+    async def _stuff_to_session(
+        self,
+        session_id: str,
+        info: SessionInfo,
+        text: str,
+        *,
+        asking_guard: bool = False,
+        from_session: str | None = None,
+        source_type: str | None = None,
+        message_type: str | None = None,
+    ) -> bool:
+        """Send *text* to a terminal session via the multiplexer.
+
+        When *asking_guard* is True and the target agent's ``agent_state`` is
+        one of the asking states (``asking``, ``waiting_for_permission``), the
+        method **does not** inject text into the terminal.  Instead it falls
+        back to inbox enqueue + CR nudge so the message is safely delivered
+        without interfering with the permission prompt.
+
+        The extra keyword arguments (*from_session*, *source_type*,
+        *message_type*) are only used when the asking-guard fallback fires —
+        they are forwarded to :meth:`_enqueue_for_mcp`.
+        """
         mux = get_multiplexer(info["backend"])
         if not mux:
             log.warning("No backend for session (project=%s)", info["project"])
             return False
+
+        agent_state = info.get("agent_state") or ""
+        if asking_guard and agent_state in self._ASKING_STATES:
+            log.info(
+                "Asking guard: agent %s is in state %r — falling back to inbox+nudge",
+                session_id,
+                agent_state,
+            )
+            self._enqueue_for_mcp(
+                session_id,
+                text,
+                from_session=from_session,
+                source_type=source_type,
+                message_type=message_type,
+            )
+            nudge_ok = await mux.send_nudge(info["sty"], info["window"])
+            self.audit.log(
+                "TERMINAL_SEND_ASKING_FALLBACK",
+                session_id=session_id,
+                project=info["project"],
+                backend=info["backend"],
+                agent_state=agent_state,
+                nudge_ok=nudge_ok,
+                text_len=len(text),
+            )
+            return True  # message is safely queued
+
         ok = await mux.send_text(info["sty"], info["window"], text)
         if ok:
             self.audit.log(
@@ -1142,7 +1197,15 @@ class XMPPBridge:
                 )
                 ok = True
         else:
-            ok = await self._stuff_to_session(target_id, target_info, wrapped_message)
+            ok = await self._stuff_to_session(
+                target_id,
+                target_info,
+                wrapped_message,
+                asking_guard=True,
+                from_session=sender_id or None,
+                source_type="agent",
+                message_type="relay",
+            )
 
         self.audit.log(
             "RELAY_SENT" if ok else "RELAY_FAILED",
@@ -1237,7 +1300,18 @@ class XMPPBridge:
             results = await asyncio.gather(*(_deliver_nudge(sid, info) for sid, info in targets.items()))
         else:
             results = await asyncio.gather(
-                *(self._stuff_to_session(sid, info, wrapped_message) for sid, info in targets.items()),
+                *(
+                    self._stuff_to_session(
+                        sid,
+                        info,
+                        wrapped_message,
+                        asking_guard=True,
+                        from_session=sender_id or None,
+                        source_type="agent",
+                        message_type="broadcast",
+                    )
+                    for sid, info in targets.items()
+                ),
             )
 
         delivered: list[str] = []
@@ -1593,7 +1667,15 @@ class XMPPBridge:
                 return {
                     "error": self.messages.relay_no_backend.format(project=self._short_path(target_info["project"]))
                 }
-            ok = await self._stuff_to_session(last_sender, target_info, wrapped_message)
+            ok = await self._stuff_to_session(
+                last_sender,
+                target_info,
+                wrapped_message,
+                asking_guard=True,
+                from_session=session_id,
+                source_type="agent",
+                message_type="relay",
+            )
         mode = "nudge" if nudge else "screen"
         if ok:
             self._xmpp_send(

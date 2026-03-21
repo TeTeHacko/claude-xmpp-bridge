@@ -1533,6 +1533,53 @@ class TestBroadcastMessageNudge:
         assert args[1].endswith("nudge all")
 
 
+# ---------------------------------------------------------------------------
+# Asking guard — send_message and broadcast pass asking_guard=True
+# ---------------------------------------------------------------------------
+
+
+class TestAskingGuardMCP:
+    """MCP send_message and broadcast_message pass asking_guard=True to
+    _stuff_to_session so the asking guard can protect agents in ask state."""
+
+    async def test_send_message_passes_asking_guard(self, started_server: BridgeMCPServer):
+        """send_message (screen mode) must pass asking_guard=True to _stuff_to_session."""
+        await started_server._tool_send_message(to="ses_AAA", message="ping")
+        started_server._bridge._stuff_to_session.assert_awaited_once()
+        kwargs = started_server._bridge._stuff_to_session.await_args.kwargs
+        assert kwargs.get("asking_guard") is True
+
+    async def test_send_message_passes_from_session(self, started_server: BridgeMCPServer):
+        """send_message must forward sender_session_id as from_session."""
+        await started_server._tool_send_message(
+            to="ses_AAA", message="ping", sender_session_id="ses_BBB"
+        )
+        kwargs = started_server._bridge._stuff_to_session.await_args.kwargs
+        assert kwargs.get("from_session") == "ses_BBB"
+        assert kwargs.get("source_type") == "agent"
+        assert kwargs.get("message_type") == "relay"
+
+    async def test_broadcast_passes_asking_guard(self, started_server: BridgeMCPServer):
+        """broadcast_message (screen mode) must pass asking_guard=True to _stuff_to_session."""
+        await started_server._tool_broadcast_message(
+            message="hello all", sender_session_id="ses_AAA"
+        )
+        # ses_BBB is the only target (ses_AAA excluded as sender)
+        started_server._bridge._stuff_to_session.assert_awaited_once()
+        kwargs = started_server._bridge._stuff_to_session.await_args.kwargs
+        assert kwargs.get("asking_guard") is True
+        assert kwargs.get("source_type") == "agent"
+        assert kwargs.get("message_type") == "broadcast"
+
+    async def test_broadcast_passes_from_session(self, started_server: BridgeMCPServer):
+        """broadcast_message must forward sender_session_id as from_session."""
+        await started_server._tool_broadcast_message(
+            message="hello all", sender_session_id="ses_AAA"
+        )
+        kwargs = started_server._bridge._stuff_to_session.await_args.kwargs
+        assert kwargs.get("from_session") == "ses_AAA"
+
+
 class TestTodoToolErrors:
     def test_update_todo_unknown_session(self, started_server: BridgeMCPServer):
         result = started_server._tool_update_todo(session_id="ses_UNKNOWN", todo_id="todo-1", status="done")
