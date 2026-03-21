@@ -25,6 +25,7 @@
  *     🔵 google       — Google Workspace (custom #4285f4 = modrá)
  *     🟡 reviewer     — code review (warning = žlutá)
  *     ⚪ researcher   — research (secondary = šedá)
+ *     🧠 cml          — Centrální Mozek Lidstva (orchestrátor)
  *
  *   Ikony jsou konfigurovatelné přes env proměnné BRIDGE_AGENT_<JMÉNO> (uppercase):
  *     export BRIDGE_AGENT_CODER=🟢
@@ -34,6 +35,7 @@
  *     export BRIDGE_AGENT_GOOGLE=🔵
  *     export BRIDGE_AGENT_REVIEWER=🟡
  *     export BRIDGE_AGENT_RESEARCHER=⚪
+ *     export BRIDGE_AGENT_CML=🧠
  *
  *   Stav (pravý kruh — lifecycle agenta):
  *     🟢 idle        — čeká na vstup (dokončil úkol)
@@ -55,7 +57,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-  const PLUGIN_VERSION = "0.8.22"
+   const PLUGIN_VERSION = "0.8.23"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -256,17 +258,19 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
    //   monitor    → 🟠  (#ff6b35    = oranžová)
    //   home       → 🩵  (#03a9f4    = světle modrá)
    //   google     → 🔵  (#4285f4    = modrá)
-   //   reviewer   → 🟡  (warning    = žlutá)
-   //   researcher → ⚪  (secondary  = šedá)
-   //
-   // Přizpůsobení přes env proměnné BRIDGE_AGENT_<JMÉNO> (uppercase):
-   //   export BRIDGE_AGENT_CODER=🟢
-   //   export BRIDGE_AGENT_ARCHITECT=🔴
-   //   export BRIDGE_AGENT_MONITOR=🟠
-   //   export BRIDGE_AGENT_HOME=🩵
-   //   export BRIDGE_AGENT_GOOGLE=🔵
-   //   export BRIDGE_AGENT_REVIEWER=🟡
-   //   export BRIDGE_AGENT_RESEARCHER=⚪
+    //   reviewer   → 🟡  (warning    = žlutá)
+    //   researcher → ⚪  (secondary  = šedá)
+    //   cml        → 🧠  (brain      = orchestrátor)
+    //
+    // Přizpůsobení přes env proměnné BRIDGE_AGENT_<JMÉNO> (uppercase):
+    //   export BRIDGE_AGENT_CODER=🟢
+    //   export BRIDGE_AGENT_ARCHITECT=🔴
+    //   export BRIDGE_AGENT_MONITOR=🟠
+    //   export BRIDGE_AGENT_HOME=🩵
+    //   export BRIDGE_AGENT_GOOGLE=🔵
+    //   export BRIDGE_AGENT_REVIEWER=🟡
+    //   export BRIDGE_AGENT_RESEARCHER=⚪
+    //   export BRIDGE_AGENT_CML=🧠
    // ---------------------------------------------------------------------------
    const DEFAULT_AGENT_ICONS = {
      coder:      "🟢",
@@ -274,9 +278,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
      monitor:    "🟠",
      home:       "🩵",
      google:     "🔵",
-     reviewer:   "🟡",
-     researcher: "⚪",
-   }
+      reviewer:   "🟡",
+      researcher: "⚪",
+      cml:        "🧠",
+    }
 
   // Vrátí ikonu pro daného agenta — nejdřív env, pak default, pak ⚪.
   const agentIcon = (name) => {

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.23] - 2026-03-21
+
+### Added
+- **OpenCode plugin: CML agent icon** — added 🧠 (brain) icon for the `cml` agent (Centrální Mozek Lidstva orchestrator) to the agent icon mapping, header comments, and env variable documentation.
+
 ## [0.8.22] - 2026-03-21
 
 ### Changed
