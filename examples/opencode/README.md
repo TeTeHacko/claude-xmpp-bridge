@@ -191,12 +191,13 @@ The plugin uses push-based delivery for inter-agent messages. On each
 `session.idle` event, it drains the MCP inbox and injects **all** pending
 messages at once via the OpenCode HTTP API (`POST /session/{id}/prompt_async`).
 
-This replaces the previous polling+rawRelay architecture:
-- No 30s polling timer — `session.idle` is the only trigger
+This replaces the previous rawRelay (screen stuff) architecture:
 - No messageBuffer — all messages concatenated into one prompt
 - No screen stuff relay — uses native OpenCode HTTP API
 - No 1.5s idle delay — prompt_async is fire-and-forget
 - Works without GNU Screen (tmux, bare terminal)
+- Fallback polling (5s, configurable via `XMPP_BRIDGE_IDLE_POLL_MS`) for idle agents
+  on empty prompt where CR nudge is a no-op
 
 The plugin caches the active MCP `mcp-session-id` between calls, so steady-state
 inbox drain usually sends only a single `tools/call` request. It falls back to a

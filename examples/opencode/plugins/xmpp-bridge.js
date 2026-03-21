@@ -46,7 +46,7 @@
  *
  * Push-based message delivery (v0.9.0):
  *   - Při session.idle: drain MCP inbox → inject ALL messages via prompt_async HTTP API
- *   - Žádný polling timer — session.idle je jediný trigger
+ *   - Fallback polling (5s) pro idle agenty na prázdném promptu (CR nudge je no-op)
  *   - Žádný messageBuffer — všechny zprávy se concatenují do jednoho promptu
  *   - MCP session ID se cachuje; po výpadku bridge se cache invaliduje.
  *
@@ -58,7 +58,7 @@
  */
 
 export const XmppBridgePlugin = async ({ client, directory, $, serverUrl: inputServerUrl }) => {
-   const PLUGIN_VERSION = "0.9.0"
+   const PLUGIN_VERSION = "0.9.1"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -227,6 +227,11 @@ export const XmppBridgePlugin = async ({ client, directory, $, serverUrl: inputS
   // ---------------------------------------------------------------------------
   // Idle polling state
   // ---------------------------------------------------------------------------
+  // Fallback polling: session.idle is the primary trigger for inbox drain, but
+  // when an agent is already idle (waiting for user input), a new nudge CR does
+  // NOT trigger another session.idle event. This fallback timer ensures messages
+  // are picked up even when the agent is parked on an empty prompt.
+  const IDLE_POLL_INTERVAL_MS = parseInt(process.env.XMPP_BRIDGE_IDLE_POLL_MS ?? "5000")
   // Periodický re-register: pokud bridge session nezná (restart bridge), re-zaregistruje.
   // Interval 90s — nezávislý na session.idle, zajistí obnovu i pokud agent je long-running.
   // Přepis přes env: XMPP_BRIDGE_REREG_INTERVAL_MS (pro testy nastavit na nízkou hodnotu).
@@ -234,6 +239,7 @@ export const XmppBridgePlugin = async ({ client, directory, $, serverUrl: inputS
   const BRIDGE_RECOVERY_POLL_MS = parseInt(process.env.XMPP_BRIDGE_RECOVERY_POLL_MS ?? "300000")
   const BRIDGE_RETRY_MS = parseInt(process.env.XMPP_BRIDGE_RETRY_MS ?? "60000")
   let isIdle = false
+  let pollTimer = null
   let reregTimer = null
   let recoveryTimer = null
   let polling = false  // guard against concurrent pollInbox calls
@@ -392,6 +398,7 @@ export const XmppBridgePlugin = async ({ client, directory, $, serverUrl: inputS
   }
 
   const stopActiveBridgeTimers = () => {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
     if (reregTimer) { clearInterval(reregTimer); reregTimer = null }
   }
 
@@ -408,6 +415,11 @@ export const XmppBridgePlugin = async ({ client, directory, $, serverUrl: inputS
             await runAgentNotify("start", desiredBridgeSessionID, desiredProjectDir)
           }
         await reportState(isIdle ? "idle" : "running")
+        if (!pollTimer) {
+          pollTimer = setInterval(async () => {
+            if (isIdle) await pollInbox()
+          }, IDLE_POLL_INTERVAL_MS)
+        }
         if (!reregTimer) {
           reregTimer = setInterval(async () => {
             if (!registeredSessionID) return
@@ -808,6 +820,14 @@ export const XmppBridgePlugin = async ({ client, directory, $, serverUrl: inputS
       if (registeredSessionID) await reportState("idle")
 
       isIdle = true  // agent je při startu idle (čeká na vstup)
+
+      // Fallback polling timer: picks up messages when agent is parked on empty prompt
+      // (session.idle won't re-fire, CR nudge is no-op in OpenCode TUI).
+      if (!pollTimer) {
+        pollTimer = setInterval(async () => {
+          if (isIdle) await pollInbox()
+        }, IDLE_POLL_INTERVAL_MS)
+      }
 
       // Spustit periodický re-register timer — obnoví registraci po restartu bridge.
       // Nezávislý na session.idle, zajistí obnovu i pokud agent čeká dlouho na vstup.

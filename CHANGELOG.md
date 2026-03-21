@@ -5,16 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-03-22
+
+### Fixed
+- **Fallback polling for idle agents** — added 5s fallback polling timer (`XMPP_BRIDGE_IDLE_POLL_MS`) to ensure message delivery when agent is parked on empty prompt. CR nudge is a no-op in OpenCode TUI raw terminal mode, and `session.idle` does not re-fire for already-idle agents. The fallback timer calls `pollInbox()` every 5s while `isIdle` is true.
+
 ## [0.9.0] - 2026-03-22
 
 ### Changed
-- **Push-based message delivery** — replaced polling+rawRelay architecture with OpenCode HTTP API (`prompt_async`). Messages are now injected directly via `POST /session/{id}/prompt_async` instead of screen stuff relay. This eliminates the 30s polling timer, 1.5s idle delay, messageBuffer (1-per-cycle limit), and dependency on GNU Screen for message delivery. All pending messages are concatenated and injected in a single prompt on `session.idle`. Latency reduced from 0-30s to near-instant.
+- **Push-based message delivery** — replaced rawRelay (screen stuff) with OpenCode HTTP API (`prompt_async`). Messages injected via `POST /session/{id}/prompt_async` instead of screen stuff relay. Eliminates 1.5s idle delay, messageBuffer (1-per-cycle limit), and GNU Screen dependency. All pending messages concatenated into single prompt on `session.idle`. Fallback polling (5s default, configurable via `XMPP_BRIDGE_IDLE_POLL_MS`) ensures delivery to idle agents on empty prompt where CR nudge is a no-op.
 
 ### Removed
 - `rawRelay()` function (screen stuff via claude-xmpp-client relay)
 - `messageBuffer` local queue (1 message per poll cycle)
-- `pollTimer` (30s periodic polling interval)
-- `IDLE_POLL_INTERVAL_MS` constant
 - 1.5s delay before inbox poll on session.idle
 - `!STY` guard on pollInbox (prompt_async works without Screen)
 

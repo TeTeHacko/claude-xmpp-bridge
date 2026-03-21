@@ -615,11 +615,12 @@ class TestPushBasedDelivery:
         text = _plugin_text()
         assert "let messageBuffer" not in text, "messageBuffer variable must not exist"
 
-    def test_no_polling_timer(self):
-        """30s polling timer was removed — session.idle is the only trigger."""
+    def test_fallback_polling_timer(self):
+        """Fallback polling timer exists for idle agents on empty prompt."""
         text = _plugin_text()
-        assert "IDLE_POLL_INTERVAL_MS" not in text, "IDLE_POLL_INTERVAL_MS must not exist"
-        assert "let pollTimer" not in text, "pollTimer variable must not exist"
+        assert "IDLE_POLL_INTERVAL_MS" in text, "fallback poll interval must exist"
+        assert "XMPP_BRIDGE_IDLE_POLL_MS" in text, "must be configurable via env"
+        assert "let pollTimer" in text, "pollTimer variable must exist"
 
     def test_no_idle_delay(self):
         """1.5s delay before pollInbox was removed."""
