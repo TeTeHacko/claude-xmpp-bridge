@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-03-22
+
+### Fixed
+- **Use SDK client instead of HTTP fetch for prompt_async** — OpenCode TUI mode does not start an HTTP server on any port. The plugin SDK client uses internal Hono router fetch, which works without a network server. Replaced direct `fetch()` with `client.session.promptAsync()`.
+
 ## [0.9.3] - 2026-03-22
 
 ### Fixed

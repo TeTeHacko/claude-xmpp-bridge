@@ -127,14 +127,14 @@ class TestPluginClientBinFallback:
             "agent-notify must not be executed through Bun shell templates anymore"
         )
 
-    def test_injectViaPromptAsync_exists_and_uses_http(self):
-        """injectViaPromptAsync must use HTTP prompt_async endpoint for push delivery."""
+    def test_injectViaPromptAsync_exists_and_uses_sdk(self):
+        """injectViaPromptAsync must use SDK client.session.promptAsync()."""
         text = _plugin_text()
         body = _function_body(text, "const injectViaPromptAsync = async")
         assert body, "injectViaPromptAsync function not found in plugin"
 
-        assert "prompt_async" in body, "must use prompt_async endpoint"
-        assert "fetch(" in body, "must use fetch for HTTP call"
+        assert "promptAsync" in body, "must use SDK promptAsync method"
+        assert "client.session" in body, "must use SDK client"
         assert "opencodeSessionID" in body, "must use raw OpenCode session ID"
 
     def test_runClient_guard_is_first_statement(self):
@@ -628,14 +628,13 @@ class TestPushBasedDelivery:
         # The old pattern: setTimeout(resolve, 1500)
         assert "setTimeout(resolve, 1500)" not in text, "1.5s idle delay must not exist"
 
-    def test_injectViaPromptAsync_uses_prompt_async_endpoint(self):
-        """Push delivery must use OpenCode HTTP API prompt_async."""
+    def test_injectViaPromptAsync_uses_sdk_client(self):
+        """Push delivery must use SDK client.session.promptAsync()."""
         text = _plugin_text()
         body = _function_body(text, "const injectViaPromptAsync = async")
         assert body, "injectViaPromptAsync function must exist"
-        assert "prompt_async" in body, "must target prompt_async endpoint"
-        assert "fetch(" in body, "must use HTTP fetch"
-        assert '"POST"' in body, "must use POST method"
+        assert "client.session.promptAsync" in body, "must use SDK promptAsync"
+        assert "opencodeSessionID" in body, "must use raw OpenCode session ID"
         assert "parts" in body, "must send parts array"
 
     def test_pollInbox_uses_injectViaPromptAsync(self):
@@ -662,11 +661,10 @@ class TestPushBasedDelivery:
         assert "opencodeSessionID = active.id" in text, "must set from startup registration"
         assert "opencodeSessionID = info.id" in text, "must set from session.created"
 
-    def test_serverUrl_resolved_lazily(self):
-        """Plugin must resolve OpenCode server URL lazily (getter, not at init)."""
+    def test_no_direct_http_fetch_for_prompt(self):
+        """Push delivery must NOT use direct HTTP fetch — SDK client handles routing."""
         text = _plugin_text()
-        assert "getServerUrl" in text, "must use lazy getter for serverUrl"
-        assert "input.serverUrl" in text, "must read from plugin input"
-        assert "OPENCODE_SERVER_URL" in text, "must support env var override"
-        assert "localhost:4096" in text, "must have sensible default"
-        assert ".href" in text, "must convert URL object to string via .href"
+        body = _function_body(text, "const injectViaPromptAsync = async")
+        assert body, "injectViaPromptAsync function must exist"
+        assert "fetch(" not in body, "must not use direct HTTP fetch (SDK handles it)"
+        assert "getServerUrl" not in body, "must not resolve server URL manually"

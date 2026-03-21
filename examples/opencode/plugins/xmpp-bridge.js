@@ -59,7 +59,7 @@
 
 export const XmppBridgePlugin = async (input) => {
   const { client, directory, $ } = input
-   const PLUGIN_VERSION = "0.9.3"
+   const PLUGIN_VERSION = "0.9.4"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -328,28 +328,15 @@ export const XmppBridgePlugin = async (input) => {
   const logCaught = (scope, err, key = "") => errlog(`${scope}: ${err}`, key || `caught:${scope}`)
 
   // ---------------------------------------------------------------------------
-  // injectViaPromptAsync(): doručí zprávu do OpenCode session přes HTTP API.
-  // Používá POST /session/{id}/prompt_async — fire-and-forget, vrací 204.
+  // injectViaPromptAsync(): doručí zprávu do OpenCode session přes SDK client.
+  // Používá client.session.promptAsync() — interní fetch přes Hono router,
+  // funguje i bez HTTP serveru (TUI mode). Fire-and-forget, vrací 204.
   // Nahrazuje rawRelay() (screen stuff) — žádné shell metaznaky, žádný screen.
   // Funguje i bez Screen backendu (tmux, bare terminal).
-  // serverUrl je z plugin inputu (default http://localhost:4096).
   // ---------------------------------------------------------------------------
-  // Resolve OpenCode server URL lazily — input.serverUrl is a getter that may
-  // return null early during startup. We read it at call time, not at init time.
-  const getServerUrl = () => {
-    try {
-      const url = input.serverUrl
-      if (url) {
-        const s = url.href ?? String(url)
-        // Strip trailing slash to avoid double-slash in path construction
-        return s.endsWith("/") ? s.slice(0, -1) : s
-      }
-    } catch (_) { /* getter may throw during early init */ }
-    return process.env.OPENCODE_SERVER_URL ?? "http://localhost:4096"
-  }
 
   // Resolve the top-level OpenCode session ID (without _wN suffix).
-  // prompt_async needs the raw OpenCode session ID, not the bridge ID.
+  // promptAsync needs the raw OpenCode session ID, not the bridge ID.
   let opencodeSessionID = null
 
   const injectViaPromptAsync = async (sessionID, text) => {
@@ -361,25 +348,19 @@ export const XmppBridgePlugin = async (input) => {
       return { ok: false, error: "no opencodeSessionID" }
     }
     try {
-      const base = getServerUrl()
-      const url = `${base}/session/${encodeURIComponent(ocID)}/prompt_async`
-      await dbg(`prompt_async → ${url}`)
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          parts: [{ type: "text", text }],
-        }),
+      await dbg(`promptAsync → ${ocID} (${text.length} chars)`)
+      const res = await client.session.promptAsync({
+        sessionID: ocID,
+        parts: [{ type: "text", text }],
       })
-      if (res.ok || res.status === 204) {
-        await dbg(`prompt_async injected ${text.length} chars into ${ocID}`)
-        return { ok: true }
+      if (res.error) {
+        await warn(`promptAsync error: ${JSON.stringify(res.error).slice(0, 200)}`, "inject-sdk-error")
+        return { ok: false, error: String(res.error) }
       }
-      const body = await res.text().catch(() => "")
-      await warn(`prompt_async HTTP ${res.status}: ${body.slice(0, 200)}`, "inject-http-error")
-      return { ok: false, error: `HTTP ${res.status}` }
+      await dbg(`promptAsync injected ${text.length} chars into ${ocID}`)
+      return { ok: true }
     } catch (err) {
-      await errlog(`prompt_async error: ${err}`, "inject-error")
+      await errlog(`promptAsync error: ${err}`, "inject-error")
       return { ok: false, error: String(err) }
     }
   }
