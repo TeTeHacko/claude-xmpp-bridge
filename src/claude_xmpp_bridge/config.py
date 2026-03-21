@@ -51,6 +51,7 @@ class Config:
     # Set smtp_host = "" (default) to disable email relay entirely.
     smtp_host: str = ""  # SMTP relay host; empty string = disabled
     smtp_port: int = DEFAULT_SMTP_PORT
+    smtp_starttls: str = "auto"  # "auto" (TLS for non-localhost), "always", or "never"
     email_threshold: int = EMAIL_THRESHOLD_DEFAULT  # chars; 0 = always email
     # Per-source icons: keys are source strings (or None for default/unknown).
     # Loaded from [source_icons] TOML section; missing keys fall back to DEFAULT_SOURCE_ICONS.
@@ -65,6 +66,7 @@ class Config:
             f"force_starttls={self.force_starttls!r}, audit_log={self.audit_log!r}, "
             f"mcp_port={self.mcp_port!r}, "
             f"smtp_host={self.smtp_host!r}, smtp_port={self.smtp_port!r}, "
+            f"smtp_starttls={self.smtp_starttls!r}, "
             f"email_threshold={self.email_threshold!r}, "
             f"source_icons={self.source_icons!r})"
         )
@@ -246,6 +248,13 @@ def load_config(
         smtp_port = int(str(smtp_port_toml))
     else:
         smtp_port = DEFAULT_SMTP_PORT
+    smtp_starttls_env = os.environ.get("CLAUDE_XMPP_SMTP_STARTTLS")
+    smtp_starttls_toml = _toml_str(toml, "smtp_starttls")
+    smtp_starttls = smtp_starttls_env or smtp_starttls_toml or "auto"
+    if smtp_starttls not in ("auto", "always", "never"):
+        raise SystemExit(
+            f"Error: smtp_starttls must be 'auto', 'always', or 'never', got {smtp_starttls!r}"
+        )
     email_threshold_env = os.environ.get("CLAUDE_XMPP_EMAIL_THRESHOLD")
     email_threshold_toml = toml.get("email_threshold")
     if email_threshold_env:
@@ -288,6 +297,7 @@ def load_config(
         mcp_port=mcp_port,
         smtp_host=smtp_host,
         smtp_port=smtp_port,
+        smtp_starttls=smtp_starttls,
         email_threshold=email_threshold,
         source_icons=source_icons,
     )

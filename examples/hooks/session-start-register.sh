@@ -7,21 +7,23 @@ set -uo pipefail
 INPUT="$(cat)"
 
 if [ -n "${STY:-}" ]; then
-    BACKEND=screen
-    MUX_ID="$STY"
-    MUX_WIN="${WINDOW:-0}"
+	BACKEND=screen
+	MUX_ID="$STY"
+	MUX_WIN="${WINDOW:-0}"
 elif [ -n "${TMUX:-}" ]; then
-    BACKEND=tmux
-    MUX_ID="${TMUX_PANE:-}"
-    MUX_WIN=""
+	BACKEND=tmux
+	MUX_ID="${TMUX_PANE:-}"
+	MUX_WIN=""
 else
-    BACKEND=none
-    MUX_ID=""
-    MUX_WIN=""
+	BACKEND=none
+	MUX_ID=""
+	MUX_WIN=""
 fi
 
 claude-xmpp-client register "$(echo "$INPUT" | jq -c \
-    --arg sty "$MUX_ID" \
-    --arg win "$MUX_WIN" \
-    --arg backend "$BACKEND" \
-    '{session_id: .session_id, sty: $sty, window: $win, project: .cwd, backend: $backend}')"
+	--arg sty "$MUX_ID" \
+	--arg win "$MUX_WIN" \
+	--arg backend "$BACKEND" \
+	--arg source "claude-code" \
+	--arg pv "hook" \
+	'{session_id: .session_id, sty: $sty, window: $win, project: .cwd, backend: $backend, source: $source, plugin_version: $pv}')"

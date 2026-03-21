@@ -5509,3 +5509,75 @@ class TestTaskDelegationViaSocket:
         assert resp["ok"] is True
         assert resp["task"]["context"] == "Use the staging environment"
         bridge.registry.close()
+
+
+class TestSocketRateLimiting:
+    """Rate limiting on socket commands."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_rate_limit_rejects_after_burst(self, MockXMPP, tmp_path):
+        """After exceeding MAX_PER_MINUTE requests, socket returns rate limit error."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        # Set a very low limit for testing
+        bridge._socket_rate_limiter._max = 3
+
+        resp1 = await bridge._handle_request({"cmd": "ping", "session_id": "s1"})
+        assert resp1.get("ok") is True
+        resp2 = await bridge._handle_request({"cmd": "ping", "session_id": "s1"})
+        assert resp2.get("ok") is True
+        resp3 = await bridge._handle_request({"cmd": "ping", "session_id": "s1"})
+        assert resp3.get("ok") is True
+        # 4th request should be rejected
+        resp4 = await bridge._handle_request({"cmd": "ping", "session_id": "s1"})
+        assert "rate limit" in str(resp4.get("error", "")).lower()
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_rate_limit_independent_per_session(self, MockXMPP, tmp_path):
+        """Different session_ids have independent rate buckets."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge._socket_rate_limiter._max = 2
+
+        # Fill bucket for s1
+        await bridge._handle_request({"cmd": "ping", "session_id": "s1"})
+        await bridge._handle_request({"cmd": "ping", "session_id": "s1"})
+        # s1 is now rate limited
+        resp_s1 = await bridge._handle_request({"cmd": "ping", "session_id": "s1"})
+        assert "rate limit" in str(resp_s1.get("error", "")).lower()
+        # s2 should still work
+        resp_s2 = await bridge._handle_request({"cmd": "ping", "session_id": "s2"})
+        assert resp_s2.get("ok") is True
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_rate_limit_cleanup_via_direct_call(self, MockXMPP, tmp_path):
+        """Rate limiter buckets are pruned when cleanup is called with active keys."""
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        bridge = XMPPBridge(_make_config(tmp_path))
+        # Create a rate limiter entry for a session that isn't registered
+        bridge._socket_rate_limiter.check("stale-session")
+        bridge._socket_rate_limiter.check("active-session")
+        assert "stale-session" in bridge._socket_rate_limiter._buckets
+
+        # Cleanup with only active-session in the active set
+        bridge._socket_rate_limiter.cleanup(active_keys={"active-session", "anonymous"})
+        assert "stale-session" not in bridge._socket_rate_limiter._buckets
+        assert "active-session" in bridge._socket_rate_limiter._buckets
+        bridge.registry.close()

@@ -60,7 +60,7 @@
 
 export const XmppBridgePlugin = async (input) => {
   const { client, directory, $ } = input
-   const PLUGIN_VERSION = "0.9.12"
+   const PLUGIN_VERSION = "0.9.13"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -517,8 +517,11 @@ export const XmppBridgePlugin = async (input) => {
       }
 
       const text = await mcpRes.text().catch(() => null)
-      const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
-      const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null
+      // SSE spec: multiple `data:` lines in a single event are joined with newlines.
+      // Take the last complete event's data lines to handle multi-line SSE responses.
+      const dataLines = text?.split('\n').filter(l => l.startsWith('data:')) ?? []
+      const dataPayload = dataLines.map(l => l.slice(5).trim()).join('\n')
+      const body = dataPayload ? JSON.parse(dataPayload) : null
       // receive_messages returns each message as a separate content item (type=text).
       // Each item.text is a JSON-encoded dict with keys: text, from_session,
       // source_type, message_type, message_id, ts, type.
@@ -538,10 +541,10 @@ export const XmppBridgePlugin = async (input) => {
       const messages = contentItems.map(parseItem).filter(Boolean)
       if (messages.length === 0) return
 
-      // Inject ALL messages at once via OpenCode HTTP API (prompt_async).
+      // Inject ALL messages at once via TUI appendPrompt + submitPrompt.
       // All messages concatenated into one prompt — no buffering, no per-cycle limit.
       const combined = messages.join("\n\n---\n\n")
-      await dbg(`pollInbox: ${messages.length} message(s), ${combined.length} chars — injecting via prompt_async`)
+      await dbg(`pollInbox: ${messages.length} message(s), ${combined.length} chars — injecting via TUI`)
       const injectRes = await injectMessage(registeredSessionID, combined)
       if (!injectRes.ok) {
         await warn(`pollInbox inject failed: ${injectRes.error}`, "inject-failed")

@@ -198,6 +198,7 @@ file contents, long diffs, etc.).
 # config.toml
 smtp_host = "192.168.1.1"     # SMTP relay host (empty = disabled, default)
 smtp_port = 25                # SMTP relay port (default: 25)
+smtp_starttls = "auto"        # TLS mode: "auto" (default), "always", or "never"
 email_threshold = 4000        # trigger above this many chars (default: 4000)
 ```
 
@@ -205,7 +206,12 @@ email_threshold = 4000        # trigger above this many chars (default: 4000)
 |--------------|-------------|
 | `CLAUDE_XMPP_SMTP_HOST` | SMTP relay hostname or IP |
 | `CLAUDE_XMPP_SMTP_PORT` | SMTP relay port (default: 25) |
+| `CLAUDE_XMPP_SMTP_STARTTLS` | STARTTLS mode: `auto` (default), `always`, `never` |
 | `CLAUDE_XMPP_EMAIL_THRESHOLD` | Character threshold for email relay (default: 4000) |
+
+In `auto` mode (default), STARTTLS is used automatically for non-localhost SMTP hosts
+(`localhost`, `127.0.0.1`, `::1` are excluded).  Use `always` to force STARTTLS even
+on localhost, or `never` to disable it entirely.
 
 Both sender and recipient are set to `recipient` (the bridge sends email to you
 from itself).  The SMTP relay must accept unauthenticated connections from localhost.

@@ -674,3 +674,16 @@ class TestPushBasedDelivery:
         assert body, "pollInbox function must exist"
         assert "Authorization" in body, "pollInbox must add Authorization header to MCP fetch"
         assert "Bearer" in body, "pollInbox must use Bearer scheme for MCP auth"
+
+    def test_pollInbox_accumulates_sse_data_lines(self):
+        """pollInbox must handle multi-line SSE events (filter+join data: lines)."""
+        text = _plugin_text()
+        body = _function_body(text, "const pollInbox = async")
+        assert body, "pollInbox function must exist"
+        # Must filter all data: lines, not just find the first one
+        assert ".filter(" in body, "must use .filter() to collect all data: lines"
+        assert "data:" in body, "must reference 'data:' for SSE line detection"
+        # Must NOT use .find() for data line extraction
+        assert ".find(l => l.startsWith('data:'))" not in body, (
+            "must not use .find() for single data line — SSE allows multiple data: lines per event"
+        )

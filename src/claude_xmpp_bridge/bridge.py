@@ -23,6 +23,7 @@ from .email_notify import send_email
 from .mcp_server import BridgeMCPServer
 from .messages import Messages, format_generated_agent_message, load_messages
 from .multiplexer import get_multiplexer
+from .rate_limit import SOCKET_MAX_PER_MINUTE, RateLimiter
 from .registry import SessionInfo, SessionRegistry
 from .socket_server import SocketServer
 from .xmpp import XMPPConnection
@@ -79,6 +80,8 @@ class XMPPBridge:
         self._screen_query_locks: dict[str, asyncio.Lock] = {}
         # Merged source icons (defaults + user config), computed once.
         self._icons: dict[str | None, str] = {**DEFAULT_SOURCE_ICONS, **config.source_icons}
+        # Rate limiter for socket requests (keyed by session_id or peer address).
+        self._socket_rate_limiter = RateLimiter(SOCKET_MAX_PER_MINUTE)
 
     # --- XMPP message handling ---
 
@@ -428,6 +431,7 @@ class XMPPBridge:
                     recipient=cfg.recipient,
                     subject=f"[bridge] {text[:80].splitlines()[0]}",
                     body=text,
+                    smtp_starttls=cfg.smtp_starttls,
                 )
             )
             task.add_done_callback(self._email_task_done)
@@ -731,6 +735,9 @@ class XMPPBridge:
             if self.mcp_server is not None:
                 active_sids = set(self.registry.sessions.keys())
                 self.mcp_server.prune_stale_client_sessions(active_sids)
+            # Prune rate limiter buckets for sessions that are no longer registered.
+            active_keys = set(self.registry.sessions.keys()) | {"anonymous"}
+            self._socket_rate_limiter.cleanup(active_keys)
         if legacy_removed:
             log.info("Cleaned %d stale legacy lock hint(s)", legacy_removed)
         return len(to_remove)
@@ -855,6 +862,12 @@ class XMPPBridge:
         """
         cmd = str(req.get("cmd", ""))
         session_id = str(req.get("session_id", "")) or None
+
+        # Rate limiting (keyed by session_id, fallback to "anonymous")
+        rate_key = session_id or "anonymous"
+        allowed, retry_after = self._socket_rate_limiter.check(rate_key)
+        if not allowed:
+            return {"error": f"rate limit exceeded, try again in {retry_after}s"}
 
         response: dict[str, object]
         if cmd == "register":

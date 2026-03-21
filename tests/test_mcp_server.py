@@ -2102,3 +2102,83 @@ class TestSessionOwnership:
         # Should return sessions, no error
         assert isinstance(result, list)
         assert len(result) == 2
+
+
+class TestMCPRateLimiting:
+    """Rate limiting on MCP tool calls."""
+
+    @pytest.fixture
+    def rl_server(self):
+        """Real BridgeMCPServer with bridge mock attached (for rate limit tests)."""
+        sessions = {
+            "ses_alpha_w1": _make_session_info(project="/home/user/alpha"),
+            "ses_beta_w2": _make_session_info(project="/home/user/beta"),
+        }
+        bridge = _make_bridge(sessions)
+        srv = BridgeMCPServer(port=0)
+        srv._bridge = bridge
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_send_message_rate_limited(self, rl_server: BridgeMCPServer):
+        """send_message returns error after rate limit is exceeded."""
+        rl_server._rate_limiter._max = 2
+        r1 = await rl_server._tool_send_message(to="ses_alpha_w1", message="m1", client_id="c1")
+        r2 = await rl_server._tool_send_message(to="ses_alpha_w1", message="m2", client_id="c1")
+        assert "rate limit" not in r1.lower()
+        assert "rate limit" not in r2.lower()
+        r3 = await rl_server._tool_send_message(to="ses_alpha_w1", message="m3", client_id="c1")
+        assert "rate limit" in r3.lower()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_rate_limited(self, rl_server: BridgeMCPServer):
+        """broadcast_message returns error after rate limit."""
+        rl_server._rate_limiter._max = 1
+        r1 = await rl_server._tool_broadcast_message(
+            message="msg", sender_session_id="ses_alpha_w1", client_id="c2"
+        )
+        assert "rate limit" not in r1.lower()
+        r2 = await rl_server._tool_broadcast_message(
+            message="msg", sender_session_id="ses_alpha_w1", client_id="c2"
+        )
+        assert "rate limit" in r2.lower()
+
+    @pytest.mark.asyncio
+    async def test_delegate_task_rate_limited(self, rl_server: BridgeMCPServer):
+        """delegate_task returns error after rate limit."""
+        rl_server._rate_limiter._max = 1
+        r1 = await rl_server._tool_delegate_task(
+            to="ses_alpha_w1", description="do this", client_id="c3"
+        )
+        assert r1.get("ok") is True
+        r2 = await rl_server._tool_delegate_task(
+            to="ses_alpha_w1", description="do that", client_id="c3"
+        )
+        assert r2.get("ok") is False
+        assert "rate limit" in r2.get("error", "").lower()
+
+    def test_receive_messages_rate_limited(self, rl_server: BridgeMCPServer):
+        """receive_messages returns empty list when rate limited."""
+        rl_server._rate_limiter._max = 1
+        r1 = rl_server._tool_receive_messages(session_id="ses_alpha_w1", client_id="c4")
+        assert isinstance(r1, list)
+        r2 = rl_server._tool_receive_messages(session_id="ses_alpha_w1", client_id="c4")
+        assert r2 == []
+
+    @pytest.mark.asyncio
+    async def test_different_clients_independent(self, rl_server: BridgeMCPServer):
+        """Different client_ids have independent rate buckets."""
+        rl_server._rate_limiter._max = 1
+        r1 = await rl_server._tool_send_message(to="ses_alpha_w1", message="m1", client_id="client-A")
+        assert "rate limit" not in r1.lower()
+        r2 = await rl_server._tool_send_message(to="ses_alpha_w1", message="m2", client_id="client-A")
+        assert "rate limit" in r2.lower()
+        r3 = await rl_server._tool_send_message(to="ses_alpha_w1", message="m3", client_id="client-B")
+        assert "rate limit" not in r3.lower()
+
+    def test_rate_limiter_cleanup_on_prune(self, rl_server: BridgeMCPServer):
+        """Rate limiter buckets are cleaned up when client sessions are pruned."""
+        rl_server._rate_limiter.check("stale-client")
+        assert "stale-client" in rl_server._rate_limiter._buckets
+        rl_server.prune_stale_client_sessions(set())
+        assert "stale-client" not in rl_server._rate_limiter._buckets

@@ -50,6 +50,7 @@ import mcp.types as mcp_types
 from mcp.server.fastmcp import Context, FastMCP
 
 from .messages import format_generated_agent_message, parse_generated_agent_message
+from .rate_limit import MCP_MAX_PER_MINUTE, RateLimiter
 
 if TYPE_CHECKING:
     from .bridge import XMPPBridge
@@ -128,6 +129,7 @@ class BridgeMCPServer:
         self._mcp: FastMCP | None = None
         self._client_sessions: dict[str, str] = {}
         self._recent_registrations: deque[dict[str, Any]] = deque()
+        self._rate_limiter = RateLimiter(MCP_MAX_PER_MINUTE)
 
     # ------------------------------------------------------------------
     # Public API used by XMPPBridge
@@ -164,6 +166,7 @@ class BridgeMCPServer:
 
         Called by :meth:`XMPPBridge._cleanup_stale_sessions` to prevent the
         mapping from growing unbounded over the lifetime of the bridge process.
+        Also prunes rate limiter buckets for clients no longer active.
         Returns the number of pruned entries.
         """
         stale_keys = [k for k, v in self._client_sessions.items() if v not in active_session_ids]
@@ -171,6 +174,9 @@ class BridgeMCPServer:
             del self._client_sessions[key]
         if stale_keys:
             log.debug("Pruned %d stale MCP client session mapping(s)", len(stale_keys))
+        # Prune rate limiter buckets for clients that are no longer mapped.
+        active_clients = set(self._client_sessions.keys()) | {"anonymous"}
+        self._rate_limiter.cleanup(active_clients)
         return len(stale_keys)
 
     async def start(self, bridge: XMPPBridge) -> None:
@@ -786,6 +792,14 @@ class BridgeMCPServer:
             f"'{bound}', cannot operate on '{session_id}'"
         )
 
+    def _check_rate_limit(self, client_id: str | None) -> str | None:
+        """Return an error string if the MCP client is rate-limited, else None."""
+        key = (client_id or "").strip() or "anonymous"
+        allowed, retry_after = self._rate_limiter.check(key)
+        if not allowed:
+            return f"rate limit exceeded, try again in {retry_after}s"
+        return None
+
     def _resolve_sender_session_id(
         self,
         sender_session_id: str,
@@ -873,6 +887,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return "Error: bridge not initialised"
+        rl_err = self._check_rate_limit(client_id)
+        if rl_err:
+            return f"Error: {rl_err}"
         if not to:
             return bridge.messages.mcp_send_missing_to
         if not message:
@@ -1072,6 +1089,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return "Error: bridge not initialised"
+        rl_err = self._check_rate_limit(client_id)
+        if rl_err:
+            return f"Error: {rl_err}"
         if not message:
             return bridge.messages.broadcast_no_message
         if len(message) > MAX_MESSAGE_SIZE:
@@ -1465,6 +1485,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return []
+        rl_err = self._check_rate_limit(client_id)
+        if rl_err:
+            return []
         ownership_error = self._check_session_ownership(client_id, session_id)
         if ownership_error:
             log.warning("receive_messages denied: %s", ownership_error)
@@ -1541,6 +1564,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        rl_err = self._check_rate_limit(client_id)
+        if rl_err:
+            return {"ok": False, "error": rl_err}
         if not to:
             return {"ok": False, "error": "missing target session_id (to)"}
         if not description:
@@ -1644,6 +1670,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        rl_err = self._check_rate_limit(client_id)
+        if rl_err:
+            return {"ok": False, "error": rl_err}
         if not task_id:
             return {"ok": False, "error": "missing task_id"}
         valid_statuses = {"accepted", "completed", "failed", "cancelled"}

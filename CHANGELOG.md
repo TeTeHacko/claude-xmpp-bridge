@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.13] - 2026-03-22
+
+### Added
+- **SMTP STARTTLS support** — new `smtp_starttls` config option (`auto`/`always`/`never`). In `auto` mode (default), STARTTLS is used for non-localhost SMTP hosts. Configurable via TOML (`smtp_starttls`), env var (`CLAUDE_XMPP_SMTP_STARTTLS`).
+- **Rate limiting** — socket requests limited to 300/min per session, MCP tool calls to 600/min per client. New `rate_limit.py` module with sliding-window `RateLimiter`. Buckets cleaned up during stale session cleanup.
+
+### Fixed
+- **SSE parsing in plugin** — `pollInbox` now accumulates all `data:` lines from SSE responses (using `.filter()` + `.join()`) instead of taking only the first `data:` line. Handles multi-line SSE events per the SSE specification.
+- **Claude Code hook registration** — `session-start-register.sh` now includes `source: "claude-code"` and `plugin_version: "hook"` fields in the registration payload for feature parity with the OpenCode plugin.
+- **Stale prompt_async references** — removed remaining `prompt_async` references in plugin comments and OpenCode README.
+
 ## [0.9.12] - 2026-03-22
 
 ### Fixed

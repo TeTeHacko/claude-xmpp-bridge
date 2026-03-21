@@ -960,3 +960,36 @@ class TestSMTPConfig:
         cfg = load_config(cli_credentials=str(credentials_file))
 
         assert cfg.smtp_host == "env-host"
+
+    def test_smtp_starttls_default(self, monkeypatch, credentials_file, tmp_path):
+        monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
+        monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
+        monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
+        cfg = load_config(cli_credentials=str(credentials_file))
+        assert cfg.smtp_starttls == "auto"
+
+    def test_smtp_starttls_from_toml(self, monkeypatch, credentials_file, tmp_path):
+        toml_file = _write_toml(
+            tmp_path / "config.toml",
+            'jid = "bot@example.com"\nrecipient = "rcpt@example.com"\nsmtp_starttls = "always"\n',
+        )
+        monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
+        cfg = load_config(cli_credentials=str(credentials_file))
+        assert cfg.smtp_starttls == "always"
+
+    def test_smtp_starttls_from_env(self, monkeypatch, credentials_file, tmp_path):
+        monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "nope.toml")
+        monkeypatch.setenv("CLAUDE_XMPP_JID", "bot@example.com")
+        monkeypatch.setenv("CLAUDE_XMPP_RECIPIENT", "rcpt@example.com")
+        monkeypatch.setenv("CLAUDE_XMPP_SMTP_STARTTLS", "never")
+        cfg = load_config(cli_credentials=str(credentials_file))
+        assert cfg.smtp_starttls == "never"
+
+    def test_smtp_starttls_invalid_value_exits(self, monkeypatch, credentials_file, tmp_path):
+        toml_file = _write_toml(
+            tmp_path / "config.toml",
+            'jid = "bot@example.com"\nrecipient = "rcpt@example.com"\nsmtp_starttls = "bogus"\n',
+        )
+        monkeypatch.setattr(config, "CONFIG_FILE", toml_file)
+        with pytest.raises(SystemExit, match="smtp_starttls must be"):
+            load_config(cli_credentials=str(credentials_file))

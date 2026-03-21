@@ -1,6 +1,9 @@
 """Async email notification helper.
 
-Sends a plain-text email via a local (unauthenticated) SMTP relay.
+Sends a plain-text email via an SMTP relay.  When the relay is not
+localhost, STARTTLS is attempted automatically to protect credentials
+and message content in transit.
+
 Used by the bridge to deliver full message bodies when the XMPP
 notification is truncated because it exceeds *email_threshold* characters.
 """
@@ -16,6 +19,8 @@ from email.mime.text import MIMEText
 
 log = logging.getLogger(__name__)
 
+_LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
 
 async def send_email(
     smtp_host: str,
@@ -24,6 +29,8 @@ async def send_email(
     recipient: str,
     subject: str,
     body: str,
+    *,
+    smtp_starttls: str = "auto",
 ) -> bool:
     """Send *body* via SMTP in a thread-pool executor (non-blocking).
 
@@ -34,6 +41,9 @@ async def send_email(
         recipient: To address.
         subject:   Email subject line.
         body:      Full plain-text body.
+        smtp_starttls: TLS mode — ``"auto"`` (default) uses STARTTLS for
+            non-localhost hosts, ``"always"`` forces STARTTLS, ``"never"``
+            disables it.
 
     Returns:
         True on success, False if delivery failed (exception is logged).
@@ -49,6 +59,7 @@ async def send_email(
             recipient,
             subject,
             body,
+            smtp_starttls,
         )
         log.info("Email sent to %s via %s:%d", recipient, smtp_host, smtp_port)
         return True
@@ -64,6 +75,7 @@ def _send_sync(
     recipient: str,
     subject: str,
     body: str,
+    smtp_starttls: str = "auto",
 ) -> None:
     """Synchronous SMTP send — called from a thread-pool executor."""
     msg = MIMEText(body, "plain", "utf-8")
@@ -73,5 +85,11 @@ def _send_sync(
     msg["Date"] = email.utils.format_datetime(datetime.now(tz=UTC))
     msg["Auto-Submitted"] = "auto-generated"
 
+    use_tls = smtp_starttls == "always" or (
+        smtp_starttls == "auto" and smtp_host.lower() not in _LOCALHOST_HOSTS
+    )
+
     with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as smtp:
+        if use_tls:
+            smtp.starttls()
         smtp.sendmail(sender, [recipient], msg.as_string())

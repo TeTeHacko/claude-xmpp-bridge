@@ -160,3 +160,122 @@ class TestSendEmail:
 
         # charset=utf-8 must appear in the MIME headers
         assert "utf-8" in captured["msg"].lower()
+
+
+class TestSmtpStarttls:
+    """Tests for STARTTLS behaviour based on smtp_starttls parameter."""
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_uses_starttls_for_remote_host(self):
+        with patch("smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp = MagicMock()
+            mock_smtp_cls.return_value.__enter__ = lambda s: mock_smtp
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+            await send_email(
+                smtp_host="mail.example.com",
+                smtp_port=587,
+                sender="a@b.com",
+                recipient="c@d.com",
+                subject="S",
+                body="B",
+                smtp_starttls="auto",
+            )
+
+        mock_smtp.starttls.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_skips_starttls_for_localhost(self):
+        with patch("smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp = MagicMock()
+            mock_smtp_cls.return_value.__enter__ = lambda s: mock_smtp
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+            await send_email(
+                smtp_host="localhost",
+                smtp_port=25,
+                sender="a@b.com",
+                recipient="c@d.com",
+                subject="S",
+                body="B",
+                smtp_starttls="auto",
+            )
+
+        mock_smtp.starttls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_skips_starttls_for_127_0_0_1(self):
+        with patch("smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp = MagicMock()
+            mock_smtp_cls.return_value.__enter__ = lambda s: mock_smtp
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+            await send_email(
+                smtp_host="127.0.0.1",
+                smtp_port=25,
+                sender="a@b.com",
+                recipient="c@d.com",
+                subject="S",
+                body="B",
+                smtp_starttls="auto",
+            )
+
+        mock_smtp.starttls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_always_mode_forces_starttls_for_localhost(self):
+        with patch("smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp = MagicMock()
+            mock_smtp_cls.return_value.__enter__ = lambda s: mock_smtp
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+            await send_email(
+                smtp_host="localhost",
+                smtp_port=25,
+                sender="a@b.com",
+                recipient="c@d.com",
+                subject="S",
+                body="B",
+                smtp_starttls="always",
+            )
+
+        mock_smtp.starttls.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_never_mode_skips_starttls_for_remote_host(self):
+        with patch("smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp = MagicMock()
+            mock_smtp_cls.return_value.__enter__ = lambda s: mock_smtp
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+            await send_email(
+                smtp_host="mail.example.com",
+                smtp_port=587,
+                sender="a@b.com",
+                recipient="c@d.com",
+                subject="S",
+                body="B",
+                smtp_starttls="never",
+            )
+
+        mock_smtp.starttls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_default_is_auto(self):
+        """Omitting smtp_starttls should behave like 'auto'."""
+        with patch("smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp = MagicMock()
+            mock_smtp_cls.return_value.__enter__ = lambda s: mock_smtp
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+            # Remote host — should STARTTLS
+            await send_email(
+                smtp_host="mail.example.com",
+                smtp_port=587,
+                sender="a@b.com",
+                recipient="c@d.com",
+                subject="S",
+                body="B",
+            )
+
+        mock_smtp.starttls.assert_called_once()
