@@ -11,8 +11,8 @@ Why static analysis instead of running the plugin:
   they catch regressions immediately and are fast (< 1 ms each).
 
 Invariants checked:
-  1. CLIENT_BIN fallback — runClient and rawRelay return immediately without
-     any subprocess or console output when CLIENT_BIN is null.
+   1. CLIENT_BIN fallback — runClient returns immediately without
+      any subprocess or console output when CLIENT_BIN is null.
   2. scheduleTitle/applyTitleNow — sandbox fallback uses process.stdout.write,
      while non-sandbox updates go through screen -X title with debounce.
   3. Startup title setup is deferred (setImmediate), avoiding redraws during
@@ -83,7 +83,7 @@ def _function_body(text: str, fn_start_pattern: str) -> str:
 
 
 class TestPluginClientBinFallback:
-    """runClient and rawRelay must be no-ops when CLIENT_BIN is null."""
+    """runClient must be a no-op when CLIENT_BIN is null; injectViaPromptAsync uses HTTP."""
 
     def test_runClient_returns_127_silently_when_no_client_bin(self):
         """runClient must return {exitCode:127} immediately without any subprocess
@@ -109,36 +109,33 @@ class TestPluginClientBinFallback:
         assert 'stdout: "pipe", stderr: "pipe"' in body, (
             "runClient must capture stdout/stderr instead of leaking client output to the terminal"
         )
-        assert 'new Response(proc.stderr).text()' in body, "runClient must read stderr explicitly"
-        assert '$`${CLIENT_BIN} ${args}`' not in body, "runClient must not use Bun shell interpolation anymore"
+        assert "new Response(proc.stderr).text()" in body, "runClient must read stderr explicitly"
+        assert "$`${CLIENT_BIN} ${args}`" not in body, "runClient must not use Bun shell interpolation anymore"
 
     def test_runAgentNotify_uses_quiet_spawn_helper(self):
         text = _plugin_text()
-        assert 'const runQuietCommand = async (argv) => {' in text, "plugin must define quiet subprocess helper"
+        assert "const runQuietCommand = async (argv) => {" in text, "plugin must define quiet subprocess helper"
         body = _function_body(text, "const runAgentNotify = async")
         assert body, "runAgentNotify helper not found in plugin"
-        assert 'runQuietCommand([AGENT_NOTIFY_BIN, ...args])' in body
-        assert 'agent-notify exit=' in body, "agent-notify errors should go to structured logs"
+        assert "runQuietCommand([AGENT_NOTIFY_BIN, ...args])" in body
+        assert "agent-notify exit=" in body, "agent-notify errors should go to structured logs"
 
     def test_agent_notify_no_longer_uses_bun_shell_templates(self):
         text = _plugin_text()
         assert "agent-notify.sh" in text, "plugin should still reference agent-notify helper"
-        assert '$`${process.env.HOME}/claude-home/agent-notify.sh' not in text, (
+        assert "$`${process.env.HOME}/claude-home/agent-notify.sh" not in text, (
             "agent-notify must not be executed through Bun shell templates anymore"
         )
 
-    def test_rawRelay_returns_silently_when_no_client_bin(self):
-        """rawRelay must return immediately without spawning a process when
-        CLIENT_BIN is null.
-        """
+    def test_injectViaPromptAsync_exists_and_uses_http(self):
+        """injectViaPromptAsync must use HTTP prompt_async endpoint for push delivery."""
         text = _plugin_text()
-        body = _function_body(text, "const rawRelay = async")
-        assert body, "rawRelay function not found in plugin"
+        body = _function_body(text, "const injectViaPromptAsync = async")
+        assert body, "injectViaPromptAsync function not found in plugin"
 
-        assert "!CLIENT_BIN" in body, "rawRelay must check !CLIENT_BIN as first guard"
-        # Must not print anything to console
-        assert "console.log" not in body, "rawRelay must not call console.log"
-        assert "console.error" not in body, "rawRelay must not call console.error"
+        assert "prompt_async" in body, "must use prompt_async endpoint"
+        assert "fetch(" in body, "must use fetch for HTTP call"
+        assert "opencodeSessionID" in body, "must use raw OpenCode session ID"
 
     def test_runClient_guard_is_first_statement(self):
         """The !CLIENT_BIN guard must be the very first statement in runClient,
@@ -157,16 +154,16 @@ class TestPluginClientBinFallback:
             f"runClient first statement must be 'if (!CLIENT_BIN)', got: {inner_no_comments[:80]!r}"
         )
 
-    def test_rawRelay_guard_is_first_statement(self):
-        """The !CLIENT_BIN guard must be the very first statement in rawRelay."""
+    def test_injectViaPromptAsync_checks_opencodeSessionID(self):
+        """injectViaPromptAsync must check opencodeSessionID before making HTTP call."""
         text = _plugin_text()
-        body = _function_body(text, "const rawRelay = async")
-        assert body, "rawRelay function not found in plugin"
+        body = _function_body(text, "const injectViaPromptAsync = async")
+        assert body, "injectViaPromptAsync function not found in plugin"
 
         inner = body.strip().lstrip("{").strip()
         inner_no_comments = re.sub(r"//[^\n]*", "", inner).strip()
-        assert inner_no_comments.startswith("if (!CLIENT_BIN)"), (
-            f"rawRelay first statement must be 'if (!CLIENT_BIN)', got: {inner_no_comments[:80]!r}"
+        assert "!text" in inner_no_comments[:100] or "!ocID" in inner_no_comments[:200], (
+            "injectViaPromptAsync must guard against empty text or missing session ID early"
         )
 
     def test_runBridgeClient_suppresses_calls_when_bridge_unavailable(self):
@@ -197,10 +194,10 @@ class TestPluginClientBinFallback:
 
     def test_plugin_uses_structured_log_levels_and_throttling(self):
         text = _plugin_text()
-        assert "const logPlugin = (level, msg, key = \"\") =>" in text, "plugin must centralize logging"
-        assert "const warn = (msg, key = \"\") => logPlugin(\"warn\", msg, key)" in text
-        assert "const errlog = (msg, key = \"\") => logPlugin(\"error\", msg, key)" in text
-        assert "const logCaught = (scope, err, key = \"\") => errlog(" in text
+        assert 'const logPlugin = (level, msg, key = "") =>' in text, "plugin must centralize logging"
+        assert 'const warn = (msg, key = "") => logPlugin("warn", msg, key)' in text
+        assert 'const errlog = (msg, key = "") => logPlugin("error", msg, key)' in text
+        assert 'const logCaught = (scope, err, key = "") => errlog(' in text
         assert "const lastLogAt = new Map()" in text, "plugin logs should be throttled by key"
         assert "XMPP_BRIDGE_LOG_THROTTLE_MS" in text, "plugin must expose log throttle env var"
 
@@ -221,7 +218,7 @@ class TestPluginClientBinFallback:
         assert idx != -1, "event handler not found in plugin"
         body = text[idx : idx + 12000]
         assert "try {" in body, "event handler must wrap event processing in try/catch"
-        assert 'await logCaught(`event:${event.type}`, err, `event-error:${event.type}`)' in body
+        assert "await logCaught(`event:${event.type}`, err, `event-error:${event.type}`)" in body
 
     def test_runBridgeClient_short_circuits_when_bridge_disabled(self):
         text = _plugin_text()
@@ -319,9 +316,7 @@ class TestPluginTitleFallback:
 
         # The stdout.write line must be preceded by `if (STY && inSandbox)` within a few lines
         context = "\n".join(lines[max(0, stdout_line_idx - 5) : stdout_line_idx + 1])
-        assert "inSandbox" in context, (
-            f"stdout.write fallback must be guarded by inSandbox, context:\n{context}"
-        )
+        assert "inSandbox" in context, f"stdout.write fallback must be guarded by inSandbox, context:\n{context}"
 
     def test_sandbox_detected_once_at_startup(self):
         """detectSandbox() must exist and inSandbox must be set once at startup,
@@ -340,13 +335,10 @@ class TestPluginTitleFallback:
         )
 
         # inSandbox must be assigned from detectSandbox result (sync call, no await)
-        assert "inSandbox = detectSandbox()" in text, (
-            "inSandbox must be set once via 'detectSandbox()' (synchronous)"
-        )
+        assert "inSandbox = detectSandbox()" in text, "inSandbox must be set once via 'detectSandbox()' (synchronous)"
 
     def test_applyTitleNow_uses_screen_title_outside_sandbox(self):
-        """Outside sandbox, applyTitleNow must use screen -X title.
-        """
+        """Outside sandbox, applyTitleNow must use screen -X title."""
         text = _plugin_text()
         body = _function_body(text, "const applyTitleNow = async")
         assert body, "applyTitleNow function not found in plugin"
@@ -450,7 +442,7 @@ class TestPluginTitleFallback:
         assert 'fireAndForget(runBridgeClient("unregister", registeredSessionID), "bridge-unregister")' in body, (
             "dispose path must not await unregister synchronously"
         )
-        assert 'fireAndForget(' in body and 'agent-notify-end' in body, (
+        assert "fireAndForget(" in body and "agent-notify-end" in body, (
             "dispose path must send end notification without blocking shutdown"
         )
 
@@ -472,7 +464,7 @@ class TestPluginTitleFallback:
         text = _plugin_text()
         body = _function_body(text, 'if (event.type === "session.status")')
         assert body, "session.status branch not found in plugin"
-        assert 'immediate: true' in body, "session.status busy must use immediate title update"
+        assert "immediate: true" in body, "session.status busy must use immediate title update"
 
     def test_permission_asked_uses_immediate_title(self):
         """Permission dialog must flip to red immediately — delayed debounce would
@@ -481,7 +473,7 @@ class TestPluginTitleFallback:
         text = _plugin_text()
         body = _function_body(text, 'if (event.type === "permission.asked")')
         assert body, "permission.asked branch not found in plugin"
-        assert 'immediate: true' in body, "permission.asked must use immediate title update"
+        assert "immediate: true" in body, "permission.asked must use immediate title update"
 
 
 # ---------------------------------------------------------------------------
@@ -522,8 +514,8 @@ class TestPluginNothrowOnExternalCalls:
     def test_agent_notify_calls_use_nothrow(self):
         """agent-notify helper must no longer run through raw Bun shell templates."""
         text = _plugin_text()
-        assert 'const runAgentNotify = async' in text, "runAgentNotify helper must exist"
-        assert '$`${process.env.HOME}/claude-home/agent-notify.sh' not in text, (
+        assert "const runAgentNotify = async" in text, "runAgentNotify helper must exist"
+        assert "$`${process.env.HOME}/claude-home/agent-notify.sh" not in text, (
             "agent-notify shell template calls must be removed in favor of quiet spawned execution"
         )
 
@@ -607,3 +599,71 @@ class TestPluginNoopWhenNoSession:
         assert inner_no_comments.startswith("if (!registeredSessionID)"), (
             f"reportState first statement must be 'if (!registeredSessionID)', got: {inner_no_comments[:80]!r}"
         )
+
+
+class TestPushBasedDelivery:
+    """v0.9.0: push-based delivery via prompt_async replaces polling+rawRelay."""
+
+    def test_no_rawRelay_function(self):
+        """rawRelay was removed in v0.9.0 — plugin must not contain it."""
+        text = _plugin_text()
+        body = _function_body(text, "const rawRelay = async")
+        assert not body, "rawRelay function must not exist in v0.9.0+ plugin"
+
+    def test_no_messageBuffer(self):
+        """messageBuffer was removed — all messages injected at once."""
+        text = _plugin_text()
+        assert "let messageBuffer" not in text, "messageBuffer variable must not exist"
+
+    def test_no_polling_timer(self):
+        """30s polling timer was removed — session.idle is the only trigger."""
+        text = _plugin_text()
+        assert "IDLE_POLL_INTERVAL_MS" not in text, "IDLE_POLL_INTERVAL_MS must not exist"
+        assert "let pollTimer" not in text, "pollTimer variable must not exist"
+
+    def test_no_idle_delay(self):
+        """1.5s delay before pollInbox was removed."""
+        text = _plugin_text()
+        # The old pattern: setTimeout(resolve, 1500)
+        assert "setTimeout(resolve, 1500)" not in text, "1.5s idle delay must not exist"
+
+    def test_injectViaPromptAsync_uses_prompt_async_endpoint(self):
+        """Push delivery must use OpenCode HTTP API prompt_async."""
+        text = _plugin_text()
+        body = _function_body(text, "const injectViaPromptAsync = async")
+        assert body, "injectViaPromptAsync function must exist"
+        assert "prompt_async" in body, "must target prompt_async endpoint"
+        assert "fetch(" in body, "must use HTTP fetch"
+        assert '"POST"' in body, "must use POST method"
+        assert "parts" in body, "must send parts array"
+
+    def test_pollInbox_uses_injectViaPromptAsync(self):
+        """pollInbox must use injectViaPromptAsync instead of rawRelay."""
+        text = _plugin_text()
+        body = _function_body(text, "const pollInbox = async")
+        assert body, "pollInbox function must exist"
+        assert "injectViaPromptAsync" in body, "pollInbox must call injectViaPromptAsync"
+        assert "rawRelay" not in body, "pollInbox must not reference rawRelay"
+        assert "messageBuffer" not in body, "pollInbox must not reference messageBuffer"
+
+    def test_pollInbox_no_sty_guard(self):
+        """pollInbox must work without Screen (prompt_async is backend-agnostic)."""
+        text = _plugin_text()
+        body = _function_body(text, "const pollInbox = async")
+        assert body, "pollInbox function must exist"
+        # The old guard was: !STY
+        assert "!STY" not in body, "pollInbox must not require STY (Screen)"
+
+    def test_opencodeSessionID_tracked(self):
+        """Plugin must track raw OpenCode session ID for prompt_async."""
+        text = _plugin_text()
+        assert "let opencodeSessionID = null" in text, "opencodeSessionID must be declared"
+        assert "opencodeSessionID = active.id" in text, "must set from startup registration"
+        assert "opencodeSessionID = info.id" in text, "must set from session.created"
+
+    def test_serverUrl_resolved(self):
+        """Plugin must resolve OpenCode server URL for HTTP API calls."""
+        text = _plugin_text()
+        assert "serverUrl" in text, "serverUrl must be defined"
+        assert "OPENCODE_SERVER_URL" in text, "must support env var override"
+        assert "localhost:4096" in text, "must have sensible default"

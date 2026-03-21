@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-03-22
+
+### Changed
+- **Push-based message delivery** — replaced polling+rawRelay architecture with OpenCode HTTP API (`prompt_async`). Messages are now injected directly via `POST /session/{id}/prompt_async` instead of screen stuff relay. This eliminates the 30s polling timer, 1.5s idle delay, messageBuffer (1-per-cycle limit), and dependency on GNU Screen for message delivery. All pending messages are concatenated and injected in a single prompt on `session.idle`. Latency reduced from 0-30s to near-instant.
+
+### Removed
+- `rawRelay()` function (screen stuff via claude-xmpp-client relay)
+- `messageBuffer` local queue (1 message per poll cycle)
+- `pollTimer` (30s periodic polling interval)
+- `IDLE_POLL_INTERVAL_MS` constant
+- 1.5s delay before inbox poll on session.idle
+- `!STY` guard on pollInbox (prompt_async works without Screen)
+
 ## [0.8.26] - 2026-03-21
 
 ### Changed

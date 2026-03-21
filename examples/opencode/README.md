@@ -185,28 +185,29 @@ changes still show up in `/list` even if the Python package version stays the sa
 Session context exposed through MCP now also includes `todos_version`, `todo_count`,
 `lock_count`, and `inbox_count`, so agents can coordinate without shell-side state.
 
-## MCP Inbox Polling
+## Push-Based Message Delivery (v0.9.0+)
 
-The plugin polls the MCP server (`http://127.0.0.1:7878`) for messages sent by other agents via `send_message` or `broadcast_message`. Polling happens:
+The plugin uses push-based delivery for inter-agent messages. On each
+`session.idle` event, it drains the MCP inbox and injects **all** pending
+messages at once via the OpenCode HTTP API (`POST /session/{id}/prompt_async`).
 
-- Immediately on each `session.idle` event
-- Every 30 s while the session is idle
+This replaces the previous polling+rawRelay architecture:
+- No 30s polling timer — `session.idle` is the only trigger
+- No messageBuffer — all messages concatenated into one prompt
+- No screen stuff relay — uses native OpenCode HTTP API
+- No 1.5s idle delay — prompt_async is fire-and-forget
+- Works without GNU Screen (tmux, bare terminal)
 
-The plugin caches the active MCP `mcp-session-id` between polls, so steady-state
-polling usually sends only a single `tools/call` request. It falls back to a fresh
-`initialize` only after bridge unavailability or MCP request failure.
+The plugin caches the active MCP `mcp-session-id` between calls, so steady-state
+inbox drain usually sends only a single `tools/call` request. It falls back to a
+fresh `initialize` only after bridge unavailability or MCP request failure.
 
 If the bridge/MCP server is unavailable, the plugin enters a quiet degraded mode:
 
 - bridge calls are suppressed during cooldown instead of retrying on every idle event
-- idle polling and fast re-register timers are stopped while the bridge is down
+- re-register timer is stopped while the bridge is down
 - a slow recovery timer retries registration in the background
 - helper scripts are only called after bridge registration succeeds
-
-Received messages are injected into the terminal via `claude-xmpp-client relay`.
-Inter-agent messages are wrapped by the bridge as a generated block with a JSON
-metadata line, so it is immediately visible in shared Screen/tmux windows that
-the text was injected by the bridge rather than typed manually.
 
 When one agent wants a direct reply from another, it should call MCP
 `send_message(..., sender_session_id=process.env.BRIDGE_SESSION_ID)`.

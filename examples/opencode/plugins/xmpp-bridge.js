@@ -5,8 +5,8 @@
  *  - při startu pluginu       → přejmenuje okno + zaregistruje aktivní session
  *  - session.created          → registrace nové top-level session (při /new)
  *  - session.deleted          → odhlásí session z bridge
- *  - session.idle             → XMPP notifikace s poslední odpovědí + MCP inbox poll
- *                               + detekce question (🔴 pokud agent čeká na odpověď)
+ *  - session.idle             → push delivery: MCP inbox drain → prompt_async inject
+ *                               + XMPP notifikace + detekce question (🔴)
  *  - session.status (busy)    → model začal generovat (stav 🔵, agent se nemění)
  *  - message.updated          → detekce aktivního agenta (pole info.agent)
  *  - tool.execute.before      → report state=running do bridge (bez title update)
@@ -44,10 +44,11 @@
  *
  *   Příklady: ⚪🟢 projekt  |  🟠🔵 projekt  |  🔵🔴 projekt
  *
- * MCP inbox polling:
- *   - Při session.idle: okamžitý poll
- *   - Každých 30 s (IDLE_POLL_INTERVAL_MS): periodický poll, pouze pokud je agent idle.
- *   - MCP session ID se cachuje mezi polly; po výpadku bridge se cache invaliduje.
+ * Push-based message delivery (v0.9.0):
+ *   - Při session.idle: drain MCP inbox → inject ALL messages via prompt_async HTTP API
+ *   - Žádný polling timer — session.idle je jediný trigger
+ *   - Žádný messageBuffer — všechny zprávy se concatenují do jednoho promptu
+ *   - MCP session ID se cachuje; po výpadku bridge se cache invaliduje.
  *
  * Zapínání/vypínání:
  *   touch ~/.config/xmpp-notify/notify-enabled   # XMPP notifikace při session.idle
@@ -56,8 +57,8 @@
  * Vyžaduje: claude-xmpp-bridge démon + claude-xmpp-client v $PATH
  */
 
-export const XmppBridgePlugin = async ({ client, directory, $ }) => {
-   const PLUGIN_VERSION = "0.8.26"
+export const XmppBridgePlugin = async ({ client, directory, $, serverUrl: inputServerUrl }) => {
+   const PLUGIN_VERSION = "0.9.0"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -226,7 +227,6 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   // ---------------------------------------------------------------------------
   // Idle polling state
   // ---------------------------------------------------------------------------
-  const IDLE_POLL_INTERVAL_MS = 30_000
   // Periodický re-register: pokud bridge session nezná (restart bridge), re-zaregistruje.
   // Interval 90s — nezávislý na session.idle, zajistí obnovu i pokud agent je long-running.
   // Přepis přes env: XMPP_BRIDGE_REREG_INTERVAL_MS (pro testy nastavit na nízkou hodnotu).
@@ -234,7 +234,6 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   const BRIDGE_RECOVERY_POLL_MS = parseInt(process.env.XMPP_BRIDGE_RECOVERY_POLL_MS ?? "300000")
   const BRIDGE_RETRY_MS = parseInt(process.env.XMPP_BRIDGE_RETRY_MS ?? "60000")
   let isIdle = false
-  let pollTimer = null
   let reregTimer = null
   let recoveryTimer = null
   let polling = false  // guard against concurrent pollInbox calls
@@ -242,13 +241,6 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   let cachedMcpSessionId = null
   let desiredBridgeSessionID = null
   let desiredProjectDir = directory
-
-  // ---------------------------------------------------------------------------
-  // messageBuffer: lokální fronta zpráv čekajících na doručení.
-  // Zprávy se vybírají po jedné per poll cycle, aby se předešlo race condition
-  // kdy druhá zpráva dorazí dřív než model zpracuje první (→ "assistant prefill" chyba).
-  // ---------------------------------------------------------------------------
-  let messageBuffer = []
 
    // Agent ikony — barevné kolečko odpovídající barvě agenta v OpenCode TUI.
    //
@@ -305,11 +297,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
     `${statePrefix} ${name ?? projectName}`
 
   // ---------------------------------------------------------------------------
-  // pollInbox(): zkontroluje MCP inbox a doručí čekající zprávy do terminálu.
-  // Vždy injektuje nejvýše JEDNU zprávu — zbytek jde do messageBuffer.
-  // Volá se okamžitě při session.idle a periodicky každých 30s pokud isIdle.
-  // Funguje jen pro screen sessions (STY musí být nastaveno).
-  // Guard: `polling` flag zabrání concurrent spuštění (session.idle + interval).
+  // pollInbox(): drain MCP inbox a doručí VŠECHNY zprávy přes prompt_async.
+  // Volá se při session.idle — žádný polling timer.
+  // Všechny zprávy se concatenují do jednoho promptu (žádný messageBuffer).
+  // Guard: `polling` flag zabrání concurrent spuštění.
   // ---------------------------------------------------------------------------
   const LOG_THROTTLE_MS = parseInt(process.env.XMPP_BRIDGE_LOG_THROTTLE_MS ?? "30000")
   const lastLogAt = new Map()
@@ -330,30 +321,45 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   const logCaught = (scope, err, key = "") => errlog(`${scope}: ${err}`, key || `caught:${scope}`)
 
   // ---------------------------------------------------------------------------
-  // rawRelay(): posílá zprávu přes claude-xmpp-client relay BEZ bun shell.
-  // Důvod: bun shell $`...` interpretuje shell metaznaky ($, |, ', >) v obsahu
-  // zprávy, čímž ji poškodí. Bun.spawn předá argumenty přímo (exec, ne shell).
-  // "--" před msg zajistí, že zprávy začínající "-" nejsou interpretovány jako
-  // přepínače CLI. stdout: "ignore" zabrání zablokování při přeplnění pipe bufferu.
+  // injectViaPromptAsync(): doručí zprávu do OpenCode session přes HTTP API.
+  // Používá POST /session/{id}/prompt_async — fire-and-forget, vrací 204.
+  // Nahrazuje rawRelay() (screen stuff) — žádné shell metaznaky, žádný screen.
+  // Funguje i bez Screen backendu (tmux, bare terminal).
+  // serverUrl je z plugin inputu (default http://localhost:4096).
   // ---------------------------------------------------------------------------
-  const rawRelay = async (to, msg) => {
-    if (!CLIENT_BIN) return { exitCode: 127, stderr: "claude-xmpp-client not available" }
-    if (bridgeSuppressed()) return { exitCode: 125, stderr: "bridge suppressed" }
+  const serverUrl = inputServerUrl ?? process.env.OPENCODE_SERVER_URL ?? "http://localhost:4096"
+
+  // Resolve the top-level OpenCode session ID (without _wN suffix).
+  // prompt_async needs the raw OpenCode session ID, not the bridge ID.
+  let opencodeSessionID = null
+
+  const injectViaPromptAsync = async (sessionID, text) => {
+    if (!text) return { ok: false, error: "empty text" }
+    // We need the raw OpenCode session ID (without _wN suffix)
+    const ocID = opencodeSessionID
+    if (!ocID) {
+      await warn("injectViaPromptAsync: no opencodeSessionID known yet", "inject-no-session")
+      return { ok: false, error: "no opencodeSessionID" }
+    }
     try {
-      const proc = Bun.spawn([CLIENT_BIN, "relay", "--to", to, "--", msg], {
-        stdout: "ignore", stderr: "pipe",
+      const url = `${serverUrl}/session/${encodeURIComponent(ocID)}/prompt_async`
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parts: [{ type: "text", text }],
+        }),
       })
-      const exitCode = await proc.exited
-      const stderr = await new Response(proc.stderr).text()
-      const res = { exitCode, stderr, stdout: "" }
-      if (isBridgeUnavailableError(res)) {
-        await markBridgeUnavailable("relay")
-      } else if (exitCode === 0) {
-        clearBridgeUnavailable()
+      if (res.ok || res.status === 204) {
+        await dbg(`prompt_async injected ${text.length} chars into ${ocID}`)
+        return { ok: true }
       }
-      return { exitCode, stderr }
+      const body = await res.text().catch(() => "")
+      await warn(`prompt_async HTTP ${res.status}: ${body.slice(0, 200)}`, "inject-http-error")
+      return { ok: false, error: `HTTP ${res.status}` }
     } catch (err) {
-      return { exitCode: -1, stderr: String(err) }
+      await errlog(`prompt_async error: ${err}`, "inject-error")
+      return { ok: false, error: String(err) }
     }
   }
 
@@ -386,7 +392,6 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   const stopActiveBridgeTimers = () => {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
     if (reregTimer) { clearInterval(reregTimer); reregTimer = null }
   }
 
@@ -403,11 +408,6 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
             await runAgentNotify("start", desiredBridgeSessionID, desiredProjectDir)
           }
         await reportState(isIdle ? "idle" : "running")
-        if (STY && !pollTimer) {
-          pollTimer = setInterval(async () => {
-            if (isIdle) await pollInbox()
-          }, IDLE_POLL_INTERVAL_MS)
-        }
         if (!reregTimer) {
           reregTimer = setInterval(async () => {
             if (!registeredSessionID) return
@@ -424,23 +424,9 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
   }
 
   const pollInbox = async () => {
-    if (bridgeDisabled || !registeredSessionID || !STY || polling || bridgeSuppressed()) return
+    if (bridgeDisabled || !registeredSessionID || polling || bridgeSuppressed()) return
     polling = true
     try {
-      // Nejdřív zkusit lokální buffer — pokud tam je zpráva, injektovat ji
-      // a nechodit vůbec na MCP (model ještě zpracovává předchozí).
-      if (messageBuffer.length > 0) {
-        const msg = messageBuffer.shift()
-        const relayRes = await rawRelay(registeredSessionID, msg)
-        if (relayRes.exitCode !== 0 && relayRes.exitCode !== 125 && relayRes.exitCode !== 127 && !isSessionNotFoundError(relayRes)) {
-            await warn(
-              "relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200),
-              "relay-failed"
-            )
-        }
-        return
-      }
-
       let mcpSessionId = cachedMcpSessionId
       if (!mcpSessionId) {
         // Step 1: initialize — get mcp-session-id
@@ -465,7 +451,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         cachedMcpSessionId = mcpSessionId
       }
 
-      // Step 2: tools/call with session header
+      // Step 2: tools/call — drain inbox
       const mcpRes = await fetch("http://127.0.0.1:7878/mcp", {
         method:  "POST",
         headers: {
@@ -497,45 +483,35 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         return
       }
 
-      if (mcpRes.ok) {
-        const text = await mcpRes.text().catch(() => null)
-        const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
-        const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null
-        // receive_messages returns each message as a separate content item (type=text).
-        // Each item.text is a JSON-encoded dict with keys: text, from_session,
-        // source_type, message_type, message_id, ts, type.
-        const contentItems = body?.result?.content
-        if (Array.isArray(contentItems) && contentItems.length > 0) {
-          // Parse each content item from JSON dict and extract the clean message body.
-          const parseItem = (item) => {
-            if (!item?.text) return null
-            try {
-              const parsed = JSON.parse(item.text)
-              return parsed?.text || null
-            } catch {
-              // Legacy fallback: if not JSON, use raw text
-              return item.text
-            }
-          }
-          // Injektovat pouze PRVNÍ zprávu; zbytek do lokálního bufferu.
-          // Každá další zpráva se injektuje až po session.idle (model zpracoval předchozí).
-          const first = parseItem(contentItems[0])
-          if (first) {
-            // Přidat zbytek do bufferu (budou injektovány postupně při dalších poll cycles)
-            for (const item of contentItems.slice(1)) {
-              const msg = parseItem(item)
-              if (msg) messageBuffer.push(msg)
-            }
-            // Inject into session via raw exec (ne bun shell — chrání metaznaky ve zprávách)
-            const relayRes = await rawRelay(registeredSessionID, first)
-            if (relayRes.exitCode !== 0 && relayRes.exitCode !== 125 && relayRes.exitCode !== 127 && !isSessionNotFoundError(relayRes)) {
-              await warn(
-                "relay exit=" + relayRes.exitCode + " stderr=" + relayRes.stderr.slice(0, 200),
-                "relay-failed"
-              )
-            }
-          }
+      const text = await mcpRes.text().catch(() => null)
+      const dataLine = text?.split('\n').find(l => l.startsWith('data:'))
+      const body = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null
+      // receive_messages returns each message as a separate content item (type=text).
+      // Each item.text is a JSON-encoded dict with keys: text, from_session,
+      // source_type, message_type, message_id, ts, type.
+      const contentItems = body?.result?.content
+      if (!Array.isArray(contentItems) || contentItems.length === 0) return
+
+      // Parse all messages and concatenate into a single prompt.
+      const parseItem = (item) => {
+        if (!item?.text) return null
+        try {
+          const parsed = JSON.parse(item.text)
+          return parsed?.text || null
+        } catch {
+          return item.text
         }
+      }
+      const messages = contentItems.map(parseItem).filter(Boolean)
+      if (messages.length === 0) return
+
+      // Inject ALL messages at once via OpenCode HTTP API (prompt_async).
+      // All messages concatenated into one prompt — no buffering, no per-cycle limit.
+      const combined = messages.join("\n\n---\n\n")
+      await dbg(`pollInbox: ${messages.length} message(s), ${combined.length} chars — injecting via prompt_async`)
+      const injectRes = await injectViaPromptAsync(registeredSessionID, combined)
+      if (!injectRes.ok) {
+        await warn(`pollInbox inject failed: ${injectRes.error}`, "inject-failed")
       }
     } catch (err) {
       await markBridgeUnavailable("mcp-poll")
@@ -812,6 +788,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
       desiredBridgeSessionID = bid
       desiredProjectDir = active.directory
+      opencodeSessionID = active.id  // raw OpenCode ID for prompt_async
       ocToBridge.set(active.id, bid)
       const regRes = await runBridgeClient("register", makeRegPayload(bid, active.directory))
       if (regRes.exitCode === 0) {
@@ -830,13 +807,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
       // Report initial state (agent is idle at startup, mode = planning)
       if (registeredSessionID) await reportState("idle")
 
-      // Spustit periodický inbox polling po registraci
-      if (STY && !pollTimer) {
-        isIdle = true  // agent je při startu idle (čeká na vstup)
-        pollTimer = setInterval(async () => {
-          if (isIdle) await pollInbox()
-        }, IDLE_POLL_INTERVAL_MS)
-      }
+      isIdle = true  // agent je při startu idle (čeká na vstup)
 
       // Spustit periodický re-register timer — obnoví registraci po restartu bridge.
       // Nezávislý na session.idle, zajistí obnovu i pokud agent čeká dlouho na vstup.
@@ -882,7 +853,6 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         stopActiveBridgeTimers()
         if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null }
         clearHstatusPulseTimers()
-        messageBuffer = []
         clearTitleTimer()
         desiredTitle = null
         if (registeredSessionID) {
@@ -915,6 +885,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
         const bid = bridgeID(info.id)
         desiredBridgeSessionID = bid
         desiredProjectDir = info.directory
+        opencodeSessionID = info.id  // raw OpenCode ID for prompt_async
         if (bridgeDisabled) {
           registeredSessionID = null
           process.env.BRIDGE_SESSION_ID = ""
@@ -952,6 +923,7 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
           process.env.BRIDGE_SESSION_ID = ""
         }
         if (desiredBridgeSessionID === bid) desiredBridgeSessionID = null
+        if (opencodeSessionID === info.id) opencodeSessionID = null
         stopActiveBridgeTimers()
         ensureRecoveryTimer()
         return
@@ -983,16 +955,10 @@ export const XmppBridgePlugin = async ({ client, directory, $ }) => {
 
         const sessionID = event.properties.sessionID
 
-        // --- MCP inbox poll: check for pending inter-agent messages ---
-        // Calls the xmpp-bridge MCP tool receive_messages() to drain any messages
-        // that other agents sent via send_message() or broadcast_message().
-        // Each pending message is injected into this session via screen relay.
-        // Delay 1.5s: session.idle fires immediately after model finishes — OpenCode
-        // needs a moment to fully transition to "awaiting user input" state before
-        // we inject a new message, otherwise the message arrives while the conversation
-        // still ends with an assistant turn → "assistant message prefill" API error.
-        await dbg("session.idle fired — registeredSessionID=" + registeredSessionID + " STY=" + STY + " WINDOW=" + WINDOW)
-        await new Promise(resolve => setTimeout(resolve, 1500))
+        // --- Push delivery: drain MCP inbox and inject via prompt_async ---
+        // prompt_async is fire-and-forget — no need for 1.5s delay.
+        // All messages are concatenated and injected in one prompt.
+        await dbg("session.idle fired — registeredSessionID=" + registeredSessionID + " opencodeSessionID=" + opencodeSessionID)
         await pollInbox()
 
         const notifyEnabled =
