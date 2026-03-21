@@ -662,9 +662,11 @@ class TestPushBasedDelivery:
         assert "opencodeSessionID = active.id" in text, "must set from startup registration"
         assert "opencodeSessionID = info.id" in text, "must set from session.created"
 
-    def test_serverUrl_resolved(self):
-        """Plugin must resolve OpenCode server URL for HTTP API calls."""
+    def test_serverUrl_resolved_lazily(self):
+        """Plugin must resolve OpenCode server URL lazily (getter, not at init)."""
         text = _plugin_text()
-        assert "serverUrl" in text, "serverUrl must be defined"
+        assert "getServerUrl" in text, "must use lazy getter for serverUrl"
+        assert "input.serverUrl" in text, "must read from plugin input"
         assert "OPENCODE_SERVER_URL" in text, "must support env var override"
         assert "localhost:4096" in text, "must have sensible default"
+        assert ".href" in text, "must convert URL object to string via .href"

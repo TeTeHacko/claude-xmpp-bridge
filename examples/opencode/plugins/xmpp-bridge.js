@@ -57,8 +57,9 @@
  * Vyžaduje: claude-xmpp-bridge démon + claude-xmpp-client v $PATH
  */
 
-export const XmppBridgePlugin = async ({ client, directory, $, serverUrl: inputServerUrl }) => {
-   const PLUGIN_VERSION = "0.9.1"
+export const XmppBridgePlugin = async (input) => {
+  const { client, directory, $ } = input
+   const PLUGIN_VERSION = "0.9.2"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -333,7 +334,15 @@ export const XmppBridgePlugin = async ({ client, directory, $, serverUrl: inputS
   // Funguje i bez Screen backendu (tmux, bare terminal).
   // serverUrl je z plugin inputu (default http://localhost:4096).
   // ---------------------------------------------------------------------------
-  const serverUrl = inputServerUrl ?? process.env.OPENCODE_SERVER_URL ?? "http://localhost:4096"
+  // Resolve OpenCode server URL lazily — input.serverUrl is a getter that may
+  // return null early during startup. We read it at call time, not at init time.
+  const getServerUrl = () => {
+    try {
+      const url = input.serverUrl
+      if (url) return url.href ?? String(url)
+    } catch (_) { /* getter may throw during early init */ }
+    return process.env.OPENCODE_SERVER_URL ?? "http://localhost:4096"
+  }
 
   // Resolve the top-level OpenCode session ID (without _wN suffix).
   // prompt_async needs the raw OpenCode session ID, not the bridge ID.
@@ -348,7 +357,9 @@ export const XmppBridgePlugin = async ({ client, directory, $, serverUrl: inputS
       return { ok: false, error: "no opencodeSessionID" }
     }
     try {
-      const url = `${serverUrl}/session/${encodeURIComponent(ocID)}/prompt_async`
+      const base = getServerUrl()
+      const url = `${base}/session/${encodeURIComponent(ocID)}/prompt_async`
+      await dbg(`prompt_async → ${url}`)
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
