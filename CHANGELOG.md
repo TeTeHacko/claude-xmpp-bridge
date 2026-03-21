@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.9] - 2026-03-22
+
+### Fixed
+- **Switch from promptAsync to TUI injection** — `promptAsync` processes messages in background but TUI stays on empty "new session" screen (user sees nothing). Now uses `appendPrompt` + `submitPrompt` which is the same path as user typing — TUI stays in sync, messages appear in conversation. 50ms delay between append and submit to handle TUI's internal `setTimeout(..., 0)` layout update.
+
 ## [0.9.8] - 2026-03-22
 
 ### Fixed

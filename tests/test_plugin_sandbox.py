@@ -127,15 +127,15 @@ class TestPluginClientBinFallback:
             "agent-notify must not be executed through Bun shell templates anymore"
         )
 
-    def test_injectViaPromptAsync_exists_and_uses_sdk(self):
-        """injectViaPromptAsync must use SDK client.session.promptAsync()."""
+    def test_injectMessage_exists_and_uses_tui(self):
+        """injectMessage must use TUI appendPrompt + submitPrompt."""
         text = _plugin_text()
-        body = _function_body(text, "const injectViaPromptAsync = async")
-        assert body, "injectViaPromptAsync function not found in plugin"
+        body = _function_body(text, "const injectMessage = async")
+        assert body, "injectMessage function not found in plugin"
 
-        assert "promptAsync" in body, "must use SDK promptAsync method"
-        assert "client.session" in body, "must use SDK client"
-        assert "opencodeSessionID" in body, "must use raw OpenCode session ID"
+        assert "appendPrompt" in body, "must use TUI appendPrompt"
+        assert "submitPrompt" in body, "must use TUI submitPrompt"
+        assert "client.tui" in body, "must use SDK TUI client"
 
     def test_runClient_guard_is_first_statement(self):
         """The !CLIENT_BIN guard must be the very first statement in runClient,
@@ -154,17 +154,15 @@ class TestPluginClientBinFallback:
             f"runClient first statement must be 'if (!CLIENT_BIN)', got: {inner_no_comments[:80]!r}"
         )
 
-    def test_injectViaPromptAsync_checks_opencodeSessionID(self):
-        """injectViaPromptAsync must check opencodeSessionID before making HTTP call."""
+    def test_injectMessage_checks_empty_text(self):
+        """injectMessage must guard against empty text."""
         text = _plugin_text()
-        body = _function_body(text, "const injectViaPromptAsync = async")
-        assert body, "injectViaPromptAsync function not found in plugin"
+        body = _function_body(text, "const injectMessage = async")
+        assert body, "injectMessage function not found in plugin"
 
         inner = body.strip().lstrip("{").strip()
         inner_no_comments = re.sub(r"//[^\n]*", "", inner).strip()
-        assert "!text" in inner_no_comments[:100] or "!ocID" in inner_no_comments[:200], (
-            "injectViaPromptAsync must guard against empty text or missing session ID early"
-        )
+        assert "!text" in inner_no_comments[:100], "injectMessage must guard against empty text early"
 
     def test_runBridgeClient_suppresses_calls_when_bridge_unavailable(self):
         """When bridge is down, plugin must enter a cooldown instead of hammering
@@ -628,21 +626,20 @@ class TestPushBasedDelivery:
         # The old pattern: setTimeout(resolve, 1500)
         assert "setTimeout(resolve, 1500)" not in text, "1.5s idle delay must not exist"
 
-    def test_injectViaPromptAsync_uses_sdk_client(self):
-        """Push delivery must use SDK client.session.promptAsync()."""
+    def test_injectMessage_uses_tui_client(self):
+        """Push delivery must use TUI appendPrompt + submitPrompt."""
         text = _plugin_text()
-        body = _function_body(text, "const injectViaPromptAsync = async")
-        assert body, "injectViaPromptAsync function must exist"
-        assert "client.session.promptAsync" in body, "must use SDK promptAsync"
-        assert "opencodeSessionID" in body, "must use raw OpenCode session ID"
-        assert "parts" in body, "must send parts array"
+        body = _function_body(text, "const injectMessage = async")
+        assert body, "injectMessage function must exist"
+        assert "client.tui.appendPrompt" in body, "must use TUI appendPrompt"
+        assert "client.tui.submitPrompt" in body, "must use TUI submitPrompt"
 
-    def test_pollInbox_uses_injectViaPromptAsync(self):
-        """pollInbox must use injectViaPromptAsync instead of rawRelay."""
+    def test_pollInbox_uses_injectMessage(self):
+        """pollInbox must use injectMessage instead of rawRelay."""
         text = _plugin_text()
         body = _function_body(text, "const pollInbox = async")
         assert body, "pollInbox function must exist"
-        assert "injectViaPromptAsync" in body, "pollInbox must call injectViaPromptAsync"
+        assert "injectMessage" in body, "pollInbox must call injectMessage"
         assert "rawRelay" not in body, "pollInbox must not reference rawRelay"
         assert "messageBuffer" not in body, "pollInbox must not reference messageBuffer"
 
@@ -664,7 +661,7 @@ class TestPushBasedDelivery:
     def test_no_direct_http_fetch_for_prompt(self):
         """Push delivery must NOT use direct HTTP fetch — SDK client handles routing."""
         text = _plugin_text()
-        body = _function_body(text, "const injectViaPromptAsync = async")
-        assert body, "injectViaPromptAsync function must exist"
+        body = _function_body(text, "const injectMessage = async")
+        assert body, "injectMessage function must exist"
         assert "fetch(" not in body, "must not use direct HTTP fetch (SDK handles it)"
         assert "getServerUrl" not in body, "must not resolve server URL manually"

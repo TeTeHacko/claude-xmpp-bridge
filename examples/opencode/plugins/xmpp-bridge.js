@@ -5,7 +5,7 @@
  *  - při startu pluginu       → přejmenuje okno + zaregistruje aktivní session
  *  - session.created          → registrace nové top-level session (při /new)
  *  - session.deleted          → odhlásí session z bridge
- *  - session.idle             → push delivery: MCP inbox drain → prompt_async inject
+ *  - session.idle             → push delivery: MCP inbox drain → TUI inject (appendPrompt + submitPrompt)
  *                               + XMPP notifikace + detekce question (🔴)
  *  - session.status (busy)    → model začal generovat (stav 🔵, agent se nemění)
  *  - message.updated          → detekce aktivního agenta (pole info.agent)
@@ -44,8 +44,9 @@
  *
  *   Příklady: ⚪🟢 projekt  |  🟠🔵 projekt  |  🔵🔴 projekt
  *
- * Push-based message delivery (v0.9.0):
- *   - Při session.idle: drain MCP inbox → inject ALL messages via prompt_async HTTP API
+ * Push-based message delivery (v0.9.0+):
+ *   - Při session.idle: drain MCP inbox → inject via TUI (appendPrompt + submitPrompt)
+ *   - TUI cesta = stejná jako uživatel — zpráva se zobrazí v konverzaci
  *   - Fallback polling (5s) pro idle agenty na prázdném promptu (CR nudge je no-op)
  *   - Žádný messageBuffer — všechny zprávy se concatenují do jednoho promptu
  *   - MCP session ID se cachuje; po výpadku bridge se cache invaliduje.
@@ -59,7 +60,7 @@
 
 export const XmppBridgePlugin = async (input) => {
   const { client, directory, $ } = input
-   const PLUGIN_VERSION = "0.9.8"
+   const PLUGIN_VERSION = "0.9.9"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -328,43 +329,43 @@ export const XmppBridgePlugin = async (input) => {
   const logCaught = (scope, err, key = "") => errlog(`${scope}: ${err}`, key || `caught:${scope}`)
 
   // ---------------------------------------------------------------------------
-  // injectViaPromptAsync(): doručí zprávu do OpenCode session přes SDK client.
-  // Používá client.session.promptAsync() — interní fetch přes Hono router,
-  // funguje i bez HTTP serveru (TUI mode). Fire-and-forget, vrací 204.
-  // Nahrazuje rawRelay() (screen stuff) — žádné shell metaznaky, žádný screen.
-  // Funguje i bez Screen backendu (tmux, bare terminal).
+  // injectMessage(): doručí zprávu do OpenCode TUI přes SDK client.
+  // Používá TUI appendPrompt + submitPrompt — stejná cesta jako uživatel.
+  // Interní fetch přes Hono router, funguje bez HTTP serveru.
+  // TUI zůstává v syncu — zpráva se zobrazí v konverzaci.
   // ---------------------------------------------------------------------------
 
   // Resolve the top-level OpenCode session ID (without _wN suffix).
   // promptAsync needs the raw OpenCode session ID, not the bridge ID.
   let opencodeSessionID = null
 
-   const injectViaPromptAsync = async (sessionID, text) => {
+   const injectMessage = async (sessionID, text) => {
     if (!text) return { ok: false, error: "empty text" }
-    const ocID = opencodeSessionID
-    if (!ocID) {
-      await warn("injectViaPromptAsync: no opencodeSessionID known yet", "inject-no-session")
-      return { ok: false, error: "no opencodeSessionID" }
-    }
     try {
-      // SDK v1 format: { path: { id }, body: { parts } }
-      // Plugin receives v1 SDK (@opencode-ai/sdk) — NOT v2.
-      // v1 uses path/body/query separation; v2 uses flat parameters.
-      if (typeof client.session?.promptAsync === "function") {
-        await dbg(`promptAsync → ${ocID} (${text.length} chars)`)
-        const res = await client.session.promptAsync({
-          path: { id: ocID },
-          body: { parts: [{ type: "text", text }] },
-        })
-        if (!res.error) {
-          await dbg(`promptAsync injected ${text.length} chars into ${ocID}`)
-          return { ok: true }
-        }
-        await warn(`promptAsync error: ${JSON.stringify(res.error).slice(0, 200)}`, "inject-sdk-error")
+      // TUI injection: appendPrompt inserts text into the TUI textarea,
+      // then submitPrompt triggers the submit action (reads textarea + sends to LLM).
+      // This is the same path as user typing + pressing Enter — TUI stays in sync.
+      // SDK v1 format: { body: { ... } } for both calls.
+      if (typeof client.tui?.appendPrompt !== "function") {
+        await warn("TUI appendPrompt not available on SDK client", "inject-no-method")
+        return { ok: false, error: "no TUI methods" }
       }
-
-      await warn("promptAsync not available on SDK client", "inject-no-method")
-      return { ok: false, error: "no injection method" }
+      await dbg(`TUI inject → ${text.length} chars`)
+      const appendRes = await client.tui.appendPrompt({ body: { text } })
+      if (appendRes.error) {
+        await warn(`TUI appendPrompt error: ${JSON.stringify(appendRes.error).slice(0, 200)}`, "inject-tui-error")
+        return { ok: false, error: "appendPrompt failed" }
+      }
+      // Small delay to let TUI render the appended text before submitting.
+      // PromptAppend handler uses setTimeout(..., 0) internally for layout.
+      await new Promise((r) => setTimeout(r, 50))
+      const submitRes = await client.tui.submitPrompt()
+      if (submitRes.error) {
+        await warn(`TUI submitPrompt error: ${JSON.stringify(submitRes.error).slice(0, 200)}`, "inject-tui-error")
+        return { ok: false, error: "submitPrompt failed" }
+      }
+      await dbg(`TUI injected ${text.length} chars`)
+      return { ok: true }
     } catch (err) {
       await errlog(`inject error: ${err}`, "inject-error")
       return { ok: false, error: String(err) }
@@ -523,7 +524,7 @@ export const XmppBridgePlugin = async (input) => {
       // All messages concatenated into one prompt — no buffering, no per-cycle limit.
       const combined = messages.join("\n\n---\n\n")
       await dbg(`pollInbox: ${messages.length} message(s), ${combined.length} chars — injecting via prompt_async`)
-      const injectRes = await injectViaPromptAsync(registeredSessionID, combined)
+      const injectRes = await injectMessage(registeredSessionID, combined)
       if (!injectRes.ok) {
         await warn(`pollInbox inject failed: ${injectRes.error}`, "inject-failed")
       }
