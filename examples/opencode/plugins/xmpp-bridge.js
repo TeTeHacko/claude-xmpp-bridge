@@ -59,7 +59,7 @@
 
 export const XmppBridgePlugin = async (input) => {
   const { client, directory, $ } = input
-   const PLUGIN_VERSION = "0.9.5"
+   const PLUGIN_VERSION = "0.9.6"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -341,32 +341,48 @@ export const XmppBridgePlugin = async (input) => {
 
   const injectViaPromptAsync = async (sessionID, text) => {
     if (!text) return { ok: false, error: "empty text" }
-    // We need the raw OpenCode session ID (without _wN suffix)
     const ocID = opencodeSessionID
     if (!ocID) {
       await warn("injectViaPromptAsync: no opencodeSessionID known yet", "inject-no-session")
       return { ok: false, error: "no opencodeSessionID" }
     }
     try {
-      // Check if SDK method exists (version compatibility)
-      if (typeof client.session?.promptAsync !== "function") {
-        await warn(`promptAsync not available on SDK client (keys: ${Object.keys(client.session ?? {}).join(",")})`, "inject-no-method")
-        return { ok: false, error: "promptAsync not available" }
-      }
-      await dbg(`promptAsync → ${ocID} (${text.length} chars)`)
-      const res = await client.session.promptAsync({
-        sessionID: ocID,
-        parts: [{ type: "text", text }],
-      })
-      await dbg(`promptAsync result: status=${res?.response?.status} error=${!!res?.error} data=${JSON.stringify(res?.data).slice(0, 100)}`)
-      if (res.error) {
+      // Strategy 1: SDK promptAsync (direct session prompt, fire-and-forget)
+      if (typeof client.session?.promptAsync === "function") {
+        await dbg(`promptAsync → ${ocID} (${text.length} chars)`)
+        const res = await client.session.promptAsync({
+          sessionID: ocID,
+          parts: [{ type: "text", text }],
+        })
+        if (!res.error) {
+          await dbg(`promptAsync injected ${text.length} chars into ${ocID}`)
+          return { ok: true }
+        }
         await warn(`promptAsync error: ${JSON.stringify(res.error).slice(0, 200)}`, "inject-sdk-error")
-        return { ok: false, error: String(res.error) }
+        // Fall through to strategy 2
       }
-      await dbg(`promptAsync injected ${text.length} chars into ${ocID}`)
-      return { ok: true }
+
+      // Strategy 2: TUI append-prompt + submit-prompt (simulates user input)
+      if (typeof client.tui?.appendPrompt === "function") {
+        await dbg(`TUI inject → ${text.length} chars`)
+        const appendRes = await client.tui.appendPrompt({ text })
+        if (appendRes.error) {
+          await warn(`TUI appendPrompt error: ${JSON.stringify(appendRes.error).slice(0, 200)}`, "inject-tui-error")
+          return { ok: false, error: "TUI appendPrompt failed" }
+        }
+        const submitRes = await client.tui.submitPrompt()
+        if (submitRes.error) {
+          await warn(`TUI submitPrompt error: ${JSON.stringify(submitRes.error).slice(0, 200)}`, "inject-tui-error")
+          return { ok: false, error: "TUI submitPrompt failed" }
+        }
+        await dbg(`TUI injected ${text.length} chars`)
+        return { ok: true }
+      }
+
+      await warn("no injection method available on SDK client", "inject-no-method")
+      return { ok: false, error: "no injection method" }
     } catch (err) {
-      await errlog(`promptAsync error: ${err}`, "inject-error")
+      await errlog(`inject error: ${err}`, "inject-error")
       return { ok: false, error: String(err) }
     }
   }
