@@ -5581,3 +5581,359 @@ class TestSocketRateLimiting:
         assert "stale-session" not in bridge._socket_rate_limiter._buckets
         assert "active-session" in bridge._socket_rate_limiter._buckets
         bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
+# TestDeliveryIntegration — socket relay + broadcast delivery gap tests
+# ---------------------------------------------------------------------------
+
+
+class TestDeliveryIntegration:
+    """Integration tests for relay/broadcast delivery paths through _handle_request.
+
+    These tests fill gaps identified in the code review:
+    - Relay via full _handle_request dispatch (with rate limiting + audit)
+    - MAX_MESSAGE_SIZE enforcement on relay and broadcast
+    - Token auth on relay/broadcast specifically
+    - Broadcast without sender_session_id (delivers to ALL)
+    - Concurrent relay + broadcast
+    - Relay inbox verification (actual inbox content, not mocked)
+    """
+
+    def _make_bridge_with_sessions(self, tmp_path, MockXMPP, *, socket_token=None):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+
+        kwargs = {}
+        if socket_token:
+            kwargs["socket_token"] = socket_token
+        bridge = XMPPBridge(
+            Config(
+                jid="bot@example.com",
+                password="secret",
+                recipient="user@example.com",
+                socket_path=tmp_path / "test.sock",
+                db_path=tmp_path / "test.db",
+                messages_file=None,
+                **kwargs,
+            )
+        )
+        bridge.registry.register("agent-a", sty="sty1", window="1", project="/proj-a", backend="screen")
+        bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
+        bridge.registry.register("agent-c", sty="sty1", window="3", project="/proj-c", backend="screen")
+        return bridge, conn
+
+    # --- 1. Relay via _handle_request dispatch ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_via_handle_request_dispatch(self, MockXMPP, tmp_path):
+        """relay through _handle_request includes rate limiting and audit logging."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+            patch.object(bridge.audit, "log") as mock_audit,
+        ):
+            resp = await bridge._handle_request(
+                {"cmd": "relay", "session_id": "agent-a", "to": "agent-b", "message": "dispatched!"}
+            )
+
+        assert resp["ok"] is True
+        # Audit log was called with SOCKET_CMD event
+        mock_audit.assert_called()
+        audit_kwargs = mock_audit.call_args
+        assert audit_kwargs[0][0] == "SOCKET_CMD"
+        # XMPP observer notification was sent
+        conn.send.assert_called_once()
+        payload = json.loads(conn.send.call_args[0][1])
+        assert payload["type"] == "relay"
+        assert payload["to"] == "agent-b"
+        bridge.registry.close()
+
+    # --- 2. Broadcast via _handle_request dispatch ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_via_handle_request_dispatch(self, MockXMPP, tmp_path):
+        """broadcast through _handle_request includes rate limiting and audit logging."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            resp = await bridge._handle_request(
+                {"cmd": "broadcast", "session_id": "agent-a", "message": "hello all"}
+            )
+
+        assert resp["ok"] is True
+        assert resp["delivered"] == 2
+        conn.send.assert_called_once()
+        payload = json.loads(conn.send.call_args[0][1])
+        assert payload["type"] == "broadcast"
+        assert set(payload["to"]) == {"agent-b", "agent-c"}
+        bridge.registry.close()
+
+    # --- 3. MAX_MESSAGE_SIZE enforcement on relay ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_rejects_oversized_message(self, MockXMPP, tmp_path):
+        """relay with message > MAX_MESSAGE_SIZE returns an error."""
+        from claude_xmpp_bridge.bridge import MAX_MESSAGE_SIZE
+
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        huge_msg = "X" * (MAX_MESSAGE_SIZE + 1)
+
+        resp = await bridge._handle_relay(
+            {"session_id": "agent-a", "to": "agent-b", "message": huge_msg}
+        )
+
+        assert "error" in resp
+        assert "message" in str(resp["error"]).lower()
+        conn.send.assert_not_called()
+        bridge.registry.close()
+
+    # --- 4. MAX_MESSAGE_SIZE enforcement on broadcast ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_rejects_oversized_message(self, MockXMPP, tmp_path):
+        """broadcast with message > MAX_MESSAGE_SIZE returns an error."""
+        from claude_xmpp_bridge.bridge import MAX_MESSAGE_SIZE
+
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        huge_msg = "Y" * (MAX_MESSAGE_SIZE + 1)
+
+        resp = await bridge._handle_broadcast(
+            {"session_id": "agent-a", "message": huge_msg}
+        )
+
+        assert "error" in resp
+        assert "message" in str(resp["error"]).lower()
+        conn.send.assert_not_called()
+        bridge.registry.close()
+
+    # --- 5. Token auth on relay ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_rejected_without_token(self, MockXMPP, tmp_path):
+        """relay via socket is rejected when token auth is configured but not provided."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP, socket_token="s3cr3t")
+
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "relay", "session_id": "agent-a", "to": "agent-b", "message": "sneaky"},
+            )
+            assert resp.get("error") == "unauthorized"
+            conn.send.assert_not_called()
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    # --- 6. Token auth on broadcast ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_rejected_without_token(self, MockXMPP, tmp_path):
+        """broadcast via socket is rejected when token auth is configured but not provided."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP, socket_token="s3cr3t")
+
+        await bridge.socket_server.start()
+        try:
+            resp = await _socket_request(
+                bridge.config.socket_path,
+                {"cmd": "broadcast", "session_id": "agent-a", "message": "sneaky"},
+            )
+            assert resp.get("error") == "unauthorized"
+            conn.send.assert_not_called()
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    # --- 7. Token auth allows relay when correct ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_accepted_with_correct_token(self, MockXMPP, tmp_path):
+        """relay via socket succeeds when correct token is provided."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP, socket_token="s3cr3t")
+
+        await bridge.socket_server.start()
+        try:
+            with (
+                patch.object(bridge, "_screen_socket_alive", return_value=True),
+                patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+            ):
+                resp = await _socket_request(
+                    bridge.config.socket_path,
+                    {
+                        "cmd": "relay",
+                        "session_id": "agent-a",
+                        "to": "agent-b",
+                        "message": "authorized!",
+                        "token": "s3cr3t",
+                    },
+                )
+            assert resp.get("ok") is True
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()
+
+    # --- 8. Broadcast without sender delivers to ALL sessions ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_without_sender_delivers_to_all(self, MockXMPP, tmp_path):
+        """broadcast without sender_session_id delivers to every session."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        nudged: list[str] = []
+
+        async def _mock_nudge(session_id, info, text, **kwargs):
+            nudged.append(session_id)
+            return True
+
+        bridge._nudge_session = _mock_nudge  # type: ignore[method-assign]
+
+        resp = await bridge._handle_broadcast({"message": "to everyone"})
+
+        assert resp["ok"] is True
+        assert resp["delivered"] == 3
+        assert set(nudged) == {"agent-a", "agent-b", "agent-c"}
+        # XMPP observer notification lists all three
+        payload = json.loads(conn.send.call_args[0][1])
+        assert set(payload["to"]) == {"agent-a", "agent-b", "agent-c"}
+        bridge.registry.close()
+
+    # --- 9. Concurrent relay and broadcast ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_concurrent_relay_and_broadcast(self, MockXMPP, tmp_path):
+        """relay and broadcast can run concurrently without errors."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            relay_task = asyncio.create_task(
+                bridge._handle_request(
+                    {"cmd": "relay", "session_id": "agent-a", "to": "agent-b", "message": "relay msg"}
+                )
+            )
+            broadcast_task = asyncio.create_task(
+                bridge._handle_request(
+                    {"cmd": "broadcast", "session_id": "agent-c", "message": "broadcast msg"}
+                )
+            )
+            relay_resp, broadcast_resp = await asyncio.gather(relay_task, broadcast_task)
+
+        assert relay_resp["ok"] is True
+        assert broadcast_resp["ok"] is True
+        assert broadcast_resp["delivered"] >= 1
+        bridge.registry.close()
+
+    # --- 10. Relay inbox verification (actual inbox content) ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_inbox_content_verified(self, MockXMPP, tmp_path):
+        """relay via nudge stores message in the target's inbox with correct metadata."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        assert bridge.mcp_server is not None
+        bridge.mcp_server._bridge = bridge  # enable enqueue without full start()
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            resp = await bridge._handle_relay(
+                {"session_id": "agent-a", "to": "agent-b", "message": "check inbox"}
+            )
+
+        assert resp["ok"] is True
+        # Verify actual inbox content via registry
+        messages = bridge.registry.inbox_drain_full("agent-b")
+        assert len(messages) == 1
+        assert "check inbox" in messages[0]["message"]
+        assert messages[0]["from_session"] == "agent-a"
+        assert messages[0]["source_type"] == "agent"
+        assert messages[0]["message_type"] == "relay"
+        bridge.registry.close()
+
+    # --- 11. Broadcast inbox verification ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_broadcast_inbox_content_verified(self, MockXMPP, tmp_path):
+        """broadcast stores messages in each target's inbox with correct metadata."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
+        assert bridge.mcp_server is not None
+        bridge.mcp_server._bridge = bridge  # enable enqueue without full start()
+
+        with (
+            patch.object(bridge, "_screen_socket_alive", return_value=True),
+            patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+        ):
+            resp = await bridge._handle_broadcast(
+                {"session_id": "agent-a", "message": "inbox check"}
+            )
+
+        assert resp["ok"] is True
+        assert resp["delivered"] == 2
+        # Both agent-b and agent-c should have inbox messages
+        msgs_b = bridge.registry.inbox_drain_full("agent-b")
+        msgs_c = bridge.registry.inbox_drain_full("agent-c")
+        assert len(msgs_b) == 1
+        assert len(msgs_c) == 1
+        assert "inbox check" in msgs_b[0]["message"]
+        assert "inbox check" in msgs_c[0]["message"]
+        assert msgs_b[0]["from_session"] == "agent-a"
+        assert msgs_b[0]["source_type"] == "agent"
+        assert msgs_b[0]["message_type"] == "broadcast"
+        # agent-a should have no inbox message (sender excluded)
+        msgs_a = bridge.registry.inbox_drain_full("agent-a")
+        assert len(msgs_a) == 0
+        bridge.registry.close()
+
+    # --- 12. Relay via socket round-trip with token + audit ---
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_relay_full_socket_roundtrip_with_token_and_audit(self, MockXMPP, tmp_path):
+        """Full relay integration: socket → token auth → dispatch → delivery → audit."""
+        bridge, conn = self._make_bridge_with_sessions(tmp_path, MockXMPP, socket_token="tok123")
+        assert bridge.mcp_server is not None
+        bridge.mcp_server._bridge = bridge  # enable enqueue without full MCP start()
+
+        await bridge.socket_server.start()
+        try:
+            with (
+                patch.object(bridge, "_screen_socket_alive", return_value=True),
+                patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
+            ):
+                resp = await _socket_request(
+                    bridge.config.socket_path,
+                    {
+                        "cmd": "relay",
+                        "session_id": "agent-a",
+                        "to": "agent-b",
+                        "message": "full roundtrip",
+                        "token": "tok123",
+                    },
+                )
+            assert resp["ok"] is True
+
+            # Verify inbox content
+            messages = bridge.registry.inbox_drain_full("agent-b")
+            assert len(messages) == 1
+            assert "full roundtrip" in messages[0]["message"]
+
+            # Verify XMPP observer notification
+            conn.send.assert_called_once()
+            payload = json.loads(conn.send.call_args[0][1])
+            assert payload["type"] == "relay"
+            assert payload["from"] == "agent-a"
+            assert payload["to"] == "agent-b"
+        finally:
+            await bridge.socket_server.stop()
+            bridge.registry.close()

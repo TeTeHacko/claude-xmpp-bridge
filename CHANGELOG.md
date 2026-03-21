@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.15] - 2026-03-22
+
+Code review follow-up — test coverage gaps for socket relay/broadcast delivery.
+
+### Added
+- **12 delivery integration tests** (`TestDeliveryIntegration` in `test_bridge.py`) — relay and broadcast via `_handle_request` dispatch (with rate limiting + audit), `MAX_MESSAGE_SIZE` enforcement on relay and broadcast, token auth on relay/broadcast commands, broadcast without sender (delivers to ALL sessions), concurrent relay + broadcast, relay and broadcast inbox content verification with metadata (from_session, source_type, message_type), full socket round-trip with token auth + audit + inbox verification.
+
 ## [0.9.14] - 2026-03-22
 
 Code review follow-up — low-priority findings (L1, L2).
