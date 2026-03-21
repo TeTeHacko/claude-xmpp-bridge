@@ -59,7 +59,7 @@
 
 export const XmppBridgePlugin = async (input) => {
   const { client, directory, $ } = input
-   const PLUGIN_VERSION = "0.9.2"
+   const PLUGIN_VERSION = "0.9.3"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -339,7 +339,11 @@ export const XmppBridgePlugin = async (input) => {
   const getServerUrl = () => {
     try {
       const url = input.serverUrl
-      if (url) return url.href ?? String(url)
+      if (url) {
+        const s = url.href ?? String(url)
+        // Strip trailing slash to avoid double-slash in path construction
+        return s.endsWith("/") ? s.slice(0, -1) : s
+      }
     } catch (_) { /* getter may throw during early init */ }
     return process.env.OPENCODE_SERVER_URL ?? "http://localhost:4096"
   }

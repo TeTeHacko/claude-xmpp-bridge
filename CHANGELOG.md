@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-03-22
+
+### Fixed
+- **Fix double-slash in prompt_async URL** — `URL.href` returns `http://localhost:4096/` with trailing slash, causing `//session/...` path. Strip trailing slash from resolved server URL.
+
 ## [0.9.2] - 2026-03-22
 
 ### Fixed
