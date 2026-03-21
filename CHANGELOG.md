@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.16] - 2026-03-22
+
+Code review follow-up — final README documentation pass.
+
+### Fixed
+- **README: rate limiting** — documented socket (300/min) and MCP (600/min) per-client rate limits and `retry_after` error response.
+- **README: message size limit** — documented the 1 MB `MAX_MESSAGE_SIZE` limit for relay/broadcast/delegate messages.
+- **README: task state transitions** — documented valid `report_task_result` state transitions and terminal state rejection.
+- **README: SMTP STARTTLS env var** — added `CLAUDE_XMPP_SMTP_STARTTLS` to the main environment variables table.
+
 ## [0.9.15] - 2026-03-22
 
 Code review follow-up — test coverage gaps for socket relay/broadcast delivery.

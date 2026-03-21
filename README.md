@@ -135,6 +135,7 @@ recipient = "you@example.com"
 | `CLAUDE_XMPP_SMTP_HOST` | SMTP relay hostname or IP (empty = disabled) |
 | `CLAUDE_XMPP_SMTP_PORT` | SMTP relay port (default: 25) |
 | `CLAUDE_XMPP_EMAIL_THRESHOLD` | Email relay character threshold (default: 4000) |
+| `CLAUDE_XMPP_SMTP_STARTTLS` | SMTP STARTTLS mode: `auto` (default), `always`, or `never` |
 
 Configuration priority: CLI flags > environment variables > config.toml > defaults.
 
@@ -385,6 +386,12 @@ The bridge also exposes an HTTP MCP server on port 7878 (streamable-HTTP transpo
 **Authentication:** When `socket_token` is configured, the MCP server requires a `Authorization: Bearer <token>` header on every request. Unauthenticated requests receive 401 Unauthorized. The OpenCode plugin reads the token from `~/.config/claude-xmpp-bridge/socket_token` (or `CLAUDE_XMPP_SOCKET_TOKEN` env var) automatically.
 
 **Session ownership:** Tools that operate on a specific session (`receive_messages`, `replace_todos`, `add_todo`, `update_todo`, `remove_todo`, `list_todos`, `get_session_context`, `acquire_file_lock`, `release_file_lock`, `reply_to_last_sender`) verify that the calling MCP client is bound to the target session. An agent cannot drain another agent's inbox or manipulate another agent's todos/locks. Cross-session tools (`send_message`, `broadcast_message`, `delegate_task`, `list_sessions`, `list_file_locks`) are unrestricted.
+
+**Rate limiting:** Socket requests are limited to 300 per minute per session (or per anonymous client). MCP tool calls are limited to 600 per minute per MCP client. When the limit is exceeded, the request returns a rate-limit error with a `retry_after` value in seconds.
+
+**Message size limit:** Messages sent via `send_message`, `broadcast_message`, and `delegate_task` are limited to 1,000,000 characters (1 MB). Oversized messages are rejected with an error.
+
+**Task state transitions:** `report_task_result` enforces valid state transitions: `pending` → `accepted`/`completed`/`failed`/`cancelled`; `accepted` → `completed`/`failed`/`cancelled`. Terminal states (`completed`, `failed`, `cancelled`) reject further changes. Invalid transitions return a `ValueError`.
 
 Configure the MCP port:
 
