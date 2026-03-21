@@ -3507,7 +3507,7 @@ class TestRelay:
         sent = conn.send.call_args[0][1]
         payload = json.loads(sent)
         assert payload["type"] == "relay"
-        assert payload["mode"] == "screen"
+        assert payload["mode"] == "nudge"
         assert payload["from"] == "agent-a"
         assert payload["to"] == "agent-b"
         assert len(payload["message_id"]) == 12
@@ -3685,12 +3685,12 @@ class TestRelay:
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
-    async def test_relay_does_not_enqueue_mcp_inbox(self, MockXMPP, tmp_path):
-        """Socket relay must NOT populate the MCP inbox of the target session.
+    async def test_relay_enqueues_via_nudge(self, MockXMPP, tmp_path):
+        """Socket relay now always uses inbox+nudge pattern for safe delivery.
 
-        Enqueueing screen-delivered messages would cause the idle-handler to
-        re-inject them on the next session.idle event, creating an infinite
-        feedback loop (Bug #1 fix).
+        The nudge pattern enqueues the message in the MCP inbox and sends a
+        bare CR to wake the agent, avoiding race conditions with permission
+        prompts.
         """
         bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
         assert bridge.mcp_server is not None
@@ -3703,7 +3703,10 @@ class TestRelay:
             resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": "hi"})
 
         assert resp == {"ok": True}
-        bridge.mcp_server.enqueue.assert_not_called()
+        # Nudge pattern enqueues the message in MCP inbox
+        bridge.mcp_server.enqueue.assert_called_once()
+        args = bridge.mcp_server.enqueue.call_args
+        assert args[0][0] == "agent-b"
         bridge.registry.close()
 
 
@@ -3730,24 +3733,24 @@ class TestBroadcast:
         bridge.registry.register("agent-b", sty="sty1", window="2", project="/proj-b", backend="screen")
         bridge.registry.register("agent-c", sty="sty1", window="3", project="/proj-c", backend="screen")
 
-        stuffed: list[tuple[str, str]] = []
+        nudged: list[tuple[str, str]] = []
 
-        async def _mock_stuff(session_id, info, text, **kwargs):
-            stuffed.append((session_id, text))
+        async def _mock_nudge(session_id, info, text, **kwargs):
+            nudged.append((session_id, text))
             return True
 
-        bridge._stuff_to_session = _mock_stuff  # type: ignore[method-assign]
+        bridge._nudge_session = _mock_nudge  # type: ignore[method-assign]
 
         resp = await bridge._handle_broadcast({"session_id": "agent-a", "message": "start feature X"})
 
         assert resp["ok"] is True
         assert resp["delivered"] == 2
-        delivered_sids = [s[0] for s in stuffed]
+        delivered_sids = [s[0] for s in nudged]
         assert "agent-b" in delivered_sids
         assert "agent-c" in delivered_sids
         assert "agent-a" not in delivered_sids
-        assert all("[bridge-generated message]" in text for _sid, text in stuffed)
-        assert all(text.endswith("start feature X") for _sid, text in stuffed)
+        assert all("[bridge-generated message]" in text for _sid, text in nudged)
+        assert all(text.endswith("start feature X") for _sid, text in nudged)
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -3859,12 +3862,12 @@ class TestBroadcast:
 
         call_count = [0]
 
-        async def _partial_stuff(session_id, info, text, **kwargs):
+        async def _partial_nudge(session_id, info, text, **kwargs):
             call_count[0] += 1
             # First target succeeds, second fails
             return call_count[0] == 1
 
-        bridge._stuff_to_session = _partial_stuff  # type: ignore[method-assign]
+        bridge._nudge_session = _partial_nudge  # type: ignore[method-assign]
 
         resp = await bridge._handle_broadcast({"session_id": "agent-a", "message": "test"})
 
@@ -4837,8 +4840,8 @@ class TestNudgePattern:
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
-    async def test_relay_nudge_false_uses_stuff_session(self, MockXMPP, tmp_path):
-        """relay with nudge=False (default) calls _stuff_to_session, not _nudge_session."""
+    async def test_relay_default_uses_nudge_session(self, MockXMPP, tmp_path):
+        """relay without nudge param now always calls _nudge_session (inter-agent safety)."""
         bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
         bridge._nudge_session = AsyncMock(return_value=True)
         bridge._stuff_to_session = AsyncMock(return_value=True)
@@ -4846,9 +4849,9 @@ class TestNudgePattern:
         resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": "hi"})
 
         assert resp == {"ok": True}
-        bridge._stuff_to_session.assert_awaited_once()
-        bridge._nudge_session.assert_not_awaited()
-        wrapped = bridge._stuff_to_session.await_args.args[2]
+        bridge._nudge_session.assert_awaited_once()
+        bridge._stuff_to_session.assert_not_awaited()
+        wrapped = bridge._nudge_session.await_args.args[2]
         assert "[bridge-generated message]" in wrapped
         assert wrapped.endswith("hi")
         bridge.registry.close()
@@ -5142,9 +5145,7 @@ class TestAskingGuard:
             patch.object(bridge, "_screen_socket_alive", return_value=True),
             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
         ):
-            resp = await bridge._handle_relay(
-                {"session_id": "agent-a", "to": "agent-b", "message": "hi"}
-            )
+            resp = await bridge._handle_relay({"session_id": "agent-a", "to": "agent-b", "message": "hi"})
 
         assert resp == {"ok": True}
         # The asking guard should have enqueued the message
@@ -5173,9 +5174,7 @@ class TestAskingGuard:
             patch.object(bridge, "_screen_socket_alive", return_value=True),
             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
         ):
-            resp = await bridge._handle_broadcast(
-                {"session_id": "agent-a", "message": "hello all"}
-            )
+            resp = await bridge._handle_broadcast({"session_id": "agent-a", "message": "hello all"})
 
         assert resp["ok"] is True
         assert resp["delivered"] == 1
@@ -5406,9 +5405,7 @@ class TestTaskDelegationViaSocket:
     async def test_delegate_unknown_target(self, MockXMPP, tmp_path):
         """delegate to nonexistent session returns an error."""
         bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
-        resp = await bridge._handle_delegate(
-            {"session_id": "agent-a", "to": "agent-xyz", "description": "Hello"}
-        )
+        resp = await bridge._handle_delegate({"session_id": "agent-a", "to": "agent-xyz", "description": "Hello"})
         assert resp["ok"] is False
         assert "unknown" in str(resp["error"]).lower()
         bridge.registry.close()
@@ -5452,9 +5449,7 @@ class TestTaskDelegationViaSocket:
     async def test_task_result_not_found(self, MockXMPP, tmp_path):
         """task_result for nonexistent task returns error."""
         bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
-        resp = await bridge._handle_task_result(
-            {"task_id": "nonexistent123", "status": "completed"}
-        )
+        resp = await bridge._handle_task_result({"task_id": "nonexistent123", "status": "completed"})
         assert resp["ok"] is False
         assert "not found" in str(resp["error"]).lower()
         bridge.registry.close()
@@ -5463,9 +5458,7 @@ class TestTaskDelegationViaSocket:
     async def test_task_result_invalid_status(self, MockXMPP, tmp_path):
         """task_result with invalid status returns error."""
         bridge, _conn = self._make_bridge_with_sessions(tmp_path, MockXMPP)
-        resp = await bridge._handle_task_result(
-            {"task_id": "some_id", "status": "bogus"}
-        )
+        resp = await bridge._handle_task_result({"task_id": "some_id", "status": "bogus"})
         assert resp["ok"] is False
         assert "invalid status" in str(resp["error"]).lower()
         bridge.registry.close()
@@ -5479,12 +5472,8 @@ class TestTaskDelegationViaSocket:
             patch.object(bridge, "_screen_socket_alive", return_value=True),
             patch("asyncio.create_subprocess_exec", _mock_subprocess(0)),
         ):
-            await bridge._handle_delegate(
-                {"session_id": "agent-a", "to": "agent-b", "description": "Task 1"}
-            )
-            await bridge._handle_delegate(
-                {"session_id": "agent-b", "to": "agent-a", "description": "Task 2"}
-            )
+            await bridge._handle_delegate({"session_id": "agent-a", "to": "agent-b", "description": "Task 1"})
+            await bridge._handle_delegate({"session_id": "agent-b", "to": "agent-a", "description": "Task 2"})
 
         # List all
         resp = bridge._handle_list_tasks({})

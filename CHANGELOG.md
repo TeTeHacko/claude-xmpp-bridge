@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.26] - 2026-03-21
+
+### Changed
+- **Always-nudge for inter-agent communication** — relay, broadcast, and reply_to_last now always use inbox+nudge (`_nudge_session`) instead of screen inject (`_stuff_to_session`) for inter-agent message delivery. Screen inject is preserved only for human→agent sends (XMPP `send` without `sender_session_id`). This eliminates the race condition where screen inject could paste text into an agent mid-task. The asking guard remains as a safety net for human→agent screen injects.
+
+### Fixed
+- **Test suite updated for always-nudge behaviour** — 20 tests in `test_bridge.py` and `test_mcp_server.py` updated to assert `_nudge_session` calls instead of `_stuff_to_session` for inter-agent paths, verify nudge-based inbox enqueue, and check correct XMPP notification mode.
+
 ## [0.8.25] - 2026-03-21
 
 ### Fixed

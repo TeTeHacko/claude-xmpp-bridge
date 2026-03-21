@@ -1168,44 +1168,36 @@ class XMPPBridge:
         # Build XMPP observer label
         sender_id = str(req.get("session_id", ""))
         message_id = uuid.uuid4().hex[:12]
+        # Inter-agent relay always uses inbox+nudge to avoid race conditions
+        # with permission prompts.  The ``nudge`` parameter is now ignored
+        # (always True) but kept for API compatibility.
         wrapped_message = format_generated_agent_message(
             msg_type="relay",
             message=message,
             from_session_id=sender_id or None,
             to_session_id=target_id,
-            mode="nudge" if nudge else "screen",
+            mode="nudge",
             message_id=message_id,
         )
 
-        if nudge:
-            if target_info["backend"]:
-                ok = await self._nudge_session(
-                    target_id,
-                    target_info,
-                    wrapped_message,
-                    from_session=sender_id or None,
-                    source_type="agent",
-                    message_type="relay",
-                )
-            else:
-                self._enqueue_for_mcp(
-                    target_id,
-                    wrapped_message,
-                    from_session=sender_id or None,
-                    source_type="agent",
-                    message_type="relay",
-                )
-                ok = True
-        else:
-            ok = await self._stuff_to_session(
+        if target_info["backend"]:
+            ok = await self._nudge_session(
                 target_id,
                 target_info,
                 wrapped_message,
-                asking_guard=True,
                 from_session=sender_id or None,
                 source_type="agent",
                 message_type="relay",
             )
+        else:
+            self._enqueue_for_mcp(
+                target_id,
+                wrapped_message,
+                from_session=sender_id or None,
+                source_type="agent",
+                message_type="relay",
+            )
+            ok = True
 
         self.audit.log(
             "RELAY_SENT" if ok else "RELAY_FAILED",
@@ -1215,7 +1207,7 @@ class XMPPBridge:
             message_len=len(message),
         )
 
-        mode = "nudge" if nudge else "screen"
+        mode = "nudge"
         if ok:
             # Notify observer so they can see inter-agent traffic (JSON format)
             xmpp_payload = json.dumps(
@@ -1269,70 +1261,44 @@ class XMPPBridge:
         if not targets:
             return {"ok": True, "delivered": 0}
 
+        # Inter-agent broadcast always uses inbox+nudge to avoid race
+        # conditions with permission prompts.
         wrapped_message = format_generated_agent_message(
             msg_type="broadcast",
             message=message,
             from_session_id=sender_id or None,
-            mode="nudge" if nudge else "screen",
+            mode="nudge",
             message_id=message_id,
         )
 
-        if nudge:
-            async def _deliver_nudge(sid: str, info: SessionInfo) -> bool:
-                if info.get("backend"):
-                    return await self._nudge_session(
-                        sid,
-                        info,
-                        wrapped_message,
-                        from_session=sender_id or None,
-                        source_type="agent",
-                        message_type="broadcast",
-                    )
-                self._enqueue_for_mcp(
+        async def _deliver_nudge(sid: str, info: SessionInfo) -> bool:
+            if info.get("backend"):
+                return await self._nudge_session(
                     sid,
+                    info,
                     wrapped_message,
                     from_session=sender_id or None,
                     source_type="agent",
                     message_type="broadcast",
                 )
-                return True
-
-            results = await asyncio.gather(*(_deliver_nudge(sid, info) for sid, info in targets.items()))
-        else:
-            results = await asyncio.gather(
-                *(
-                    self._stuff_to_session(
-                        sid,
-                        info,
-                        wrapped_message,
-                        asking_guard=True,
-                        from_session=sender_id or None,
-                        source_type="agent",
-                        message_type="broadcast",
-                    )
-                    for sid, info in targets.items()
-                ),
+            self._enqueue_for_mcp(
+                sid,
+                wrapped_message,
+                from_session=sender_id or None,
+                source_type="agent",
+                message_type="broadcast",
             )
+            return True
+
+        results = await asyncio.gather(*(_deliver_nudge(sid, info) for sid, info in targets.items()))
 
         delivered: list[str] = []
         failed: list[str] = []
         for (_sid, info), ok in zip(targets.items(), results, strict=True):
             if ok:
                 delivered.append(self._session_prefix(info))
-                if not nudge:
-                    # Screen relay succeeded — no MCP inbox needed.
-                    # Enqueueing here would cause double-delivery via pollInbox().
-                    pass
             else:
                 failed.append(self._session_prefix(info))
-                if not nudge:
-                    # Screen relay failed — enqueue as fallback for pollInbox().
-                    self._enqueue_for_mcp(
-                        _sid,
-                        wrapped_message,
-                        source_type="agent",
-                        message_type="broadcast",
-                    )
 
         self.audit.log(
             "BROADCAST_SENT",
@@ -1633,50 +1599,36 @@ class XMPPBridge:
         target_info = self.registry.get(last_sender)
         if not target_info:
             return {"error": f"reply target not found: {last_sender}"}
-        nudge = bool(req.get("nudge", True))
+        # Inter-agent reply always uses inbox+nudge to avoid race conditions
+        # with permission prompts.
         message_id = uuid.uuid4().hex[:12]
         wrapped_message = format_generated_agent_message(
             msg_type="relay",
             message=message,
             from_session_id=session_id,
             to_session_id=last_sender,
-            mode="nudge" if nudge else "screen",
+            mode="nudge",
             message_id=message_id,
         )
-        if nudge:
-            if target_info.get("backend"):
-                ok = await self._nudge_session(
-                    last_sender,
-                    target_info,
-                    wrapped_message,
-                    from_session=session_id,
-                    source_type="agent",
-                    message_type="relay",
-                )
-            else:
-                self._enqueue_for_mcp(
-                    last_sender,
-                    wrapped_message,
-                    from_session=session_id,
-                    source_type="agent",
-                    message_type="relay",
-                )
-                ok = True
-        else:
-            if not target_info.get("backend"):
-                return {
-                    "error": self.messages.relay_no_backend.format(project=self._short_path(target_info["project"]))
-                }
-            ok = await self._stuff_to_session(
+        if target_info.get("backend"):
+            ok = await self._nudge_session(
                 last_sender,
                 target_info,
                 wrapped_message,
-                asking_guard=True,
                 from_session=session_id,
                 source_type="agent",
                 message_type="relay",
             )
-        mode = "nudge" if nudge else "screen"
+        else:
+            self._enqueue_for_mcp(
+                last_sender,
+                wrapped_message,
+                from_session=session_id,
+                source_type="agent",
+                message_type="relay",
+            )
+            ok = True
+        mode = "nudge"
         if ok:
             self._xmpp_send(
                 json.dumps(

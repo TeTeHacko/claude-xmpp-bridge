@@ -56,6 +56,7 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     bridge.registry = MagicMock()
     bridge.registry.sessions = sessions or {}
     bridge.registry.get = MagicMock(side_effect=lambda sid: (sessions or {}).get(sid))
+
     def _register(*args, **kwargs):
         if kwargs:
             session_id = kwargs["session_id"]
@@ -270,7 +271,9 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
             "idle_seconds": (
                 0
                 if info.get("last_seen") is not None and info.get("agent_state") != "idle"
-                else max(0, int(time.time() - info["last_seen"])) if info.get("last_seen") is not None else None
+                else max(0, int(time.time() - info["last_seen"]))
+                if info.get("last_seen") is not None
+                else None
             ),
             "todos_version": info.get("todos_version", 0),
             "last_agent_sender": (
@@ -379,6 +382,7 @@ def _make_bridge(sessions: dict | None = None) -> MagicMock:
     bridge.registry.get_last_agent_sender = MagicMock(side_effect=_get_last_agent_sender)
     bridge.registry.unregister = MagicMock(side_effect=_unregister)
     bridge._stuff_to_session = AsyncMock(return_value=True)
+    bridge._nudge_session = AsyncMock(return_value=True)
     bridge._xmpp_send = MagicMock(return_value=True)
     bridge._session_prefix = MagicMock(side_effect=lambda info: f"[{info['project'].split('/')[-1]}]")
     bridge._session_counts = MagicMock(side_effect=_session_counts)
@@ -469,12 +473,18 @@ class TestEnqueueAndReceive:
         started_server._bridge.registry.inbox_drain_full = MagicMock(
             return_value=[
                 {
-                    "message": "msg1", "from_session": None,
-                    "source_type": None, "message_type": None, "created_at": 1000.0,
+                    "message": "msg1",
+                    "from_session": None,
+                    "source_type": None,
+                    "message_type": None,
+                    "created_at": 1000.0,
                 },
                 {
-                    "message": "msg2", "from_session": None,
-                    "source_type": None, "message_type": None, "created_at": 1001.0,
+                    "message": "msg2",
+                    "from_session": None,
+                    "source_type": None,
+                    "message_type": None,
+                    "created_at": 1001.0,
                 },
             ]
         )
@@ -488,12 +498,18 @@ class TestEnqueueAndReceive:
         started_server._bridge.registry.inbox_drain_full = MagicMock(
             return_value=[
                 {
-                    "message": "msg1", "from_session": None,
-                    "source_type": None, "message_type": None, "created_at": 1000.0,
+                    "message": "msg1",
+                    "from_session": None,
+                    "source_type": None,
+                    "message_type": None,
+                    "created_at": 1000.0,
                 },
                 {
-                    "message": "msg2", "from_session": None,
-                    "source_type": None, "message_type": None, "created_at": 1001.0,
+                    "message": "msg2",
+                    "from_session": None,
+                    "source_type": None,
+                    "message_type": None,
+                    "created_at": 1001.0,
                 },
             ]
         )
@@ -515,10 +531,15 @@ class TestEnqueueAndReceive:
 
     def test_receive_logs_audit_when_messages_present(self, started_server: BridgeMCPServer):
         started_server._bridge.registry.inbox_drain_full = MagicMock(
-            return_value=[{
-                "message": "hello", "from_session": None,
-                "source_type": None, "message_type": None, "created_at": 1000.0,
-            }]
+            return_value=[
+                {
+                    "message": "hello",
+                    "from_session": None,
+                    "source_type": None,
+                    "message_type": None,
+                    "created_at": 1000.0,
+                }
+            ]
         )
         started_server._tool_receive_messages(session_id="ses_AAA")
         started_server._bridge.audit.log.assert_called()
@@ -532,10 +553,15 @@ class TestEnqueueAndReceive:
 
     def test_receive_updates_last_agent_sender_from_inbox_metadata(self, started_server: BridgeMCPServer):
         started_server._bridge.registry.inbox_drain_full = MagicMock(
-            return_value=[{
-                "message": "hello", "from_session": "ses_BBB",
-                "source_type": "agent", "message_type": "relay", "created_at": 1000.0,
-            }]
+            return_value=[
+                {
+                    "message": "hello",
+                    "from_session": "ses_BBB",
+                    "source_type": "agent",
+                    "message_type": "relay",
+                    "created_at": 1000.0,
+                }
+            ]
         )
         started_server._bridge.registry.set_last_agent_sender = MagicMock(return_value=True)
 
@@ -633,20 +659,26 @@ class TestSendMessageTool:
         assert "message_id" in payload
 
     async def test_send_includes_sender_session_id_in_relay_metadata(self, started_server: BridgeMCPServer):
+        """Inter-agent send (sender_session_id set) uses nudge path and passes from_session."""
         await started_server._tool_send_message(
-            to="ses_AAA", message="ping", sender_session_id="ses_BBB", screen=False
+            to="ses_AAA",
+            message="ping",
+            sender_session_id="ses_BBB",
         )
-        args = started_server._bridge.registry.inbox_put.call_args[0]
-        wrapped = args[1]
-        lines = wrapped.splitlines()
-        payload = json.loads(lines[1])
+        # Inter-agent always uses nudge path now
+        started_server._bridge._nudge_session.assert_awaited_once()
+        kwargs = started_server._bridge._nudge_session.await_args.kwargs
+        assert kwargs["from_session"] == "ses_BBB"
+        # The wrapped message contains the relay metadata
+        wrapped = started_server._bridge._nudge_session.await_args.args[2]
+        payload = json.loads(wrapped.splitlines()[1])
         assert payload["from"] == "ses_BBB"
-        assert started_server._bridge.registry.inbox_put.call_args.kwargs["from_session"] == "ses_BBB"
 
     async def test_send_includes_sender_session_id_in_xmpp_notification(self, started_server: BridgeMCPServer):
         await started_server._tool_send_message(to="ses_AAA", message="ping", sender_session_id="ses_BBB")
         payload = json.loads(started_server._bridge._xmpp_send.call_args[0][0])
         assert payload["from"] == "ses_BBB"
+        assert payload["mode"] == "nudge"
 
     async def test_send_uses_remembered_client_session_when_sender_missing(self, started_server: BridgeMCPServer):
         started_server._tool_receive_messages(session_id="ses_BBB", client_id="client-123")
@@ -654,16 +686,17 @@ class TestSendMessageTool:
         await started_server._tool_send_message(
             to="ses_AAA",
             message="ping",
-            screen=False,
             sender_session_id="",
             client_id="client-123",
         )
 
-        args = started_server._bridge.registry.inbox_put.call_args[0]
-        wrapped = args[1]
+        # Resolved sender triggers inter-agent nudge path
+        started_server._bridge._nudge_session.assert_awaited_once()
+        kwargs = started_server._bridge._nudge_session.await_args.kwargs
+        assert kwargs["from_session"] == "ses_BBB"
+        wrapped = started_server._bridge._nudge_session.await_args.args[2]
         payload = json.loads(wrapped.splitlines()[1])
         assert payload["from"] == "ses_BBB"
-        assert started_server._bridge.registry.inbox_put.call_args.kwargs["from_session"] == "ses_BBB"
 
     async def test_send_uses_remembered_mcp_session_when_sender_missing(self, started_server: BridgeMCPServer):
         started_server._remember_request_session({"mcp_session_id": "mcp-123"}, "ses_BBB")
@@ -671,16 +704,17 @@ class TestSendMessageTool:
         await started_server._tool_send_message(
             to="ses_AAA",
             message="ping",
-            screen=False,
             sender_session_id="",
             request_info={"mcp_session_id": "mcp-123"},
         )
 
-        args = started_server._bridge.registry.inbox_put.call_args[0]
-        wrapped = args[1]
+        # Resolved sender triggers inter-agent nudge path
+        started_server._bridge._nudge_session.assert_awaited_once()
+        kwargs = started_server._bridge._nudge_session.await_args.kwargs
+        assert kwargs["from_session"] == "ses_BBB"
+        wrapped = started_server._bridge._nudge_session.await_args.args[2]
         payload = json.loads(wrapped.splitlines()[1])
         assert payload["from"] == "ses_BBB"
-        assert started_server._bridge.registry.inbox_put.call_args.kwargs["from_session"] == "ses_BBB"
 
     async def test_send_returns_message_id(self, started_server: BridgeMCPServer):
         result = await started_server._tool_send_message(to="ses_AAA", message="ping")
@@ -731,30 +765,26 @@ class TestBroadcastMessageTool:
     async def test_broadcast_to_all(self, started_server: BridgeMCPServer):
         result = await started_server._tool_broadcast_message(message="hello all", sender_session_id="")
         assert "2" in result  # 2 sessions delivered
-        assert started_server._bridge._stuff_to_session.await_count == 2
+        assert started_server._bridge._nudge_session.await_count == 2
 
     async def test_broadcast_excludes_sender(self, started_server: BridgeMCPServer):
         result = await started_server._tool_broadcast_message(message="hello all", sender_session_id="ses_AAA")
         assert "1" in result  # only ses_BBB
-        assert started_server._bridge._stuff_to_session.await_count == 1
+        assert started_server._bridge._nudge_session.await_count == 1
 
     async def test_broadcast_does_not_enqueue_on_success(self, started_server: BridgeMCPServer):
-        """Successful screen relay must NOT enqueue in MCP inbox (would cause double-delivery via pollInbox)."""
+        """Successful nudge delivery must NOT double-enqueue in MCP inbox (nudge handles it internally)."""
         started_server._bridge.registry.inbox_put = MagicMock()
         await started_server._tool_broadcast_message(message="broadcast msg", sender_session_id="ses_AAA")
-        # ses_BBB received the message via screen relay — inbox_put must not have been called
+        # nudge handles inbox internally — no extra inbox_put call
         started_server._bridge.registry.inbox_put.assert_not_called()
 
-    async def test_broadcast_enqueues_on_relay_failure(self, started_server: BridgeMCPServer):
-        """Failed screen relay must enqueue in MCP inbox as fallback for pollInbox()."""
-        started_server._bridge._stuff_to_session = AsyncMock(return_value=False)
-        started_server._bridge.registry.inbox_put = MagicMock()
-        await started_server._tool_broadcast_message(message="broadcast msg", sender_session_id="ses_AAA")
-        # relay failed → inbox_put should have been called for ses_BBB
-        args = started_server._bridge.registry.inbox_put.call_args[0]
-        assert args[0] == "ses_BBB"
-        assert "[bridge-generated message]" in args[1]
-        assert args[1].endswith("broadcast msg")
+    async def test_broadcast_enqueues_on_nudge_failure(self, started_server: BridgeMCPServer):
+        """Failed nudge delivery is reflected in result (delivered=0)."""
+        started_server._bridge._nudge_session = AsyncMock(return_value=False)
+        result = await started_server._tool_broadcast_message(message="broadcast msg", sender_session_id="ses_AAA")
+        # nudge failed → delivered=0
+        assert "0" in result
 
     async def test_broadcast_missing_message(self, started_server: BridgeMCPServer):
         result = await started_server._tool_broadcast_message(message="", sender_session_id="")
@@ -771,7 +801,7 @@ class TestBroadcastMessageTool:
         call_arg = started_server._bridge._xmpp_send.call_args[0][0]
         payload = json.loads(call_arg)
         assert payload["type"] == "broadcast"
-        assert payload["mode"] == "screen"
+        assert payload["mode"] == "nudge"
         assert set(payload["to"]) == {"ses_AAA", "ses_BBB"}
         assert payload["message"] == "hi"
 
@@ -1187,9 +1217,7 @@ class TestReplyToLastSenderTool:
         started_server._bridge.registry.set_last_agent_sender("ses_AAA", "ses_BBB")
         started_server._bridge._nudge_session = AsyncMock(return_value=True)
 
-        result = await started_server._tool_reply_to_last_sender(
-            session_id="ses_AAA", message="reply back", nudge=True
-        )
+        result = await started_server._tool_reply_to_last_sender(session_id="ses_AAA", message="reply back", nudge=True)
 
         assert "nudge" in result.lower()
         wrapped = started_server._bridge._nudge_session.await_args.args[2]
@@ -1198,9 +1226,7 @@ class TestReplyToLastSenderTool:
         assert payload["to"] == "ses_BBB"
 
     async def test_reply_to_last_sender_without_known_sender_returns_error(self, started_server: BridgeMCPServer):
-        result = await started_server._tool_reply_to_last_sender(
-            session_id="ses_AAA", message="reply back", nudge=True
-        )
+        result = await started_server._tool_reply_to_last_sender(session_id="ses_AAA", message="reply back", nudge=True)
         assert "no known sender" in result.lower()
 
 
@@ -1429,9 +1455,7 @@ class TestSendMessageNudge:
         started_server._bridge._nudge_session = AsyncMock(return_value=True)
         started_server._bridge.registry.inbox_put = MagicMock()
 
-        await started_server._tool_send_message(
-            to="ses_AAA", message="ping", nudge=True, sender_session_id="ses_BBB"
-        )
+        await started_server._tool_send_message(to="ses_AAA", message="ping", nudge=True, sender_session_id="ses_BBB")
 
         started_server._bridge.registry.inbox_put.assert_not_called()
         assert started_server._bridge._nudge_session.await_args.kwargs["from_session"] == "ses_BBB"
@@ -1539,44 +1563,42 @@ class TestBroadcastMessageNudge:
 
 
 class TestAskingGuardMCP:
-    """MCP send_message and broadcast_message pass asking_guard=True to
-    _stuff_to_session so the asking guard can protect agents in ask state."""
+    """MCP send_message and broadcast_message always use _nudge_session for
+    inter-agent communication, which inherently avoids the asking state
+    race condition (no screen inject).  For non-inter-agent send_message
+    without sender_session_id, _stuff_to_session is still used with
+    asking_guard=True."""
 
     async def test_send_message_passes_asking_guard(self, started_server: BridgeMCPServer):
-        """send_message (screen mode) must pass asking_guard=True to _stuff_to_session."""
+        """send_message without sender (screen mode) must pass asking_guard=True to _stuff_to_session."""
         await started_server._tool_send_message(to="ses_AAA", message="ping")
         started_server._bridge._stuff_to_session.assert_awaited_once()
         kwargs = started_server._bridge._stuff_to_session.await_args.kwargs
         assert kwargs.get("asking_guard") is True
 
     async def test_send_message_passes_from_session(self, started_server: BridgeMCPServer):
-        """send_message must forward sender_session_id as from_session."""
-        await started_server._tool_send_message(
-            to="ses_AAA", message="ping", sender_session_id="ses_BBB"
-        )
-        kwargs = started_server._bridge._stuff_to_session.await_args.kwargs
+        """send_message with sender_session_id uses nudge path and forwards from_session."""
+        await started_server._tool_send_message(to="ses_AAA", message="ping", sender_session_id="ses_BBB")
+        # Inter-agent → always nudge
+        started_server._bridge._nudge_session.assert_awaited_once()
+        kwargs = started_server._bridge._nudge_session.await_args.kwargs
         assert kwargs.get("from_session") == "ses_BBB"
         assert kwargs.get("source_type") == "agent"
         assert kwargs.get("message_type") == "relay"
 
     async def test_broadcast_passes_asking_guard(self, started_server: BridgeMCPServer):
-        """broadcast_message (screen mode) must pass asking_guard=True to _stuff_to_session."""
-        await started_server._tool_broadcast_message(
-            message="hello all", sender_session_id="ses_AAA"
-        )
+        """broadcast_message always uses nudge path (inherently safe from asking state)."""
+        await started_server._tool_broadcast_message(message="hello all", sender_session_id="ses_AAA")
         # ses_BBB is the only target (ses_AAA excluded as sender)
-        started_server._bridge._stuff_to_session.assert_awaited_once()
-        kwargs = started_server._bridge._stuff_to_session.await_args.kwargs
-        assert kwargs.get("asking_guard") is True
+        started_server._bridge._nudge_session.assert_awaited_once()
+        kwargs = started_server._bridge._nudge_session.await_args.kwargs
         assert kwargs.get("source_type") == "agent"
         assert kwargs.get("message_type") == "broadcast"
 
     async def test_broadcast_passes_from_session(self, started_server: BridgeMCPServer):
         """broadcast_message must forward sender_session_id as from_session."""
-        await started_server._tool_broadcast_message(
-            message="hello all", sender_session_id="ses_AAA"
-        )
-        kwargs = started_server._bridge._stuff_to_session.await_args.kwargs
+        await started_server._tool_broadcast_message(message="hello all", sender_session_id="ses_AAA")
+        kwargs = started_server._bridge._nudge_session.await_args.kwargs
         assert kwargs.get("from_session") == "ses_AAA"
 
 
@@ -1652,9 +1674,7 @@ class TestDelegateTask:
         assert "description" in result["error"].lower()
 
     async def test_delegate_task_unknown_target(self, started_server: BridgeMCPServer):
-        result = await started_server._tool_delegate_task(
-            to="ses_UNKNOWN", description="Do something"
-        )
+        result = await started_server._tool_delegate_task(to="ses_UNKNOWN", description="Do something")
         assert result["ok"] is False
         assert "unknown" in result["error"].lower()
 
@@ -1794,9 +1814,7 @@ class TestListDelegatedTasks:
         assert isinstance(result, list)
         assert len(result) == 2
         assert result[0]["task_id"] == "t1"
-        started_server._bridge.registry.task_list.assert_called_once_with(
-            session_id="a", role="from", status=None
-        )
+        started_server._bridge.registry.task_list.assert_called_once_with(session_id="a", role="from", status=None)
 
     def test_list_delegated_tasks_empty(self, started_server: BridgeMCPServer):
         started_server._bridge.registry.task_list = MagicMock(return_value=[])

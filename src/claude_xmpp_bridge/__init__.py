@@ -1,4 +1,4 @@
 """XMPP bridge for Claude Code — route messages between Jabber and Claude sessions."""
 
-__version__ = "0.8.25"
+__version__ = "0.8.26"
 __all__ = ["__version__"]

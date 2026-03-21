@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-xmpp-bridge"
-version = "0.8.25"
+version = "0.8.26"
 description = "XMPP bridge for Claude Code — route messages between Jabber and Claude sessions"
 readme = "README.md"
 license = "MIT"

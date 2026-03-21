@@ -797,9 +797,14 @@ class BridgeMCPServer:
             message_id=message_id,
         )
 
-        if nudge:
-            # nudge=True: prefer inbox + CR nudge for interactive sessions,
-            # but still queue for backend-less sessions so MCP-only agents can
+        # Inter-agent communication (sender_session_id set) ALWAYS uses
+        # inbox+nudge to avoid race conditions with permission prompts.
+        # Screen inject is only safe for human→agent (XMPP) messages.
+        use_nudge = nudge or bool(sender_session_id)
+
+        if use_nudge:
+            # inbox + CR nudge for interactive sessions,
+            # queue-only for backend-less sessions so MCP-only agents can
             # pick the message up on their next poll.
             if target_info["backend"]:
                 ok = await bridge._nudge_session(
@@ -821,13 +826,13 @@ class BridgeMCPServer:
                 ok = True
             bridge._xmpp_send(
                 json.dumps(
-                        {
-                            "type": "relay",
-                            "mode": "nudge",
-                            "from": sender_session_id or None,
-                            "to": to,
-                            "message_id": message_id,
-                            "message": message,
+                    {
+                        "type": "relay",
+                        "mode": "nudge",
+                        "from": sender_session_id or None,
+                        "to": to,
+                        "message_id": message_id,
+                        "message": message,
                         "ts": time.time(),
                     },
                     ensure_ascii=False,
@@ -835,17 +840,19 @@ class BridgeMCPServer:
             )
             bridge.audit.log(
                 "MCP_SEND",
-                    message_id=message_id,
-                    from_session_id=sender_session_id or None,
-                    to_session_id=to,
-                    nudge=True,
-                    backend=target_info.get("backend") or "none",
+                message_id=message_id,
+                from_session_id=sender_session_id or None,
+                to_session_id=to,
+                nudge=True,
+                forced_nudge=not nudge and bool(sender_session_id),
+                backend=target_info.get("backend") or "none",
                 ok=ok,
                 message=message[:100],
             )
             if ok:
                 template = bridge.messages.mcp_send_ok if target_info["backend"] else bridge.messages.mcp_send_queued
-                return template.format(target_prefix=target_prefix) + f" [id:{message_id}] (nudge)"
+                suffix = " (nudge)" if nudge else " (nudge, inter-agent)"
+                return template.format(target_prefix=target_prefix) + f" [id:{message_id}]{suffix}"
             else:
                 return bridge.messages.mcp_send_failed.format(project=self._short_path(target_info["project"]))
 
@@ -986,51 +993,37 @@ class BridgeMCPServer:
             )
             return bridge.messages.broadcast_sent.format(count=0)
 
+        # Broadcast is always inter-agent — always use inbox+nudge to avoid
+        # race conditions with permission prompts (same rationale as send_message).
         wrapped_message = format_generated_agent_message(
             msg_type="broadcast",
             message=message,
             from_session_id=sender_session_id or None,
-            mode="nudge" if nudge else "screen",
+            mode="nudge",
         )
 
-        if nudge:
-            results: list[bool] = []
-            for sid, info in targets.items():
-                if info.get("backend"):
-                    results.append(
-                        await bridge._nudge_session(
-                            sid,
-                            info,
-                            wrapped_message,
-                            from_session=sender_session_id or None,
-                            source_type="agent",
-                            message_type="broadcast",
-                        )
-                    )
-                else:
-                    self.enqueue(
-                        sid,
-                        wrapped_message,
-                        from_session=sender_session_id or None,
-                        source_type="agent",
-                        message_type="broadcast",
-                    )
-                    results.append(True)
-        else:
-            results = await asyncio.gather(
-                *(
-                    bridge._stuff_to_session(
+        results: list[bool] = []
+        for sid, info in targets.items():
+            if info.get("backend"):
+                results.append(
+                    await bridge._nudge_session(
                         sid,
                         info,
                         wrapped_message,
-                        asking_guard=True,
                         from_session=sender_session_id or None,
                         source_type="agent",
                         message_type="broadcast",
                     )
-                    for sid, info in targets.items()
-                ),
-            )
+                )
+            else:
+                self.enqueue(
+                    sid,
+                    wrapped_message,
+                    from_session=sender_session_id or None,
+                    source_type="agent",
+                    message_type="broadcast",
+                )
+                results.append(True)
 
         delivered = 0
         delivered_sids: list[str] = []
@@ -1038,22 +1031,12 @@ class BridgeMCPServer:
             if ok:
                 delivered += 1
                 delivered_sids.append(sid)
-            elif not nudge:
-                # Screen relay failed — enqueue in MCP inbox as fallback so
-                # the plugin can pick it up on the next session.idle poll.
-                self.enqueue(
-                    sid,
-                    wrapped_message,
-                    source_type="agent",
-                    message_type="broadcast",
-                )
 
-        mode = "nudge" if nudge else "screen"
         bridge._xmpp_send(
             json.dumps(
                 {
                     "type": "broadcast",
-                    "mode": mode,
+                    "mode": "nudge",
                     "from": sender_session_id or None,
                     "to": delivered_sids,
                     "message": message,
@@ -1335,9 +1318,7 @@ class BridgeMCPServer:
             )
         return {"removed": len(removed), "locks": removed}
 
-    def _tool_receive_messages(
-        self, *, session_id: str, client_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    def _tool_receive_messages(self, *, session_id: str, client_id: str | None = None) -> list[dict[str, Any]]:
         """Implementation of the receive_messages tool — drains the SQLite inbox.
 
         Returns a list of dicts, each containing:
