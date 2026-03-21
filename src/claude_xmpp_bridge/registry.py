@@ -431,41 +431,6 @@ class SessionRegistry:
                 (to_session, from_session, message, time.time(), source_type, message_type),
             )
 
-    def inbox_drain(self, session_id: str) -> list[str]:
-        """Atomically drain and return all pending messages for *session_id*.
-
-        Messages are returned in insertion order (oldest first).  The rows are
-        deleted in the same transaction so concurrent callers cannot receive
-        the same message twice.
-        """
-        with self._db:
-            rows = self._db.execute(
-                "SELECT id, message FROM inbox WHERE to_session = ? ORDER BY id",
-                (session_id,),
-            ).fetchall()
-            if rows:
-                ids = [r[0] for r in rows]
-                self._db.execute(
-                    f"DELETE FROM inbox WHERE id IN ({','.join('?' * len(ids))})",  # noqa: S608
-                    ids,
-                )
-        return [r[1] for r in rows]
-
-    def inbox_drain_with_senders(self, session_id: str) -> list[tuple[str, str | None]]:
-        """Atomically drain messages together with their stored from_session metadata."""
-        with self._db:
-            rows = self._db.execute(
-                "SELECT id, message, from_session FROM inbox WHERE to_session = ? ORDER BY id",
-                (session_id,),
-            ).fetchall()
-            if rows:
-                ids = [r[0] for r in rows]
-                self._db.execute(
-                    f"DELETE FROM inbox WHERE id IN ({','.join('?' * len(ids))})",  # noqa: S608
-                    ids,
-                )
-        return [(r[1], r[2]) for r in rows]
-
     def inbox_drain_full(self, session_id: str) -> list[InboxMessage]:
         """Atomically drain messages with full metadata.
 

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.14] - 2026-03-22
+
+### Changed
+- **Deduplicate lock-reading logic** — extracted shared `locks.py` module with `short_path()`, `project_matches()`, and `read_legacy_lock_hints()`. Both `bridge.py` and `mcp_server.py` now delegate to these shared functions instead of maintaining near-identical implementations. Removes ~80 lines of duplication.
+- **Remove dead registry methods** — removed `inbox_drain()` and `inbox_drain_with_senders()` from `SessionRegistry`. Both were superseded by `inbox_drain_full()` (v0.8.18) and no production code called them. Tests updated to use `inbox_drain_full()`.
+
 ## [0.9.13] - 2026-03-22
 
 ### Added

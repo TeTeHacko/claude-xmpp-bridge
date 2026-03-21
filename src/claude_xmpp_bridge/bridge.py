@@ -20,6 +20,7 @@ from . import __version__
 from .audit import AuditLogger
 from .config import DEFAULT_SOURCE_ICONS, MAX_SOURCE_LEN, Config
 from .email_notify import send_email
+from .locks import project_matches, read_legacy_lock_hints, short_path
 from .mcp_server import BridgeMCPServer
 from .messages import Messages, format_generated_agent_message, load_messages
 from .multiplexer import get_multiplexer
@@ -478,13 +479,11 @@ class XMPPBridge:
 
     @staticmethod
     def _short_path(path: str) -> str:
-        """Shorten path by replacing home directory with ~."""
-        home = str(Path.home())
-        if path == home:
-            return "~"
-        if path.startswith(home + "/"):
-            return "~" + path[len(home) :]
-        return path
+        """Shorten path by replacing home directory with ``~``.
+
+        Delegates to :func:`locks.short_path` to avoid duplication.
+        """
+        return short_path(path)
 
     @staticmethod
     def _window_label(info: SessionInfo) -> str:
@@ -743,26 +742,21 @@ class XMPPBridge:
         return len(to_remove)
 
     def _cleanup_legacy_lock_hints(self) -> int:
-        """Remove stale lock hint files from ``~/.claude/working``."""
-        lock_dir = Path.home() / ".claude" / "working"
-        if not lock_dir.is_dir():
-            return 0
+        """Remove stale lock hint files from ``~/.claude/working``.
 
-        active_sessions = set(self.registry.sessions)
+        Re-uses :func:`locks.read_legacy_lock_hints` to iterate the directory
+        and then deletes files whose ``session_id`` is not registered.
+        """
+        active = set(self.registry.sessions)
+        stale_locks = read_legacy_lock_hints(active_session_ids=active)
         removed = 0
-        for path in lock_dir.iterdir():
-            if not path.is_file():
+        for lock in stale_locks:
+            if not lock["stale"]:
                 continue
-            try:
-                data = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            session_id = str(data.get("session_id", "")).strip()
-            if session_id and session_id not in active_sessions:
+            lockfile = lock.get("lockfile")
+            if isinstance(lockfile, str):
                 with contextlib.suppress(OSError):
-                    path.unlink()
+                    Path(lockfile).unlink()
                     removed += 1
         return removed
 
@@ -1388,11 +1382,10 @@ class XMPPBridge:
             result.append(self._session_entry(sid, info, index=i, include_registered_at=True))
         return {"ok": True, "sessions": result}
 
-    def _legacy_project_matches(self, lock_project: str, lock_filepath: str, project: str) -> bool:
-        if not project:
-            return True
-        short = self._short_path(project)
-        return lock_project in {project, short} or lock_filepath.startswith(project)
+    @staticmethod
+    def _legacy_project_matches(lock_project: str, lock_filepath: str, project: str) -> bool:
+        """Delegate to :func:`locks.project_matches`."""
+        return project_matches(lock_project, lock_filepath, project)
 
     def _session_counts(self, session_id: str) -> dict[str, int]:
         return {
@@ -1489,40 +1482,11 @@ class XMPPBridge:
         return removed
 
     def _read_legacy_lock_hints(self, project: str = "") -> list[dict[str, object]]:
-        lock_dir = Path.home() / ".claude" / "working"
-        if not lock_dir.is_dir():
-            return []
-        active_sessions = set(self.registry.sessions)
-        locks: list[dict[str, object]] = []
-        for path in sorted(lock_dir.iterdir()):
-            if not path.is_file():
-                continue
-            try:
-                data = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            session_id = str(data.get("session_id", "")).strip()
-            filepath = str(data.get("filepath", "")).strip()
-            lock_project = str(data.get("project", "")).strip()
-            locked_at = str(data.get("locked_at", "")).strip()
-            if not session_id or not filepath:
-                continue
-            if not self._legacy_project_matches(lock_project, filepath, project):
-                continue
-            locks.append(
-                {
-                    "session_id": session_id,
-                    "filepath": filepath,
-                    "project": lock_project,
-                    "locked_at": locked_at,
-                    "stale": session_id not in active_sessions,
-                    "source": "legacy",
-                    "lockfile": str(path),
-                }
-            )
-        return locks
+        """Delegate to :func:`locks.read_legacy_lock_hints`."""
+        return read_legacy_lock_hints(
+            project=project,
+            active_session_ids=set(self.registry.sessions),
+        )
 
     def _handle_get_context(self, req: dict[str, object]) -> dict[str, object]:
         session_id = str(req.get("session_id", ""))

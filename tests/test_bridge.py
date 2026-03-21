@@ -700,7 +700,7 @@ class TestStaleSessionCleanup:
         )
 
         with (
-            patch("claude_xmpp_bridge.bridge.Path.home", return_value=home),
+            patch("claude_xmpp_bridge.locks._lock_dir", return_value=lock_dir),
             patch.object(bridge, "_screen_socket_alive", return_value=True),
             patch.object(bridge, "_screen_window_alive", return_value=True),
         ):

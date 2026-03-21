@@ -1000,15 +1000,20 @@ def test_schema_migration_adds_agent_mode(db_path):
 
 
 # ---------------------------------------------------------------------------
-# 15. inbox_put / inbox_drain / inbox_count
+# 15. inbox_put / inbox_drain_full / inbox_count
 # ---------------------------------------------------------------------------
+
+
+def _drain_texts(reg: SessionRegistry, session_id: str) -> list[str]:
+    """Drain inbox and return just the message texts (convenience helper)."""
+    return [msg["message"] for msg in reg.inbox_drain_full(session_id)]
 
 
 def test_inbox_drain_empty(db_path):
     """Draining an empty inbox returns an empty list without error."""
     reg = SessionRegistry(db_path)
     try:
-        assert reg.inbox_drain("no-such-session") == []
+        assert reg.inbox_drain_full("no-such-session") == []
     finally:
         reg.close()
 
@@ -1027,7 +1032,7 @@ def test_inbox_put_and_drain(db_path):
     try:
         reg.inbox_put("sess-a", "hello")
         reg.inbox_put("sess-a", "world")
-        messages = reg.inbox_drain("sess-a")
+        messages = _drain_texts(reg, "sess-a")
         assert messages == ["hello", "world"]
     finally:
         reg.close()
@@ -1038,8 +1043,8 @@ def test_inbox_drain_is_destructive(db_path):
     reg = SessionRegistry(db_path)
     try:
         reg.inbox_put("sess-a", "msg1")
-        reg.inbox_drain("sess-a")
-        assert reg.inbox_drain("sess-a") == []
+        reg.inbox_drain_full("sess-a")
+        assert reg.inbox_drain_full("sess-a") == []
         assert reg.inbox_count("sess-a") == 0
     finally:
         reg.close()
@@ -1062,8 +1067,8 @@ def test_inbox_isolated_per_session(db_path):
     try:
         reg.inbox_put("sess-a", "for-a")
         reg.inbox_put("sess-b", "for-b")
-        assert reg.inbox_drain("sess-a") == ["for-a"]
-        assert reg.inbox_drain("sess-b") == ["for-b"]
+        assert _drain_texts(reg, "sess-a") == ["for-a"]
+        assert _drain_texts(reg, "sess-b") == ["for-b"]
     finally:
         reg.close()
 
@@ -1082,7 +1087,7 @@ def test_inbox_put_drops_oldest_when_full(db_path):
         reg.inbox_put("sess-a", "overflow")
         assert reg.inbox_count("sess-a") == MAX_INBOX_SIZE
 
-        messages = reg.inbox_drain("sess-a")
+        messages = _drain_texts(reg, "sess-a")
         assert messages[0] == "msg-1"  # msg-0 was dropped
         assert messages[-1] == "overflow"
     finally:
@@ -1099,7 +1104,7 @@ def test_inbox_persists_across_restart(db_path):
 
     reg2 = SessionRegistry(db_path)
     try:
-        messages = reg2.inbox_drain("sess-a")
+        messages = _drain_texts(reg2, "sess-a")
         assert messages == ["persistent-msg"]
     finally:
         reg2.close()
@@ -1123,13 +1128,17 @@ def test_inbox_from_session_stored(db_path):
     assert row[1] == "hi there"
 
 
-def test_inbox_drain_with_senders_preserves_metadata(db_path):
+def test_inbox_drain_full_preserves_metadata(db_path):
     reg = SessionRegistry(db_path)
     try:
         reg.inbox_put("sess-b", "one", from_session="sess-a")
         reg.inbox_put("sess-b", "two")
-        rows = reg.inbox_drain_with_senders("sess-b")
-        assert rows == [("one", "sess-a"), ("two", None)]
+        rows = reg.inbox_drain_full("sess-b")
+        assert len(rows) == 2
+        assert rows[0]["message"] == "one"
+        assert rows[0]["from_session"] == "sess-a"
+        assert rows[1]["message"] == "two"
+        assert rows[1]["from_session"] is None
     finally:
         reg.close()
 

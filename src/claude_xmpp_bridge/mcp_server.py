@@ -39,7 +39,6 @@ import contextlib
 import hmac
 import json
 import logging
-import os
 import time
 import uuid
 from collections import deque
@@ -49,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 import mcp.types as mcp_types
 from mcp.server.fastmcp import Context, FastMCP
 
+from .locks import read_legacy_lock_hints, short_path
 from .messages import format_generated_agent_message, parse_generated_agent_message
 from .rate_limit import MCP_MAX_PER_MINUTE, RateLimiter
 
@@ -656,14 +656,13 @@ class BridgeMCPServer:
     # Tool implementations (separated from tool registration for testability)
     # ------------------------------------------------------------------
 
-    def _short_path(self, path: str) -> str:
-        """Replace $HOME with ~ for display. Delegates to bridge if available."""
-        if self._bridge is not None:
-            return self._bridge._short_path(path)
-        home = os.path.expanduser("~")
-        if path == home:
-            return "~"
-        return path.replace(home + "/", "~/", 1) if path.startswith(home + "/") else path
+    @staticmethod
+    def _short_path(path: str) -> str:
+        """Replace ``$HOME`` with ``~`` for display.
+
+        Delegates to :func:`locks.short_path` to avoid duplication.
+        """
+        return short_path(path)
 
     def _request_info_from_request_context(self, request_context: Any | None) -> dict[str, Any]:
         if request_context is None:
@@ -820,55 +819,17 @@ class BridgeMCPServer:
             return self._client_sessions.get(f"mcp:{mcp_session_id}", "")
         return ""
 
-    @staticmethod
-    def _lock_dir() -> Path:
-        """Return the directory that stores file-lock hint files."""
-        return Path.home() / ".claude" / "working"
-
-    def _project_matches(self, lock_project: str, lock_filepath: str, project: str) -> bool:
-        """Return True if *lock* belongs to the requested project filter."""
-        if not project:
-            return True
-        short = self._short_path(project)
-        return lock_project in {project, short} or lock_filepath.startswith(project)
-
     def _read_file_locks(self, *, project: str = "") -> list[dict[str, Any]]:
-        """Read legacy file-lock hint files from ``~/.claude/working``."""
+        """Read legacy file-lock hint files from ``~/.claude/working``.
+
+        Delegates to :func:`locks.read_legacy_lock_hints`.
+        """
         bridge = self._bridge
         active_sessions = set(bridge.registry.sessions) if bridge is not None else set()
-        lock_dir = self._lock_dir()
-        if not lock_dir.is_dir():
-            return []
-
-        locks: list[dict[str, Any]] = []
-        for path in sorted(lock_dir.iterdir()):
-            if not path.is_file():
-                continue
-            try:
-                data = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            session_id = str(data.get("session_id", "")).strip()
-            filepath = str(data.get("filepath", "")).strip()
-            lock_project = str(data.get("project", "")).strip()
-            locked_at = str(data.get("locked_at", "")).strip()
-            if not session_id or not filepath:
-                continue
-            if not self._project_matches(lock_project, filepath, project):
-                continue
-            locks.append(
-                {
-                    "session_id": session_id,
-                    "filepath": filepath,
-                    "project": lock_project,
-                    "locked_at": locked_at,
-                    "stale": session_id not in active_sessions,
-                    "source": "legacy",
-                    "lockfile": str(path),
-                }
-            )
+        locks: list[dict[str, Any]] = read_legacy_lock_hints(
+            project=project,
+            active_session_ids=active_sessions,
+        )
         locks.sort(key=lambda item: (item["locked_at"], item["filepath"]))
         return locks
 
