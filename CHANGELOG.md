@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.11] - 2026-03-22
+
+### Added
+- **MCP bearer token authentication** — MCP HTTP server now requires `Authorization: Bearer <token>` header when `socket_token` is configured. Uses constant-time comparison (`hmac.compare_digest`). Unauthenticated requests receive 401 Unauthorized. Plugin reads token from `~/.config/claude-xmpp-bridge/socket_token` or `CLAUDE_XMPP_SOCKET_TOKEN` env var and includes it in all MCP fetch requests.
+- **MCP session ownership validation** — tools that operate on a specific session (`receive_messages`, `replace_todos`, `add_todo`, `update_todo`, `remove_todo`, `list_todos`, `get_session_context`, `acquire_file_lock`, `release_file_lock`, `reply_to_last_sender`) now verify that the calling MCP client is bound to the target session. Prevents agent A from draining agent B's inbox or manipulating agent B's todos/locks.
+
 ## [0.9.10] - 2026-03-22
 
 ### Fixed

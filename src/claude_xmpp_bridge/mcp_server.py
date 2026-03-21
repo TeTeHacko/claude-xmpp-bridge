@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -58,6 +59,47 @@ MCPContext = Context[Any, Any, Any]
 log = logging.getLogger(__name__)
 
 
+class _BearerAuthMiddleware:
+    """ASGI middleware that requires ``Authorization: Bearer <token>`` on every request.
+
+    Uses constant-time comparison (``hmac.compare_digest``) to prevent timing attacks.
+    Unauthenticated requests receive a ``401 Unauthorized`` JSON response.
+    """
+
+    def __init__(self, app: Any, token: str) -> None:
+        self._app = app
+        self._token = token
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self._app(scope, receive, send)
+            return
+
+        # Extract Authorization header from ASGI scope
+        headers = dict(scope.get("headers", []))
+        auth_value = headers.get(b"authorization", b"").decode("latin-1", errors="replace")
+
+        # Expect "Bearer <token>"
+        if auth_value.startswith("Bearer ") and hmac.compare_digest(auth_value[7:], self._token):
+            await self._app(scope, receive, send)
+            return
+
+        # Reject — send 401
+        body = b'{"error":"unauthorized","message":"Missing or invalid Authorization: Bearer token"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"content-length", str(len(body)).encode()],
+                    [b"www-authenticate", b"Bearer"],
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
 class BridgeMCPServer:
     """MCP server that exposes bridge tools to OpenCode agents.
 
@@ -76,8 +118,9 @@ class BridgeMCPServer:
       are not lost if the bridge process is killed.
     """
 
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, *, auth_token: str | None = None) -> None:
         self.port = port
+        self._auth_token = auth_token
         self._bridge: XMPPBridge | None = None
         self._task: asyncio.Task[None] | None = None
         self._mcp: FastMCP | None = None
@@ -571,11 +614,30 @@ class BridgeMCPServer:
         return mcp
 
     async def _serve(self) -> None:
-        """Run the FastMCP streamable-http server (blocks until cancelled)."""
+        """Run the FastMCP streamable-http server (blocks until cancelled).
+
+        When *auth_token* is configured, wraps the Starlette app with ASGI
+        middleware that requires ``Authorization: Bearer <token>`` on every
+        request.  Unauthenticated requests receive a 401 response.
+        """
         if self._mcp is None:  # pragma: no cover
             return
         try:
-            await self._mcp.run_streamable_http_async()
+            import uvicorn
+
+            app: Any = self._mcp.streamable_http_app()
+
+            if self._auth_token:
+                app = _BearerAuthMiddleware(app, self._auth_token)
+
+            config = uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=self.port,
+                log_level="warning",
+            )
+            server = uvicorn.Server(config)
+            await server.serve()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -696,6 +758,31 @@ class BridgeMCPServer:
         mcp_session_id = str(request_info.get("mcp_session_id", "")).strip()
         if mcp_session_id:
             self._client_sessions[f"mcp:{mcp_session_id}"] = session_key
+
+    def _check_session_ownership(self, client_id: str | None, session_id: str) -> str | None:
+        """Return an error string if *client_id* is not authorised to operate on *session_id*.
+
+        Ownership is determined by the ``_client_sessions`` mapping.  If the
+        caller's client_id has been previously associated with a **different**
+        bridge session, operating on *session_id* is denied.
+
+        Returns ``None`` when access is allowed (either the client owns the
+        session or is not yet bound to any session).
+        """
+        client_key = (client_id or "").strip()
+        if not client_key:
+            # No client_id — cannot enforce ownership, allow (best effort)
+            return None
+        bound = self._client_sessions.get(client_key)
+        if bound is None:
+            # First interaction — will be bound by _remember_client_session
+            return None
+        if bound == session_id:
+            return None
+        return (
+            f"session ownership error: your MCP client is bound to session "
+            f"'{bound}', cannot operate on '{session_id}'"
+        )
 
     def _resolve_sender_session_id(
         self,
@@ -1081,6 +1168,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        ownership_error = self._check_session_ownership(client_id, session_id)
+        if ownership_error:
+            return {"ok": False, "error": ownership_error}
         self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
@@ -1112,6 +1202,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "released": False, "error": "bridge not initialised"}
+        ownership_error = self._check_session_ownership(client_id, session_id)
+        if ownership_error:
+            return {"ok": False, "released": False, "error": ownership_error}
         self._remember_client_session(client_id, session_id)
         released = bridge.registry.release_file_lock(session_id, filepath, force=force)
         bridge.audit.log(
@@ -1128,6 +1221,10 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return []
+        ownership_error = self._check_session_ownership(client_id, session_id)
+        if ownership_error:
+            log.warning("list_todos denied: %s", ownership_error)
+            return []
         self._remember_client_session(client_id, session_id)
         return [dict(todo) for todo in bridge.registry.list_todos(session_id)]
 
@@ -1143,6 +1240,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        ownership_error = self._check_session_ownership(client_id, session_id)
+        if ownership_error:
+            return {"ok": False, "error": ownership_error}
         self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
@@ -1177,6 +1277,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        ownership_error = self._check_session_ownership(client_id, session_id)
+        if ownership_error:
+            return {"ok": False, "error": ownership_error}
         self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
@@ -1218,6 +1321,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        ownership_error = self._check_session_ownership(client_id, session_id)
+        if ownership_error:
+            return {"ok": False, "error": ownership_error}
         self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
@@ -1259,6 +1365,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        ownership_error = self._check_session_ownership(client_id, session_id)
+        if ownership_error:
+            return {"ok": False, "error": ownership_error}
         self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
@@ -1287,6 +1396,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return {"ok": False, "error": "bridge not initialised"}
+        ownership_error = self._check_session_ownership(client_id, session_id)
+        if ownership_error:
+            return {"ok": False, "error": ownership_error}
         self._remember_client_session(client_id, session_id)
         info = bridge.registry.get(session_id)
         if info is None:
@@ -1347,6 +1459,10 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return []
+        ownership_error = self._check_session_ownership(client_id, session_id)
+        if ownership_error:
+            log.warning("receive_messages denied: %s", ownership_error)
+            return []
         self._remember_client_session(client_id, session_id)
         self._bind_request_to_session({"client_id": client_id} if client_id else {}, session_id)
         inbox_rows = bridge.registry.inbox_drain_full(session_id)
@@ -1386,6 +1502,9 @@ class BridgeMCPServer:
         bridge = self._bridge
         if bridge is None:
             return "Error: bridge not initialised"
+        ownership_error = self._check_session_ownership(client_id, session_id)
+        if ownership_error:
+            return f"Error: {ownership_error}"
         self._remember_client_session(client_id, session_id)
         sender_info = bridge.registry.get(session_id)
         if sender_info is None:

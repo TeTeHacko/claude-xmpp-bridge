@@ -665,3 +665,12 @@ class TestPushBasedDelivery:
         assert body, "injectMessage function must exist"
         assert "fetch(" not in body, "must not use direct HTTP fetch (SDK handles it)"
         assert "getServerUrl" not in body, "must not resolve server URL manually"
+
+    def test_pollInbox_sends_auth_token(self):
+        """pollInbox must include Authorization: Bearer header when MCP_AUTH_TOKEN is set."""
+        text = _plugin_text()
+        assert "MCP_AUTH_TOKEN" in text, "plugin must define MCP_AUTH_TOKEN constant"
+        body = _function_body(text, "const pollInbox = async")
+        assert body, "pollInbox function must exist"
+        assert "Authorization" in body, "pollInbox must add Authorization header to MCP fetch"
+        assert "Bearer" in body, "pollInbox must use Bearer scheme for MCP auth"

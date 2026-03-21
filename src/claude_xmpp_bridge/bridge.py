@@ -70,7 +70,9 @@ class XMPPBridge:
             audit_logger=self.audit,
         )
         self._ask_queue: collections.deque[_PendingAsk] = collections.deque()
-        self.mcp_server: BridgeMCPServer | None = BridgeMCPServer(config.mcp_port) if config.mcp_port else None
+        self.mcp_server: BridgeMCPServer | None = (
+            BridgeMCPServer(config.mcp_port, auth_token=config.socket_token) if config.mcp_port else None
+        )
         # Per-STY lock to serialize screen -Q queries (concurrent queries on the
         # same session create colliding -queryA sockets and return exit 1).
         self._screen_query_locks: dict[str, asyncio.Lock] = {}

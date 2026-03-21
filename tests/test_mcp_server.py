@@ -1862,3 +1862,243 @@ class TestPruneStaleClientSessions:
         """Pruning an empty mapping returns 0."""
         pruned = started_server.prune_stale_client_sessions({"ses_AAA"})
         assert pruned == 0
+
+
+# ---------------------------------------------------------------------------
+# BearerAuthMiddleware — unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestBearerAuthMiddleware:
+    """Test the ASGI bearer-token middleware."""
+
+    def test_auth_token_stored_on_server(self):
+        """BridgeMCPServer stores the auth_token for middleware use."""
+        srv = BridgeMCPServer(port=9999, auth_token="secret-123")
+        assert srv._auth_token == "secret-123"
+
+    def test_auth_token_none_by_default(self):
+        """auth_token defaults to None (no auth enforcement)."""
+        srv = BridgeMCPServer(port=9999)
+        assert srv._auth_token is None
+
+    @pytest.mark.asyncio
+    async def test_valid_token_passes(self):
+        """Requests with correct Bearer token are forwarded to the app."""
+        from claude_xmpp_bridge.mcp_server import _BearerAuthMiddleware
+
+        calls: list[dict] = []
+
+        async def fake_app(scope, receive, send):
+            calls.append(scope)
+
+        mw = _BearerAuthMiddleware(fake_app, "my-secret-token")
+        scope = {
+            "type": "http",
+            "headers": [(b"authorization", b"Bearer my-secret-token")],
+        }
+        await mw(scope, None, None)
+        assert len(calls) == 1
+        assert calls[0] is scope
+
+    @pytest.mark.asyncio
+    async def test_missing_token_returns_401(self):
+        """Requests without Authorization header get a 401 response."""
+        from claude_xmpp_bridge.mcp_server import _BearerAuthMiddleware
+
+        calls: list[dict] = []
+
+        async def fake_app(scope, receive, send):
+            calls.append(scope)  # pragma: no cover
+
+        sent: list[dict] = []
+
+        async def mock_send(msg):
+            sent.append(msg)
+
+        mw = _BearerAuthMiddleware(fake_app, "secret")
+        scope = {"type": "http", "headers": []}
+        await mw(scope, None, mock_send)
+
+        assert len(calls) == 0  # app NOT called
+        assert sent[0]["status"] == 401
+        assert any(h[0] == b"www-authenticate" for h in sent[0]["headers"])
+
+    @pytest.mark.asyncio
+    async def test_wrong_token_returns_401(self):
+        """Requests with wrong Bearer token get a 401 response."""
+        from claude_xmpp_bridge.mcp_server import _BearerAuthMiddleware
+
+        calls: list[dict] = []
+
+        async def fake_app(scope, receive, send):
+            calls.append(scope)  # pragma: no cover
+
+        sent: list[dict] = []
+
+        async def mock_send(msg):
+            sent.append(msg)
+
+        mw = _BearerAuthMiddleware(fake_app, "correct-token")
+        scope = {
+            "type": "http",
+            "headers": [(b"authorization", b"Bearer wrong-token")],
+        }
+        await mw(scope, None, mock_send)
+
+        assert len(calls) == 0
+        assert sent[0]["status"] == 401
+
+    @pytest.mark.asyncio
+    async def test_non_http_scope_passes_through(self):
+        """Non-HTTP scopes (like 'lifespan') pass through without auth check."""
+        from claude_xmpp_bridge.mcp_server import _BearerAuthMiddleware
+
+        calls: list[dict] = []
+
+        async def fake_app(scope, receive, send):
+            calls.append(scope)
+
+        mw = _BearerAuthMiddleware(fake_app, "secret")
+        scope = {"type": "lifespan"}
+        await mw(scope, None, None)
+        assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Session ownership validation
+# ---------------------------------------------------------------------------
+
+
+class TestSessionOwnership:
+    """Test _check_session_ownership and its application in tool methods."""
+
+    def test_no_client_id_allows_access(self, started_server: BridgeMCPServer):
+        """When client_id is None/empty, ownership is not enforced."""
+        assert started_server._check_session_ownership(None, "ses_AAA") is None
+        assert started_server._check_session_ownership("", "ses_AAA") is None
+
+    def test_unbound_client_allows_access(self, started_server: BridgeMCPServer):
+        """A client not yet in _client_sessions is allowed (first interaction)."""
+        assert started_server._check_session_ownership("new-client", "ses_AAA") is None
+
+    def test_bound_client_own_session_allows(self, started_server: BridgeMCPServer):
+        """A client bound to ses_AAA can access ses_AAA."""
+        started_server._client_sessions["client-1"] = "ses_AAA"
+        assert started_server._check_session_ownership("client-1", "ses_AAA") is None
+
+    def test_bound_client_other_session_denied(self, started_server: BridgeMCPServer):
+        """A client bound to ses_AAA cannot access ses_BBB."""
+        started_server._client_sessions["client-1"] = "ses_AAA"
+        error = started_server._check_session_ownership("client-1", "ses_BBB")
+        assert error is not None
+        assert "ses_AAA" in error
+        assert "ses_BBB" in error
+        assert "ownership" in error
+
+    # ----- Tool-level ownership denial tests -----
+
+    def test_receive_messages_denied(self, started_server: BridgeMCPServer):
+        """receive_messages returns empty list when ownership fails."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = started_server._tool_receive_messages(session_id="ses_BBB", client_id="client-X")
+        assert result == []
+
+    def test_replace_todos_denied(self, started_server: BridgeMCPServer):
+        """replace_todos returns error when ownership fails."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = started_server._tool_replace_todos(
+            session_id="ses_BBB", todos=[], client_id="client-X"
+        )
+        assert result["ok"] is False
+        assert "ownership" in result["error"]
+
+    def test_add_todo_denied(self, started_server: BridgeMCPServer):
+        """add_todo returns error when ownership fails."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = started_server._tool_add_todo(
+            session_id="ses_BBB", content="test", client_id="client-X"
+        )
+        assert result["ok"] is False
+        assert "ownership" in result["error"]
+
+    def test_update_todo_denied(self, started_server: BridgeMCPServer):
+        """update_todo returns error when ownership fails."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = started_server._tool_update_todo(
+            session_id="ses_BBB", todo_id="t1", status="completed", client_id="client-X"
+        )
+        assert result["ok"] is False
+        assert "ownership" in result["error"]
+
+    def test_remove_todo_denied(self, started_server: BridgeMCPServer):
+        """remove_todo returns error when ownership fails."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = started_server._tool_remove_todo(
+            session_id="ses_BBB", todo_id="t1", client_id="client-X"
+        )
+        assert result["ok"] is False
+        assert "ownership" in result["error"]
+
+    def test_get_session_context_denied(self, started_server: BridgeMCPServer):
+        """get_session_context returns error when ownership fails."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = started_server._tool_get_session_context(session_id="ses_BBB", client_id="client-X")
+        assert result["ok"] is False
+        assert "ownership" in result["error"]
+
+    def test_acquire_file_lock_denied(self, started_server: BridgeMCPServer):
+        """acquire_file_lock returns error when ownership fails."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = started_server._tool_acquire_file_lock(
+            session_id="ses_BBB", filepath="/tmp/test.txt", client_id="client-X"
+        )
+        assert result["ok"] is False
+        assert "ownership" in result["error"]
+
+    def test_release_file_lock_denied(self, started_server: BridgeMCPServer):
+        """release_file_lock returns error when ownership fails."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = started_server._tool_release_file_lock(
+            session_id="ses_BBB", filepath="/tmp/test.txt", client_id="client-X"
+        )
+        assert result["ok"] is False
+        assert "ownership" in result["error"]
+        assert result["released"] is False
+
+    def test_list_todos_denied(self, started_server: BridgeMCPServer):
+        """list_todos returns empty list when ownership fails."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = started_server._tool_list_todos(session_id="ses_BBB", client_id="client-X")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_reply_to_last_sender_denied(self, started_server: BridgeMCPServer):
+        """reply_to_last_sender returns error when ownership fails."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = await started_server._tool_reply_to_last_sender(
+            session_id="ses_BBB", message="hello", client_id="client-X"
+        )
+        assert "Error" in result
+        assert "ownership" in result
+
+    # ----- Tools that should NOT enforce ownership -----
+
+    @pytest.mark.asyncio
+    async def test_send_message_no_ownership_check(self, started_server: BridgeMCPServer):
+        """send_message allows sending to any session regardless of binding."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        # Sending to ses_BBB should work (it's not our session, but that's OK for send)
+        result = await started_server._tool_send_message(
+            to="ses_BBB", message="hello", screen=True, client_id="client-X"
+        )
+        # Should NOT contain ownership error
+        assert "ownership" not in result.lower()
+
+    def test_list_sessions_no_ownership_check(self, started_server: BridgeMCPServer):
+        """list_sessions is a read-only global operation with no ownership check."""
+        started_server._client_sessions["client-X"] = "ses_AAA"
+        result = started_server._tool_list_sessions()
+        # Should return sessions, no error
+        assert isinstance(result, list)
+        assert len(result) == 2

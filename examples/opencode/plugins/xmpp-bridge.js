@@ -60,7 +60,7 @@
 
 export const XmppBridgePlugin = async (input) => {
   const { client, directory, $ } = input
-   const PLUGIN_VERSION = "0.9.10"
+   const PLUGIN_VERSION = "0.9.11"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -105,6 +105,20 @@ export const XmppBridgePlugin = async (input) => {
   const BRIDGE_MODE = process.env.XMPP_BRIDGE_MODE ?? "auto"
   const DISABLE_WHEN_MISSING = process.env.XMPP_BRIDGE_DISABLE_WHEN_MISSING === "1"
   let bridgeDisabled = BRIDGE_MODE === "title-only"
+
+  // Read MCP auth token from env or token file (same as socket_token).
+  const MCP_AUTH_TOKEN = (() => {
+    const envToken = process.env.CLAUDE_XMPP_SOCKET_TOKEN
+    if (envToken) return envToken
+    try {
+      // eslint-disable-next-line no-undef
+      const fs = require("fs")
+      const tokenPath = `${process.env.HOME}/.config/claude-xmpp-bridge/socket_token`
+      return fs.readFileSync(tokenPath, "utf8").trim() || null
+    } catch (_) {
+      return null
+    }
+  })()
 
   // Wrapper: spustí claude-xmpp-client pouze pokud je dostupný.
   // Tiše vrátí { exitCode: 127 } pokud není — žádný výpis do terminálu.
@@ -445,9 +459,11 @@ export const XmppBridgePlugin = async (input) => {
       let mcpSessionId = cachedMcpSessionId
       if (!mcpSessionId) {
         // Step 1: initialize — get mcp-session-id
+        const initHeaders = { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" }
+        if (MCP_AUTH_TOKEN) initHeaders["Authorization"] = `Bearer ${MCP_AUTH_TOKEN}`
         const initRes = await fetch("http://127.0.0.1:7878/mcp", {
           method:  "POST",
-          headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+          headers: initHeaders,
           body: JSON.stringify({
             jsonrpc: "2.0", id: 1, method: "initialize",
             params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "opencode-plugin", version: "1.0" } },
@@ -467,13 +483,15 @@ export const XmppBridgePlugin = async (input) => {
       }
 
       // Step 2: tools/call — drain inbox
+      const toolHeaders = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Mcp-Session-Id": mcpSessionId,
+      }
+      if (MCP_AUTH_TOKEN) toolHeaders["Authorization"] = `Bearer ${MCP_AUTH_TOKEN}`
       const mcpRes = await fetch("http://127.0.0.1:7878/mcp", {
         method:  "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json, text/event-stream",
-          "Mcp-Session-Id": mcpSessionId,
-        },
+        headers: toolHeaders,
         body: JSON.stringify({
           jsonrpc: "2.0",
           id:      2,
