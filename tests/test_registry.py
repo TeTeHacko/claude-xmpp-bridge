@@ -1248,6 +1248,69 @@ def test_inbox_migration_adds_columns_to_existing_db(db_path):
         reg.close()
 
 
+def test_inbox_put_stores_from_label(db_path):
+    """inbox_put accepts from_label and inbox_drain_full returns it."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put("sess-b", "hello", from_session="sess-a", from_label="w2")
+        rows = reg.inbox_drain_full("sess-b")
+        assert len(rows) == 1
+        assert rows[0]["from_label"] == "w2"
+    finally:
+        reg.close()
+
+
+def test_inbox_drain_full_from_label_default_none(db_path):
+    """from_label defaults to None when not provided."""
+    reg = SessionRegistry(db_path)
+    try:
+        reg.inbox_put("sess-b", "hello")
+        rows = reg.inbox_drain_full("sess-b")
+        assert len(rows) == 1
+        assert rows[0]["from_label"] is None
+    finally:
+        reg.close()
+
+
+def test_inbox_migration_adds_from_label_column(db_path):
+    """Verify ALTER TABLE migration adds from_label column to existing inbox."""
+    import sqlite3
+
+    # Vytvořit DB se starým schématem (bez from_label)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS inbox ("
+        "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  to_session   TEXT    NOT NULL,"
+        "  from_session TEXT,"
+        "  message      TEXT    NOT NULL,"
+        "  created_at   REAL    NOT NULL,"
+        "  source_type  TEXT,"
+        "  message_type TEXT"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO inbox (to_session, from_session, message, created_at) VALUES (?, ?, ?, ?)",
+        ("sess-b", "sess-a", "old-msg", 1000.0),
+    )
+    conn.commit()
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(inbox)")}
+    assert "from_label" not in cols
+    conn.close()
+
+    # Opening SessionRegistry should run migration
+    reg = SessionRegistry(db_path)
+    try:
+        rows = reg.inbox_drain_full("sess-b")
+        assert len(rows) == 1
+        assert rows[0]["message"] == "old-msg"
+        # Migrated rows have NULL for from_label
+        assert rows[0]["from_label"] is None
+    finally:
+        reg.close()
+
+
 def test_last_agent_sender_persists_across_restart(db_path):
     reg1 = SessionRegistry(db_path)
     try:

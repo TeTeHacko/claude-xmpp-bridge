@@ -33,7 +33,7 @@ claude-xmpp-notify "Hello from bridge!"
 - **Multiplexer support** — GNU Screen and tmux backends; reliable background-window delivery
 - **Inter-agent communication** — agents relay messages to each other via socket commands (`relay`, `broadcast`) or MCP tools; all traffic is forwarded to the XMPP observer
 - **MCP server** — exposes bridge as Model Context Protocol tools on port 7878 so agents can send/receive messages without screen relay
-- **Agent state tracking** — agents report idle/running state; `/list` shows `⏸`/`▶` icons and plugin version
+- **Agent state tracking** — agents report idle/running state; `/list` shows `🟢`/`🔵` icons and plugin version
 - **Permission notifications** — receive informative XMPP alerts when AI requests permission to run commands
 - **Notifications** — receive task completions, errors, and other events with session icon + window ID prefix
 - **Configurable messages** — English default, easily translatable (Czech, German, Polish, Slovak included)
@@ -366,7 +366,7 @@ The bridge also exposes an HTTP MCP server on port 7878 (streamable-HTTP transpo
 |------|-------------|
 | `send_message(to, message, screen=True, nudge=False, sender_session_id="")` | Deliver a message to a session; `screen=False` enqueues to inbox only; `nudge=True` sends only a CR to wake the agent (message stored in inbox, delivered on next `session.idle`); pass `sender_session_id` so the recipient can reply directly to the originating agent; if omitted, the MCP server reuses the same caller's last known `session_id` from earlier session-scoped tool calls, keyed by FastMCP `client_id` and streamable-HTTP `mcp-session-id` when available |
 | `broadcast_message(message, sender_session_id)` | Deliver to all sessions except sender |
-| `receive_messages(session_id)` | Drain inbox — returns `list[dict]` with keys: `text`, `source_type`, `from_session`, `message_id`, `ts`, `type`; bridge-generated envelopes are automatically stripped |
+| `receive_messages(session_id)` | Drain inbox — returns `list[dict]` with keys: `text`, `from_session`, `from_label`, `source_type`, `message_type`, `message_id`, `ts`, `type`; bridge-generated envelopes are automatically stripped |
 | `list_sessions()` | Enumerate all sessions with metadata, state/mode, last_seen/idle_seconds, last_agent_sender, plugin version, sty/window, and inbox/todo/lock counts |
 | `reply_to_last_sender(session_id, message, nudge=True)` | Reply to the last non-null relay sender remembered for this session; the bridge learns it from `receive_messages(session_id)` and sends the reply back agent-to-agent |
 | `get_session_context(session_id)` | Return one session's metadata, todos, bridge-native file locks, and coordination counters, including `todos_version`, `last_agent_sender`, `last_seen`, and `idle_seconds` |

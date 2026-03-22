@@ -60,7 +60,7 @@
 
 export const XmppBridgePlugin = async (input) => {
   const { client, directory, $ } = input
-   const PLUGIN_VERSION = "0.9.16"
+   const PLUGIN_VERSION = "0.9.17"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -528,23 +528,57 @@ export const XmppBridgePlugin = async (input) => {
       const contentItems = body?.result?.content
       if (!Array.isArray(contentItems) || contentItems.length === 0) return
 
-      // Parse all messages and concatenate into a single prompt.
-      const parseItem = (item) => {
+      // Parsuje inbox zprávu — extrahuje strukturovaná pole a formátuje
+      // hlavičku podle typu zprávy (relay, broadcast, task_request, task_result).
+      // from_label (krátký identifikátor odesílatele, např. "w2") se zobrazuje v hlavičce.
+      const parseInboxMessage = (item) => {
         if (!item?.text) return null
         try {
-          const parsed = JSON.parse(item.text)
-          return parsed?.text || null
+          const msg = JSON.parse(item.text)
+          if (!msg?.text) return null
+          const fromLabel = msg.from_label || msg.from_session || "?"
+          const type = msg.type || msg.message_type || "message"
+          let header = ""
+          switch (type) {
+            case "relay":
+              header = `[relay from ${fromLabel}]`
+              break
+            case "broadcast":
+              header = `[broadcast from ${fromLabel}]`
+              break
+            case "task_request":
+              header = `[task_request from ${fromLabel}${msg.message_id ? ` task:${msg.message_id}` : ""}]`
+              break
+            case "task_result":
+              header = `[task_result from ${fromLabel}${msg.message_id ? ` task:${msg.message_id}` : ""}]`
+              break
+            default:
+              header = `[${type} from ${fromLabel}]`
+          }
+          return { header, text: msg.text, type, taskId: msg.message_id || null }
         } catch {
-          return item.text
+          return { header: "[message]", text: item.text, type: "unknown", taskId: null }
         }
       }
-      const messages = contentItems.map(parseItem).filter(Boolean)
-      if (messages.length === 0) return
+      const parsed = contentItems.map(parseInboxMessage).filter(Boolean)
+      if (parsed.length === 0) return
+
+      // Auto-accept task_request — odešle "accepted" zpět delegátorovi.
+      // Nečekáme na výsledek, agent zpracuje úkol asynchronně.
+      for (const msg of parsed) {
+        if (msg.type === "task_request" && msg.taskId) {
+          fireAndForget(
+            runBridgeClient("task-result", msg.taskId, "accepted"),
+            "task-auto-accept"
+          )
+        }
+      }
 
       // Inject ALL messages at once via TUI appendPrompt + submitPrompt.
       // All messages concatenated into one prompt — no buffering, no per-cycle limit.
-      const combined = messages.join("\n\n---\n\n")
-      await dbg(`pollInbox: ${messages.length} message(s), ${combined.length} chars — injecting via TUI`)
+      // Každá zpráva má strukturovanou hlavičku s typem a odesílatelem.
+      const combined = parsed.map(m => `${m.header}\n${m.text}`).join("\n\n---\n\n")
+      await dbg(`pollInbox: ${parsed.length} message(s), ${combined.length} chars — injecting via TUI`)
       const injectRes = await injectMessage(registeredSessionID, combined)
       if (!injectRes.ok) {
         await warn(`pollInbox inject failed: ${injectRes.error}`, "inject-failed")

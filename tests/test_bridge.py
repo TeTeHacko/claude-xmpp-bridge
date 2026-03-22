@@ -4725,7 +4725,7 @@ class TestNudgePattern:
 
         assert ok is True
         bridge.mcp_server.enqueue.assert_called_once_with(
-            "agent-b", "nudge me!", from_session=None, source_type=None, message_type=None
+            "agent-b", "nudge me!", from_session=None, source_type=None, message_type=None, from_label=None
         )
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
@@ -4744,7 +4744,7 @@ class TestNudgePattern:
 
         assert ok is True
         bridge.mcp_server.enqueue.assert_called_once_with(
-            "agent-b", "nudge me!", from_session="agent-a", source_type=None, message_type=None
+            "agent-b", "nudge me!", from_session="agent-a", source_type=None, message_type=None, from_label=None
         )
         bridge.registry.close()
 
@@ -4885,7 +4885,10 @@ class TestNudgePattern:
 
         nudged: list[str] = []
 
-        async def _mock_nudge(session_id, info, text, from_session=None, source_type=None, message_type=None):
+        async def _mock_nudge(
+            session_id, info, text, from_session=None,
+            source_type=None, message_type=None, from_label=None,
+        ):
             nudged.append(session_id)
             return True
 
@@ -4976,6 +4979,65 @@ class TestNudgePattern:
 
 
 # ---------------------------------------------------------------------------
+# _resolve_from_label — krátký identifikátor odesílatele
+# ---------------------------------------------------------------------------
+
+
+class TestResolveFromLabel:
+    """_resolve_from_label returns a short window/sty label for a session."""
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_returns_window_label_for_screen_session(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-a", sty="sty1", window="3", project="/proj", backend="screen")
+        assert bridge._resolve_from_label("agent-a") == "w3"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_returns_sty_for_tmux_session(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.registry.register("agent-b", sty="tmux-session", window="", project="/proj", backend="tmux")
+        assert bridge._resolve_from_label("agent-b") == "tmux-session"
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_returns_none_for_unknown_session(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+        bridge = XMPPBridge(_make_config(tmp_path))
+        assert bridge._resolve_from_label("nonexistent") is None
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_returns_none_for_none_input(self, MockXMPP, tmp_path):
+        conn = MagicMock()
+        conn.connected = asyncio.Event()
+        conn.connected.set()
+        conn.send.return_value = True
+        conn.on_message.side_effect = lambda cb: None
+        MockXMPP.return_value = conn
+        bridge = XMPPBridge(_make_config(tmp_path))
+        assert bridge._resolve_from_label(None) is None
+        bridge.registry.close()
+
+
+# ---------------------------------------------------------------------------
 # TestAskingGuard — asking_guard fallback in _stuff_to_session
 # ---------------------------------------------------------------------------
 
@@ -5043,6 +5105,7 @@ class TestAskingGuard:
             from_session="agent-a",
             source_type="agent",
             message_type="relay",
+            from_label=None,
         )
         bridge.audit.log.assert_called()
         assert bridge.audit.log.call_args[0][0] == "TERMINAL_SEND_ASKING_FALLBACK"

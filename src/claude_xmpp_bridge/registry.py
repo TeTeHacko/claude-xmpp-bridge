@@ -59,6 +59,7 @@ class InboxMessage(TypedDict):
     from_session: str | None
     source_type: str | None
     message_type: str | None
+    from_label: str | None
     created_at: float
 
 
@@ -198,6 +199,8 @@ class SessionRegistry:
             self._db.execute("ALTER TABLE inbox ADD COLUMN source_type TEXT")
         if "message_type" not in inbox_cols:
             self._db.execute("ALTER TABLE inbox ADD COLUMN message_type TEXT")
+        if "from_label" not in inbox_cols:
+            self._db.execute("ALTER TABLE inbox ADD COLUMN from_label TEXT")
         todo_cols = {row[1] for row in self._db.execute("PRAGMA table_info(todos)")}
         if todo_cols and "todo_id" not in todo_cols:
             self._db.execute("ALTER TABLE todos ADD COLUMN todo_id TEXT")
@@ -402,6 +405,7 @@ class SessionRegistry:
         *,
         source_type: str | None = None,
         message_type: str | None = None,
+        from_label: str | None = None,
     ) -> None:
         """Persistently enqueue a message in the inbox for *to_session*.
 
@@ -414,6 +418,7 @@ class SessionRegistry:
                 ``"system"``.  Defaults to ``None`` (legacy callers).
             message_type: Semantic type — ``"relay"``, ``"broadcast"``,
                 ``"task_request"``, ``"task_result"``, etc.
+            from_label: Human-readable sender label, e.g. ``"w1"`` or ``"w3"``.
         """
         with self._db:
             count: int = self._db.execute("SELECT COUNT(*) FROM inbox WHERE to_session = ?", (to_session,)).fetchone()[
@@ -426,9 +431,10 @@ class SessionRegistry:
                     (to_session, to_session),
                 )
             self._db.execute(
-                "INSERT INTO inbox (to_session, from_session, message, created_at, source_type, message_type)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (to_session, from_session, message, time.time(), source_type, message_type),
+                "INSERT INTO inbox (to_session, from_session, message,"
+                " created_at, source_type, message_type, from_label)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (to_session, from_session, message, time.time(), source_type, message_type, from_label),
             )
 
     def inbox_drain_full(self, session_id: str) -> list[InboxMessage]:
@@ -436,11 +442,11 @@ class SessionRegistry:
 
         Returns a list of :class:`InboxMessage` dicts containing all stored
         columns: ``message``, ``from_session``, ``source_type``,
-        ``message_type``, and ``created_at``.
+        ``message_type``, ``from_label``, and ``created_at``.
         """
         with self._db:
             rows = self._db.execute(
-                "SELECT id, message, from_session, source_type, message_type, created_at"
+                "SELECT id, message, from_session, source_type, message_type, created_at, from_label"
                 " FROM inbox WHERE to_session = ? ORDER BY id",
                 (session_id,),
             ).fetchall()
@@ -456,6 +462,7 @@ class SessionRegistry:
                 from_session=r[2],
                 source_type=r[3],
                 message_type=r[4],
+                from_label=r[6],
                 created_at=float(r[5]),
             )
             for r in rows

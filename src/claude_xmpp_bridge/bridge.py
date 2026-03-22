@@ -282,6 +282,7 @@ class XMPPBridge:
         from_session: str | None = None,
         source_type: str | None = None,
         message_type: str | None = None,
+        from_label: str | None = None,
     ) -> bool:
         """Send *text* to a terminal session via the multiplexer.
 
@@ -292,8 +293,8 @@ class XMPPBridge:
         without interfering with the permission prompt.
 
         The extra keyword arguments (*from_session*, *source_type*,
-        *message_type*) are only used when the asking-guard fallback fires —
-        they are forwarded to :meth:`_enqueue_for_mcp`.
+        *message_type*, *from_label*) are only used when the asking-guard
+        fallback fires — they are forwarded to :meth:`_enqueue_for_mcp`.
         """
         mux = get_multiplexer(info["backend"])
         if not mux:
@@ -313,6 +314,7 @@ class XMPPBridge:
                 from_session=from_session,
                 source_type=source_type,
                 message_type=message_type,
+                from_label=from_label,
             )
             nudge_ok = await mux.send_nudge(info["sty"], info["window"])
             self.audit.log(
@@ -356,6 +358,7 @@ class XMPPBridge:
         from_session: str | None = None,
         source_type: str | None = None,
         message_type: str | None = None,
+        from_label: str | None = None,
     ) -> bool:
         """Enqueue *message* to the MCP inbox and send a bare CR nudge to the session.
 
@@ -379,6 +382,7 @@ class XMPPBridge:
             from_session=from_session,
             source_type=source_type,
             message_type=message_type,
+            from_label=from_label,
         )
         ok = await mux.send_nudge(info["sty"], info["window"])
         if ok:
@@ -466,6 +470,7 @@ class XMPPBridge:
         from_session: str | None = None,
         source_type: str | None = None,
         message_type: str | None = None,
+        from_label: str | None = None,
     ) -> None:
         """Queue *message* into the MCP inbox for *session_id* (no-op if MCP disabled)."""
         if self.mcp_server is not None:
@@ -475,6 +480,7 @@ class XMPPBridge:
                 from_session=from_session,
                 source_type=source_type,
                 message_type=message_type,
+                from_label=from_label,
             )
 
     @staticmethod
@@ -497,6 +503,26 @@ class XMPPBridge:
             # sty holds TMUX_PANE which has the form "%3"
             return f" :{sty}"
         return ""
+
+    def _resolve_from_label(self, from_session: str | None) -> str | None:
+        """Resolve a human-readable label for the sender, e.g. ``"w1"`` or ``"w3"``.
+
+        Looks up the sender session in the registry and extracts the window
+        number to produce a compact label that receiving agents can display.
+        """
+        if not from_session:
+            return None
+        info = self.registry.get(from_session)
+        if not info:
+            return None
+        window = info.get("window", "")
+        if window:
+            return f"w{window}"
+        # For tmux, sty holds the pane ID (e.g. "%3")
+        sty = info.get("sty", "")
+        if sty:
+            return sty
+        return None
 
     def _source_icon(self, source: str | None) -> str:
         """Return the icon for a given source string.
@@ -1210,6 +1236,7 @@ class XMPPBridge:
                 from_session=sender_id or None,
                 source_type="agent",
                 message_type="relay",
+                from_label=self._resolve_from_label(sender_id or None),
             )
         else:
             self._enqueue_for_mcp(
@@ -1218,6 +1245,7 @@ class XMPPBridge:
                 from_session=sender_id or None,
                 source_type="agent",
                 message_type="relay",
+                from_label=self._resolve_from_label(sender_id or None),
             )
             ok = True
 
@@ -1304,6 +1332,7 @@ class XMPPBridge:
                     from_session=sender_id or None,
                     source_type="agent",
                     message_type="broadcast",
+                    from_label=self._resolve_from_label(sender_id or None),
                 )
             self._enqueue_for_mcp(
                 sid,
@@ -1311,6 +1340,7 @@ class XMPPBridge:
                 from_session=sender_id or None,
                 source_type="agent",
                 message_type="broadcast",
+                from_label=self._resolve_from_label(sender_id or None),
             )
             return True
 
@@ -1624,6 +1654,7 @@ class XMPPBridge:
                 from_session=session_id,
                 source_type="agent",
                 message_type="relay",
+                from_label=self._resolve_from_label(session_id),
             )
         else:
             self._enqueue_for_mcp(
@@ -1632,6 +1663,7 @@ class XMPPBridge:
                 from_session=session_id,
                 source_type="agent",
                 message_type="relay",
+                from_label=self._resolve_from_label(session_id),
             )
             ok = True
         mode = "nudge"
@@ -1771,6 +1803,7 @@ class XMPPBridge:
                 from_session=sender_id or None,
                 source_type="agent",
                 message_type="task_request",
+                from_label=self._resolve_from_label(sender_id or None),
             )
         else:
             self._enqueue_for_mcp(
@@ -1779,6 +1812,7 @@ class XMPPBridge:
                 from_session=sender_id or None,
                 source_type="agent",
                 message_type="task_request",
+                from_label=self._resolve_from_label(sender_id or None),
             )
 
         self._xmpp_send(
@@ -1869,6 +1903,7 @@ class XMPPBridge:
                     from_session=sender_id or task["to_session"],
                     source_type="agent",
                     message_type="task_result",
+                    from_label=self._resolve_from_label(sender_id or task["to_session"]),
                 )
             else:
                 self._enqueue_for_mcp(
@@ -1877,6 +1912,7 @@ class XMPPBridge:
                     from_session=sender_id or task["to_session"],
                     source_type="agent",
                     message_type="task_result",
+                    from_label=self._resolve_from_label(sender_id or task["to_session"]),
                 )
 
         self._xmpp_send(

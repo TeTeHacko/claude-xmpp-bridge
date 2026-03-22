@@ -143,6 +143,7 @@ class BridgeMCPServer:
         from_session: str | None = None,
         source_type: str | None = None,
         message_type: str | None = None,
+        from_label: str | None = None,
     ) -> None:
         """Put a message into the SQLite inbox for *session_id*.
 
@@ -159,6 +160,7 @@ class BridgeMCPServer:
             from_session=from_session,
             source_type=source_type,
             message_type=message_type,
+            from_label=from_label,
         )
 
     def prune_stale_client_sessions(self, active_session_ids: set[str]) -> int:
@@ -320,6 +322,7 @@ class BridgeMCPServer:
                 List of message dicts, each containing:
                   - text: the clean message body (envelope stripped)
                   - from_session: sender session_id or null
+                  - from_label: short human-readable sender label (e.g. "w2") or null
                   - source_type: "agent", "human", "system" or null
                   - message_type: "relay", "broadcast", etc. or null
                   - message_id: unique hex ID or null
@@ -664,6 +667,26 @@ class BridgeMCPServer:
         """
         return short_path(path)
 
+    def _resolve_from_label(self, from_session: str | None) -> str | None:
+        """Resolve a human-readable label for the sender, e.g. ``"w1"``.
+
+        Mirrors :meth:`XMPPBridge._resolve_from_label` — looks up the sender
+        session in the registry and extracts the window number to produce a
+        compact label that receiving agents can display.
+        """
+        if not from_session or self._bridge is None:
+            return None
+        info = self._bridge.registry.get(from_session)
+        if not info:
+            return None
+        window = info.get("window", "")
+        if window:
+            return f"w{window}"
+        sty = info.get("sty", "")
+        if sty:
+            return sty
+        return None
+
     def _request_info_from_request_context(self, request_context: Any | None) -> dict[str, Any]:
         if request_context is None:
             return {}
@@ -897,6 +920,7 @@ class BridgeMCPServer:
                     from_session=sender_session_id or None,
                     source_type="agent",
                     message_type="relay",
+                    from_label=self._resolve_from_label(sender_session_id or None),
                 )
             else:
                 self.enqueue(
@@ -905,6 +929,7 @@ class BridgeMCPServer:
                     from_session=sender_session_id or None,
                     source_type="agent",
                     message_type="relay",
+                    from_label=self._resolve_from_label(sender_session_id or None),
                 )
                 ok = True
             bridge._xmpp_send(
@@ -961,6 +986,7 @@ class BridgeMCPServer:
                 from_session=sender_session_id or None,
                 source_type="agent",
                 message_type="relay",
+                from_label=self._resolve_from_label(sender_session_id or None),
             )
 
             if ok:
@@ -1011,6 +1037,7 @@ class BridgeMCPServer:
                 from_session=sender_session_id or None,
                 source_type="agent",
                 message_type="relay",
+                from_label=self._resolve_from_label(sender_session_id or None),
             )
             bridge._xmpp_send(
                 json.dumps(
@@ -1101,6 +1128,7 @@ class BridgeMCPServer:
                         from_session=sender_session_id or None,
                         source_type="agent",
                         message_type="broadcast",
+                        from_label=self._resolve_from_label(sender_session_id or None),
                     )
                 )
             else:
@@ -1110,6 +1138,7 @@ class BridgeMCPServer:
                     from_session=sender_session_id or None,
                     source_type="agent",
                     message_type="broadcast",
+                    from_label=self._resolve_from_label(sender_session_id or None),
                 )
                 results.append(True)
 
@@ -1442,6 +1471,7 @@ class BridgeMCPServer:
           - ``message_id``: hex ID from envelope metadata, or ``None``
           - ``ts``: timestamp (epoch float)
           - ``type``: envelope type (``"relay"``, ``"broadcast"``, etc.) or ``None``
+          - ``from_label``: compact sender label (e.g. ``"w1"``) or ``None``
         """
         bridge = self._bridge
         if bridge is None:
@@ -1470,6 +1500,7 @@ class BridgeMCPServer:
                     "message_id": meta.get("message_id"),
                     "ts": row["created_at"],
                     "type": meta.get("type"),
+                    "from_label": row.get("from_label"),
                 }
             )
         if results:
@@ -1580,6 +1611,7 @@ class BridgeMCPServer:
                 from_session=sender_session_id or None,
                 source_type="agent",
                 message_type="task_request",
+                from_label=self._resolve_from_label(sender_session_id or None),
             )
         else:
             self.enqueue(
@@ -1588,6 +1620,7 @@ class BridgeMCPServer:
                 from_session=sender_session_id or None,
                 source_type="agent",
                 message_type="task_request",
+                from_label=self._resolve_from_label(sender_session_id or None),
             )
 
         # XMPP observer notification
@@ -1683,6 +1716,7 @@ class BridgeMCPServer:
                     from_session=sender_session_id or task["to_session"],
                     source_type="agent",
                     message_type="task_result",
+                    from_label=self._resolve_from_label(sender_session_id or task["to_session"]),
                 )
             else:
                 self.enqueue(
@@ -1691,6 +1725,7 @@ class BridgeMCPServer:
                     from_session=sender_session_id or task["to_session"],
                     source_type="agent",
                     message_type="task_result",
+                    from_label=self._resolve_from_label(sender_session_id or task["to_session"]),
                 )
 
         # XMPP observer notification

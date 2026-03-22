@@ -455,14 +455,14 @@ class TestEnqueueAndReceive:
         started_server._bridge.registry.inbox_put = MagicMock()
         started_server.enqueue("ses_AAA", "hello")
         started_server._bridge.registry.inbox_put.assert_called_once_with(
-            "ses_AAA", "hello", from_session=None, source_type=None, message_type=None
+            "ses_AAA", "hello", from_session=None, source_type=None, message_type=None, from_label=None
         )
 
     def test_enqueue_passes_from_session(self, started_server: BridgeMCPServer):
         started_server._bridge.registry.inbox_put = MagicMock()
         started_server.enqueue("ses_AAA", "hello", from_session="ses_BBB")
         started_server._bridge.registry.inbox_put.assert_called_once_with(
-            "ses_AAA", "hello", from_session="ses_BBB", source_type=None, message_type=None
+            "ses_AAA", "hello", from_session="ses_BBB", source_type=None, message_type=None, from_label=None
         )
 
     def test_enqueue_before_bridge_logs_warning_no_crash(self, server: BridgeMCPServer):
@@ -571,6 +571,49 @@ class TestEnqueueAndReceive:
         assert msgs[0]["text"] == "hello"
         assert msgs[0]["from_session"] == "ses_BBB"
         started_server._bridge.registry.set_last_agent_sender.assert_called_once_with("ses_AAA", "ses_BBB")
+
+    def test_receive_returns_from_label(self, started_server: BridgeMCPServer):
+        """receive_messages includes from_label when present in inbox metadata."""
+        started_server._bridge.registry.inbox_drain_full = MagicMock(
+            return_value=[
+                {
+                    "message": "hello",
+                    "from_session": "ses_BBB",
+                    "source_type": "agent",
+                    "message_type": "relay",
+                    "from_label": "w2",
+                    "created_at": 1000.0,
+                }
+            ]
+        )
+        msgs = started_server._tool_receive_messages(session_id="ses_AAA")
+        assert len(msgs) == 1
+        assert msgs[0]["from_label"] == "w2"
+
+    def test_receive_from_label_none_when_absent(self, started_server: BridgeMCPServer):
+        """receive_messages returns from_label=None when not in inbox metadata."""
+        started_server._bridge.registry.inbox_drain_full = MagicMock(
+            return_value=[
+                {
+                    "message": "hello",
+                    "from_session": None,
+                    "source_type": None,
+                    "message_type": None,
+                    "created_at": 1000.0,
+                }
+            ]
+        )
+        msgs = started_server._tool_receive_messages(session_id="ses_AAA")
+        assert len(msgs) == 1
+        assert msgs[0]["from_label"] is None
+
+    def test_enqueue_passes_from_label(self, started_server: BridgeMCPServer):
+        """enqueue forwards from_label to registry.inbox_put."""
+        started_server._bridge.registry.inbox_put = MagicMock()
+        started_server.enqueue("ses_AAA", "hello", from_label="w3")
+        started_server._bridge.registry.inbox_put.assert_called_once_with(
+            "ses_AAA", "hello", from_session=None, source_type=None, message_type=None, from_label="w3"
+        )
 
     def test_receive_remembers_client_session_for_future_tools(self, started_server: BridgeMCPServer):
         started_server._bridge.registry.inbox_drain_full = MagicMock(return_value=[])
@@ -1374,7 +1417,7 @@ class TestEnqueueForMcp:
         bridge.mcp_server.enqueue = MagicMock()
         bridge._enqueue_for_mcp("ses_TEST", "hello")
         bridge.mcp_server.enqueue.assert_called_once_with(
-            "ses_TEST", "hello", from_session=None, source_type=None, message_type=None
+            "ses_TEST", "hello", from_session=None, source_type=None, message_type=None, from_label=None
         )
 
     def test_enqueue_for_mcp_noop_when_disabled(self):
@@ -1401,6 +1444,34 @@ class TestEnqueueForMcp:
             bridge = XMPPBridge(cfg)
             # Should not raise even though mcp_server is None
             bridge._enqueue_for_mcp("ses_TEST", "hello")
+
+
+# ---------------------------------------------------------------------------
+# _resolve_from_label — krátký identifikátor odesílatele (MCP server)
+# ---------------------------------------------------------------------------
+
+
+class TestMcpResolveFromLabel:
+    """_resolve_from_label returns a short window/sty label for a session."""
+
+    def test_returns_window_label_for_screen_session(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.get = MagicMock(
+            return_value={"window": "5", "sty": "sty1", "backend": "screen"}
+        )
+        assert started_server._resolve_from_label("agent-a") == "w5"
+
+    def test_returns_sty_for_tmux_session(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.get = MagicMock(
+            return_value={"window": "", "sty": "tmux-sess", "backend": "tmux"}
+        )
+        assert started_server._resolve_from_label("agent-b") == "tmux-sess"
+
+    def test_returns_none_for_unknown_session(self, started_server: BridgeMCPServer):
+        started_server._bridge.registry.get = MagicMock(return_value=None)
+        assert started_server._resolve_from_label("nonexistent") is None
+
+    def test_returns_none_for_none_input(self, started_server: BridgeMCPServer):
+        assert started_server._resolve_from_label(None) is None
 
 
 # ---------------------------------------------------------------------------

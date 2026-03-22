@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.17] - 2026-03-21
+
+Inbox sender identification and plugin structured message formatting.
+
+### Added
+- **`from_label` in bridge inbox** — each inbox message now carries a short sender label (e.g. `"w2"` for Screen window 2, or the tmux sty name). Stored in the `inbox` SQLite table via `inbox_put()` and returned by `inbox_drain_full()`. DB migration adds the column automatically.
+- **`_resolve_from_label()` helper** — added to both `bridge.py` and `mcp_server.py`. Looks up the sender session in the registry and returns the window label or sty identifier.
+- **`receive_messages` returns `from_label`** — the MCP `receive_messages` tool now includes `from_label` in each returned message dict.
+- **Plugin `parseInboxMessage()`** — replaces the old `parseItem` function. Parses structured inbox messages and formats TUI headers by type (`[relay from w2]`, `[broadcast from w3]`, `[task_request from w1 task:abc123]`, etc.).
+- **Plugin auto-accept `task_request`** — when the plugin receives a `task_request` message, it automatically sends an `accepted` status back to the delegator via the `task-result` CLI command.
+- **New tests** — `from_label` storage/retrieval in registry, DB migration for `from_label` column, `_resolve_from_label` in bridge and MCP server, `receive_messages` returning `from_label`, `enqueue` forwarding `from_label`.
+
+### Changed
+- **Plugin `PLUGIN_VERSION`** bumped to `"0.9.17"`.
+- All `_nudge_session()` and `_enqueue_for_mcp()` call sites in `bridge.py` and `mcp_server.py` now pass `from_label` via `_resolve_from_label()`.
+
 ## [0.9.16] - 2026-03-22
 
 Code review follow-up — final README documentation pass.
