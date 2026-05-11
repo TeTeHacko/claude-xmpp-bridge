@@ -18,24 +18,28 @@
  *
  *   Agent (levý symbol — barevné kolečko odpovídající barvě agenta v OpenCode TUI):
  *     ⚪ neznámý      — před první odpovědí nebo po /new
- *     🟢 coder        — coding agent (success = zelená)
- *     🔴 architect    — orchestrátor (error = červená)
+ *     🟢 coder        — coding agent (built-in, success = zelená)
+ *     🔴 architect    — orchestrátor (built-in, error = červená)
+ *     🤖 🤖 VOR      — Velký Organizační Robot (custom, success = zelená)
+ *     🧠 🧠 CML      — Centrální Mozek Lidstva (custom, error = červená)
  *     🟠 monitor      — monitoring (custom #ff6b35 = oranžová)
  *     🩵 home         — Home Assistant (custom #03a9f4 = světle modrá)
  *     🔵 google       — Google Workspace (custom #4285f4 = modrá)
- *     🟡 reviewer     — code review (warning = žlutá)
- *     ⚪ researcher   — research (secondary = šedá)
- *     🧠 cml          — Centrální Mozek Lidstva (orchestrátor)
+ *     🟡 reviewer     — code review (custom, warning = žlutá)
+ *     ⚪ researcher   — research (custom, secondary = šedá)
+ *     🔍 review-all   — meta-review orchestrátor (custom)
  *
- *   Ikony jsou konfigurovatelné přes env proměnné BRIDGE_AGENT_<JMÉNO> (uppercase):
- *     export BRIDGE_AGENT_CODER=🟢
- *     export BRIDGE_AGENT_ARCHITECT=🔴
+ *   Ikony jsou konfigurovatelné přes env proměnné BRIDGE_AGENT_<NAME>
+ *   (emoji/mezery/pomlčky se stripují/nahradí podtržítkem):
+ *     export BRIDGE_AGENT_CODER=🟢           ← built-in "coder"
+ *     export BRIDGE_AGENT_VOR=🤖             ← custom "🤖 VOR"
+ *     export BRIDGE_AGENT_CML=🧠             ← custom "🧠 CML"
  *     export BRIDGE_AGENT_MONITOR=🟠
  *     export BRIDGE_AGENT_HOME=🩵
  *     export BRIDGE_AGENT_GOOGLE=🔵
  *     export BRIDGE_AGENT_REVIEWER=🟡
  *     export BRIDGE_AGENT_RESEARCHER=⚪
- *     export BRIDGE_AGENT_CML=🧠
+ *     export BRIDGE_AGENT_REVIEW_ALL=🔍      ← custom "review-all"
  *
  *   Stav (pravý kruh — lifecycle agenta):
  *     🟢 idle        — čeká na vstup (dokončil úkol)
@@ -60,7 +64,7 @@
 
 export const XmppBridgePlugin = async (input) => {
   const { client, directory, $ } = input
-   const PLUGIN_VERSION = "0.9.17"
+   const PLUGIN_VERSION = "0.9.19"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef
@@ -267,42 +271,61 @@ export const XmppBridgePlugin = async (input) => {
    // Agent ikony — barevné kolečko odpovídající barvě agenta v OpenCode TUI.
    //
    // Výchozí mapování (agent name → emoji):
-   //   coder      → 🟢  (success    = zelená)
-   //   architect  → 🔴  (error      = červená)
-   //   monitor    → 🟠  (#ff6b35    = oranžová)
-   //   home       → 🩵  (#03a9f4    = světle modrá)
-   //   google     → 🔵  (#4285f4    = modrá)
-    //   reviewer   → 🟡  (warning    = žlutá)
-    //   researcher → ⚪  (secondary  = šedá)
-    //   cml        → 🧠  (brain      = orchestrátor)
+   //   Built-in OpenCode agents:
+    //     coder      → 🟢  (success    = zelená)
+    //     architect  → 🔴  (error      = červená)
+    //   Custom agent examples (emoji-prefixed keys also supported):
+    //     🤖 VOR    → 🤖  (success    = zelená)   — Velký Organizační Robot
+    //     🧠 CML    → 🧠  (error      = červená)  — Centrální Mozek Lidstva
+    //     monitor    → 🟠  (#ff6b35    = oranžová)
+    //     home       → 🩵  (#03a9f4    = světle modrá)
+    //     google     → 🔵  (#4285f4    = modrá)
+    //     reviewer   → 🟡  (warning    = žlutá)
+    //     researcher → ⚪  (secondary  = šedá)
+    //     review-all → 🔍  (meta-review orchestrátor)
     //
-    // Přizpůsobení přes env proměnné BRIDGE_AGENT_<JMÉNO> (uppercase):
-    //   export BRIDGE_AGENT_CODER=🟢
-    //   export BRIDGE_AGENT_ARCHITECT=🔴
+    // Přizpůsobení přes env proměnné BRIDGE_AGENT_<NAME> (emoji/mezery/pomlčky
+    // se stripují/nahradí podtržítkem):
+    //   export BRIDGE_AGENT_CODER=🟢         ← built-in agent "coder"
+    //   export BRIDGE_AGENT_VOR=🤖           ← custom agent "🤖 VOR"
+    //   export BRIDGE_AGENT_CML=🧠           ← custom agent "🧠 CML"
     //   export BRIDGE_AGENT_MONITOR=🟠
     //   export BRIDGE_AGENT_HOME=🩵
     //   export BRIDGE_AGENT_GOOGLE=🔵
     //   export BRIDGE_AGENT_REVIEWER=🟡
     //   export BRIDGE_AGENT_RESEARCHER=⚪
-    //   export BRIDGE_AGENT_CML=🧠
-   // ---------------------------------------------------------------------------
-   const DEFAULT_AGENT_ICONS = {
-     coder:      "🟢",
-     architect:  "🔴",
-     monitor:    "🟠",
-     home:       "🩵",
-     google:     "🔵",
-      reviewer:   "🟡",
-      researcher: "⚪",
-      cml:        "🧠",
+    //   export BRIDGE_AGENT_REVIEW_ALL=🔍    ← custom agent "review-all"
+    // ---------------------------------------------------------------------------
+    const DEFAULT_AGENT_ICONS = {
+      // Built-in OpenCode agents
+      coder:        "🟢",
+      architect:    "🔴",
+      // Custom agents (emoji-prefixed keys work as-is)
+      "🤖 VOR":    "🤖",
+      "🧠 CML":    "🧠",
+      monitor:      "🟠",
+      home:         "🩵",
+      google:       "🔵",
+      reviewer:     "🟡",
+      researcher:   "⚪",
+      "review-all": "🔍",
     }
 
-  // Vrátí ikonu pro daného agenta — nejdřív env, pak default, pak ⚪.
-  const agentIcon = (name) => {
-    if (!name) return "⚪"
-    const envKey = "BRIDGE_AGENT_" + name.toUpperCase()
-    return process.env[envKey] ?? DEFAULT_AGENT_ICONS[name] ?? "⚪"
-  }
+    // Normalizuje jméno agenta pro env var lookup:
+    //   "🤖 VOR" → "VOR", "🧠 CML" → "CML", "review-all" → "REVIEW_ALL"
+    const normalizeForEnv = (name) =>
+      name.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
+          .trim()
+          .replace(/[\s-]+/g, "_")
+          .toUpperCase()
+
+    // Vrátí ikonu pro daného agenta — nejdřív env, pak default, pak ⚪.
+    // Env klíč se normalizuje (emoji a speciální znaky se stripují).
+    const agentIcon = (name) => {
+      if (!name) return "⚪"
+      const envKey = "BRIDGE_AGENT_" + normalizeForEnv(name)
+      return process.env[envKey] ?? DEFAULT_AGENT_ICONS[name] ?? "⚪"
+    }
 
   // Aktuální agent — null = neznámý (před první odpovědí nebo po /new).
   // Nastavuje se z message.updated (pole info.agent).

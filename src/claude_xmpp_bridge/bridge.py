@@ -595,7 +595,24 @@ class XMPPBridge:
                 )
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
                 return proc.returncode == 0
-            except (TimeoutError, OSError) as exc:
+            except TimeoutError:
+                log.warning(
+                    "_screen_window_alive: timeout — killing stuck process (sty=%s, win=%s, pid=%s)",
+                    sty,
+                    win,
+                    proc.pid,
+                )
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except (OSError, ProcessLookupError):
+                    pass
+                # Clean up stale -queryA socket left by the killed process
+                query_sock = self._screen_socket_path(f"{sty}-queryA")
+                if query_sock is not None:
+                    query_sock.unlink(missing_ok=True)
+                return True  # assume alive on timeout
+            except OSError as exc:
                 log.debug("_screen_window_alive: assume alive on error (sty=%s, win=%s, exc=%s)", sty, win, exc)
                 return True  # assume alive on error
 

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.19] - 2026-05-11
+
+Fix zombie `screen -Q title` processes that block the screen socket.
+
+### Fixed
+- **`_screen_window_alive`** — kill the subprocess on timeout instead of leaving it running. Previously, a hung `screen -Q title` process was never reaped, causing zombie `-queryA` sockets to accumulate and eventually block all screen operations.
+- Clean up stale `-queryA` socket file after killing a timed-out query process.
+
+## [0.9.18] - 2026-03-22
+
+Universal agent icon mapping and env var normalization in the OpenCode plugin.
+
+### Changed
+- **Plugin `DEFAULT_AGENT_ICONS`** — added all custom agent keys (`🤖 VOR`, `🧠 CML`, `review-all`) alongside built-in OpenCode agents (`coder`, `architect`). Emoji-prefixed keys work as-is.
+- **Plugin `normalizeForEnv()` helper** — strips emoji (Unicode `Emoji_Presentation` + `Extended_Pictographic`), trims whitespace, replaces spaces and hyphens with underscores, and uppercases. Env override now works for any agent name: `🤖 VOR` → `BRIDGE_AGENT_VOR`, `review-all` → `BRIDGE_AGENT_REVIEW_ALL`.
+- **Plugin `agentIcon()` rewritten** — lookup order: env override (normalized key) → exact match in defaults → `⚪`. Previously `name.toUpperCase()` broke for emoji-prefixed names.
+- **Plugin `PLUGIN_VERSION`** bumped to `"0.9.18"`.
+- **README agent circles table** — added `🤖 VOR`, `🧠 CML`, `review-all`, documented env var normalization rules with examples.
+- **AGENTS.md** — added `review-all` subagent to the architecture table.
+
 ## [0.9.17] - 2026-03-21
 
 Inbox sender identification and plugin structured message formatting.

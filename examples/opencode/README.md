@@ -130,27 +130,31 @@ Each circle colour matches the agent's colour in the OpenCode TUI:
 | Icon | Agent | When |
 |------|-------|------|
 | `⚪` | unknown | startup, after `/new`, before first response |
-| `🟢` | `coder` | coding agent |
-| `🔴` | `architect` | architecture/planning agent |
+| `🟢` | `coder` | coding agent (built-in) |
+| `🔴` | `architect` | architecture/planning agent (built-in) |
+| `🤖` | `🤖 VOR` | Velký Organizační Robot (custom) |
+| `🧠` | `🧠 CML` | Centrální Mozek Lidstva (custom) |
 | `🟠` | `monitor` | monitoring agent |
 | `🩵` | `home` | home automation agent |
 | `🔵` | `google` | Google Workspace agent |
 | `🟡` | `reviewer` | code review agent |
 | `⚪` | `researcher` | research agent |
-| `🧠` | `cml` | CML orchestrator agent |
+| `🔍` | `review-all` | meta-review orchestrator |
 
 Agent is detected from `message.updated` events — the only reliable server-side signal (Tab-switching is client-side only, with no server event).
 
-Icons are configurable via environment variables `BRIDGE_AGENT_<NAME>` (uppercase agent name):
+Icons are configurable via environment variables `BRIDGE_AGENT_<NAME>` where emoji, spaces and hyphens in agent names are stripped/replaced with underscores:
 ```bash
-export BRIDGE_AGENT_CODER=🟢
-export BRIDGE_AGENT_ARCHITECT=🔴
+export BRIDGE_AGENT_CODER=🟢           # built-in "coder"
+export BRIDGE_AGENT_ARCHITECT=🔴       # built-in "architect"
+export BRIDGE_AGENT_VOR=🤖             # custom "🤖 VOR"
+export BRIDGE_AGENT_CML=🧠             # custom "🧠 CML"
 export BRIDGE_AGENT_MONITOR=🟠
 export BRIDGE_AGENT_HOME=🩵
 export BRIDGE_AGENT_GOOGLE=🔵
 export BRIDGE_AGENT_REVIEWER=🟡
 export BRIDGE_AGENT_RESEARCHER=⚪
-export BRIDGE_AGENT_CML=🧠
+export BRIDGE_AGENT_REVIEW_ALL=🔍      # custom "review-all"
 ```
 
 ### State circles
@@ -165,7 +169,8 @@ export BRIDGE_AGENT_CML=🧠
 
 ```
 ⚪🟢 my-project    ← idle, agent not yet known (just started or /new)
-🟢🔵 my-project    ← coder agent running
+🟢🔵 my-project    ← coder agent running (built-in)
+🤖🔵 my-project    ← VOR agent running (custom)
 🟠🟢 my-project    ← monitor agent idle
 🔴🔴 my-project    ← architect agent, permission required
 ```
@@ -181,8 +186,8 @@ This information appears in `/list` XMPP output as icons before the backend brac
 
 ```
 Sessions:
-  /1  🧠🟢🟢  [screen #2]  @abc1234  ~/projects/my-app  *
-  /2  🧠🔵🔵  [screen #4]  @abc1234  ~/projects/other
+  /1  🧠🤖🟢  [screen #2]  @abc1234  ~/projects/my-app  *
+  /2  🧠🟠🔵  [screen #4]  @abc1234  ~/projects/other
 
 * = active session
 ```
@@ -269,7 +274,7 @@ In `/list` output, OpenCode sessions are distinguished by the `🧠` prefix (Cla
 ```
 Sessions:
   /1  ⚡🟢    [screen #0]  ~/projects/my-app  *    ← Claude Code
-  /2  🧠🟢🟢  [screen #2]  ~/projects/my-app       ← OpenCode (coder agent, idle)
+  /2  🧠🤖🟢  [screen #2]  ~/projects/my-app       ← OpenCode (VOR agent, idle)
 
 * = active session
 ```
