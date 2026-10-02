@@ -20,6 +20,10 @@ class Messages:
     session_list_header: str = "Sessions:"
     active_marker: str = "* = active session"
     sent: str = "sent"
+    # Prepended to text a human sent over XMPP before it is pasted into a terminal,
+    # so the agent (and anyone reading the scrollback) can tell it was not typed.
+    # Empty string disables the marker.
+    xmpp_inbound_prefix: str = "[via XMPP] "
     delivery_failed: str = "Delivery to [{project}] failed"
     no_backend: str = "Session [{project}] has no multiplexer — cannot deliver message"
     session_not_found: str = "Session #{index} not found. Type /list."

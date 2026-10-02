@@ -131,7 +131,7 @@ class TestXMPPMessageRouting:
         await captured["cb"](fake_msg)
 
         mock_get_mux.assert_called_with("screen")
-        mock_mux.send_text.assert_called_once_with("12345.pts-0", "0", "hello world")
+        mock_mux.send_text.assert_called_once_with("12345.pts-0", "0", "[via XMPP] hello world")
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_ignores_message_from_stranger(self, MockXMPP, tmp_path):
@@ -2693,7 +2693,31 @@ class TestSecurityLimits:
         await captured["cb"](fake_msg)
 
         assert sent_texts, "Expected _stuff_to_session to be called"
-        assert len(sent_texts[0]) <= MAX_XMPP_BODY
+        # The body is truncated first; the inbound marker is added on top of it.
+        prefix = bridge.messages.xmpp_inbound_prefix
+        assert sent_texts[0].startswith(prefix)
+        assert len(sent_texts[0]) <= MAX_XMPP_BODY + len(prefix)
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_xmpp_inbound_prefix_can_be_disabled(self, MockXMPP, tmp_path):
+        """An empty xmpp_inbound_prefix pastes the text unchanged."""
+        import dataclasses
+
+        conn, _captured = _make_mock_conn(MockXMPP)
+        conn.send.return_value = True
+        bridge = XMPPBridge(_make_config(tmp_path))
+        bridge.messages = dataclasses.replace(bridge.messages, xmpp_inbound_prefix="")
+        bridge.registry.register(session_id="s1", sty="sty1", window="0", project="/proj", backend="screen")
+        sent_texts: list[str] = []
+
+        async def mock_stuff(session_id, info, text, **kwargs):
+            sent_texts.append(text)
+            return True
+
+        bridge._stuff_to_session = mock_stuff  # type: ignore[method-assign]
+        await bridge._send_to_session(None, "plain")
+        assert sent_texts == ["plain"]
         bridge.registry.close()
 
 

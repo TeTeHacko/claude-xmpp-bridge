@@ -259,6 +259,8 @@ class XMPPBridge:
         if not info["backend"]:
             self._xmpp_send(self.messages.no_backend.format(project=self._short_path(info["project"])))
             return
+        # Mark human XMPP input so it is distinguishable from keyboard input.
+        text = f"{self.messages.xmpp_inbound_prefix}{text}"
         ok = await self._stuff_to_session(session_id, info, text)  # type: ignore[arg-type]
         if ok:
             if not self._xmpp_send(f"→ {prefix} {self.messages.sent}"):

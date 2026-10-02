@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.20] - 2026-10-02
+
+Make human XMPP input recognisable in the terminal, and stop cutting answers at 500 characters.
+
+### Added
+- **`xmpp_inbound_prefix`** message (default `"[via XMPP] "`) — prepended to text a human sends over XMPP before it is pasted into a session (both the active-session path and `/N <text>`). Agent-to-agent relay/broadcast keep their own generated-block format. Set it to `""` in `messages_file` to disable.
+
+### Changed
+- **`examples/hooks/stop.sh`** — forwards up to 4000 characters of the last answer instead of 500. 4000 matches the default `email_threshold`: up to that the whole answer arrives over XMPP; longer ones are cut there and, with SMTP configured, mailed in full.
+
 ## [0.9.19] - 2026-05-11
 
 Fix zombie `screen -Q title` processes that block the screen socket.

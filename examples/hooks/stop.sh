@@ -3,10 +3,12 @@
 # Hook type: Stop (async)
 # Input: JSON on stdin with .session_id, .cwd, .last_assistant_message fields
 # Switch: ~/.config/xmpp-notify/notify-enabled
+# 4000 = the bridge's default email_threshold: up to that the whole answer goes
+# to XMPP; longer ones are cut there and (with SMTP configured) mailed in full.
 set -uo pipefail
 
 [ -f "$HOME/.config/xmpp-notify/notify-enabled" ] || exit 0
 
 INPUT="$(cat)"
 claude-xmpp-client response "$(echo "$INPUT" | jq -c \
-    '{session_id: .session_id, project: .cwd, message: (.last_assistant_message | .[0:500] // "done")}')"
+    '{session_id: .session_id, project: .cwd, message: (.last_assistant_message | .[0:4000] // "done")}')"
