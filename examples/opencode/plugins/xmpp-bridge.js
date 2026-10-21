@@ -64,7 +64,7 @@
 
 export const XmppBridgePlugin = async (input) => {
   const { client, directory, $ } = input
-   const PLUGIN_VERSION = "0.9.19"
+   const PLUGIN_VERSION = "0.10.0"
   const pluginRef = (() => {
     try {
       // eslint-disable-next-line no-undef

@@ -132,6 +132,13 @@ def client_main() -> None:
     p_query = sub.add_parser("query", help="Query registered project for a session")
     p_query.add_argument("session_id", help="Session ID")
 
+    # verify
+    p_verify = sub.add_parser(
+        "verify",
+        help="Show what the bridge really delivered under a message id (origin, sender, body)",
+    )
+    p_verify.add_argument("message_id", help="message_id from the envelope or the [via XMPP id=...] marker")
+
     # list
     sub.add_parser(
         "list",
@@ -320,6 +327,15 @@ def client_main() -> None:
         result = send_to_bridge({"cmd": "query", "session_id": args.session_id}, socket_path)
         if result and result.get("ok"):
             print(result["project"])
+        else:
+            sys.exit(1)
+
+    elif args.command == "verify":
+        result = send_to_bridge({"cmd": "verify", "message_id": args.message_id}, socket_path)
+        if result and result.get("ok"):
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            if not result.get("found"):
+                sys.exit(3)
         else:
             sys.exit(1)
 

@@ -21,9 +21,16 @@ from . import __version__
 from .audit import AuditLogger
 from .config import DEFAULT_SOURCE_ICONS, MAX_SOURCE_LEN, Config
 from .email_notify import send_email
+from .ledger import MessageLedger
 from .locks import project_matches, read_legacy_lock_hints, short_path
 from .mcp_server import BridgeMCPServer
-from .messages import Messages, format_generated_agent_message, load_messages
+from .messages import (
+    Messages,
+    format_generated_agent_message,
+    load_messages,
+    parse_generated_agent_message,
+    set_signing_key,
+)
 from .multiplexer import collapse_ws, get_multiplexer
 from .rate_limit import SOCKET_MAX_PER_MINUTE, RateLimiter
 from .registry import SessionInfo, SessionRegistry
@@ -31,6 +38,26 @@ from .socket_server import SocketServer
 from .xmpp import XMPPConnection
 
 log = logging.getLogger(__name__)
+
+
+def _load_signing_key(path: Path) -> bytes:
+    """Read (or create) the 0600 HMAC key that signs generated envelopes.
+
+    Persisted so envelopes still verify after a restart; refuses a key file
+    that others can read, like every other credential the bridge uses.
+    """
+    if path.exists():
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            raise PermissionError(f"{path} has mode {oct(mode)}, expected 0600")
+        key = path.read_bytes()
+        if len(key) >= 32:
+            return key
+    key = os.urandom(32)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(key)
+    return key
 
 # Security limits
 MAX_SESSIONS = 50  # max registered sessions per bridge instance
@@ -64,6 +91,8 @@ class XMPPBridge:
         self.config = config
         self.messages: Messages = load_messages(config.messages_file)
         self.registry = SessionRegistry(config.db_path)
+        self.ledger = MessageLedger(config.db_path)
+        set_signing_key(_load_signing_key(Path(config.db_path).with_name("bridge-signing.key")))
         self.xmpp = XMPPConnection(config.jid, config.password, force_starttls=config.force_starttls)
         self.xmpp.on_message(self._on_xmpp_message)
         self.audit = AuditLogger(config.audit_log)
@@ -263,8 +292,20 @@ class XMPPBridge:
         if not info["backend"]:
             self._xmpp_send(self.messages.no_backend.format(project=self._short_path(info["project"])))
             return
-        # Mark human XMPP input so it is distinguishable from keyboard input.
-        text = f"{self.messages.xmpp_inbound_prefix}{text}"
+        # Mark human XMPP input so it is distinguishable from keyboard input,
+        # and record it as origin "human" so the session can verify that a
+        # "[via XMPP ...]" line really came from the recipient JID - an agent
+        # relay cannot produce it (relay bodies get look-alike lines quoted).
+        message_id = uuid.uuid4().hex[:12]
+        self.ledger.record(
+            message_id=message_id,
+            origin="human",
+            body=text,
+            to_session=session_id,
+            msg_type="xmpp",
+            from_jid=self.config.recipient,
+        )
+        text = f"{self.messages.xmpp_inbound_prefix.replace('{id}', message_id)}{text}"
         ok = await self._stuff_to_session(session_id, info, text)  # type: ignore[arg-type]
         if ok:
             if not self._xmpp_send(f"→ {prefix} {self.messages.sent}"):
@@ -306,6 +347,7 @@ class XMPPBridge:
         if not mux:
             log.warning("No backend for session (project=%s)", info["project"])
             return False
+        self.record_delivery(text, session_id)
 
         agent_state = info.get("agent_state") or ""
         if asking_guard and agent_state in self._ASKING_STATES:
@@ -358,6 +400,55 @@ class XMPPBridge:
                 text_len=len(text),
             )
         return ok
+
+    def record_delivery(self, text: str, to_session: str | None) -> None:
+        """Ledger an envelope this bridge produced; ignore anything else.
+
+        Only authentic (signed) envelopes are recorded - their metadata is the
+        bridge's own, not the caller's. Human XMPP text is recorded where it is
+        received (origin "human"), not here.
+        """
+        body, meta = parse_generated_agent_message(text)
+        if not meta.get("authentic") or not meta.get("message_id"):
+            return
+        self.ledger.record(
+            message_id=str(meta["message_id"]),
+            origin=str(meta.get("origin") or "agent"),
+            body=body,
+            to_session=to_session or meta.get("to"),
+            msg_type=str(meta.get("type") or "message"),
+            from_session=meta.get("from"),
+            from_label=meta.get("from_label"),
+        )
+
+    def verify_message(self, message_id: str) -> dict[str, object]:
+        """What the bridge delivered under *message_id* (for socket/MCP/CLI)."""
+        row = self.ledger.lookup(message_id)
+        if row is None:
+            return {
+                "ok": True,
+                "found": False,
+                "message_id": message_id,
+                "note": "unknown id - this text did not come from the bridge (or is older than 7 days)",
+            }
+        return {
+            "ok": True,
+            "found": True,
+            "message_id": row["message_id"],
+            "origin": row["origin"],
+            "origin_meaning": (
+                f"typed by the human recipient {row['from_jid']} over XMPP"
+                if row["origin"] == "human"
+                else "sent by a local process via socket/MCP; sender is self-declared, NOT verified"
+            ),
+            "from_session": row["from_session"],
+            "from_label": row["from_label"],
+            "to_session": row["to_session"],
+            "type": row["msg_type"],
+            "ts": row["ts"],
+            "body_sha256": row["body_sha256"],
+            "body": row["body"],
+        }
 
     # Read-back delay: long messages go out in chunks with 50 ms gaps, then the
     # app has to render them.
@@ -1029,6 +1120,8 @@ class XMPPBridge:
             response = await self._handle_task_result(req)
         elif cmd == "list_tasks":
             response = self._handle_list_tasks(req)
+        elif cmd == "verify":
+            response = self.verify_message(str(req.get("message_id", "")))
         elif cmd == "ping":
             response = {"ok": True}
         else:
@@ -2101,5 +2194,6 @@ class XMPPBridge:
         await asyncio.sleep(1)
         self.xmpp.disconnect()
         self.registry.close()
+        self.ledger.close()
         self.audit.close()
         log.info("Bye.")

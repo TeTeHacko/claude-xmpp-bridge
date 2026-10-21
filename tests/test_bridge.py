@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -131,7 +132,14 @@ class TestXMPPMessageRouting:
         await captured["cb"](fake_msg)
 
         mock_get_mux.assert_called_with("screen")
-        mock_mux.send_text.assert_called_once_with("12345.pts-0", "0", "[via XMPP] hello world")
+        mock_mux.send_text.assert_called_once()
+        target, window, sent = mock_mux.send_text.call_args.args
+        assert (target, window) == ("12345.pts-0", "0")
+        m = re.fullmatch(r"\[via XMPP id=([0-9a-f]{12})\] hello world", sent)
+        assert m, sent
+        # the human message is ledgered as origin "human" under that id
+        v = bridge.verify_message(m.group(1))
+        assert v["found"] and v["origin"] == "human" and v["body"] == "hello world"
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_ignores_message_from_stranger(self, MockXMPP, tmp_path):
@@ -2694,9 +2702,10 @@ class TestSecurityLimits:
 
         assert sent_texts, "Expected _stuff_to_session to be called"
         # The body is truncated first; the inbound marker is added on top of it.
-        prefix = bridge.messages.xmpp_inbound_prefix
-        assert sent_texts[0].startswith(prefix)
-        assert len(sent_texts[0]) <= MAX_XMPP_BODY + len(prefix)
+        # prefix carries the 12-hex message id instead of "{id}"
+        prefix_len = len(bridge.messages.xmpp_inbound_prefix.replace("{id}", "x" * 12))
+        assert re.match(r"\[via XMPP id=[0-9a-f]{12}\] A", sent_texts[0])
+        assert len(sent_texts[0]) <= MAX_XMPP_BODY + prefix_len
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")

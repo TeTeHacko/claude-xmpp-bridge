@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-10-21
+
+Make bridge-delivered messages verifiable: who sent them, and through which channel.
+
+### Security
+- **Forged envelopes passed through unchanged.** A relay body that started with a hand-made `[bridge-generated message]` header and `"generated": true` was treated as already wrapped and delivered as is, including a forged `from`. Envelopes are now HMAC-signed with a bridge-only key (`bridge-signing.key`, `0600`, created on first start). Only a validly signed envelope is passed through. Anything else is wrapped again, and look-alike lines (`[bridge…`, `[via XMPP…`) are quoted with `│ `.
+- **Origin is explicit.** Envelopes carry `origin`: `agent` for the socket and MCP (any local process), or `human` for XMPP from the configured recipient. Agents cannot produce `human`. The declared sender is marked `from_verified: false`.
+
+### Added
+- **Message ledger** (`delivered_messages` table, 7-day retention): records every signed envelope the bridge delivers and every human XMPP message.
+- **`verify`**: socket command, `claude-xmpp-client verify <id>` (exit code 3 when unknown) and MCP tool `verify_message`. Each returns the origin, the declared sender and the exact body the bridge delivered.
+- **Human XMPP input is now marked `[via XMPP id=<id>] `** (`{id}` in `xmpp_inbound_prefix`), so the session can verify it.
+
+### Changed
+- Envelope format v2 (`v`, `origin`, `from_label`, `from_verified`, `verify`, `sig`). The parser still accepts v1 and reports `authentic: false` for it.
+- OpenCode plugin `PLUGIN_VERSION` synced to 0.10.0 (was still 0.9.19).
+
 ## [0.9.22] - 2026-10-21
 
 Detect lost terminal deliveries instead of logging them as sent.
