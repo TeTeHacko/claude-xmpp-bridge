@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-10-21
+
+Deliver messages to Claude Code sessions through hooks instead of typing them into the terminal.
+
+### Added
+- **Hook delivery** for sessions registered as `hook+inbox`. Messages wait in the bridge inbox. `PostToolUse` hands them over between tool calls (`additionalContext`), `Stop` blocks the end of a turn with them, and an idle session gets a short content-free trigger line (`hook_trigger`) followed by `UserPromptSubmit` context. Verified on a throwaway Claude Code 2.1.296 session, both by hand and end to end through the bridge: long message to an idle session, and a message to a busy session picked up mid-work with no trigger typed.
+- **`claude-xmpp-client hook <Event>`**: the hook entry point. Takes about 70 ms and fails silently. Messages are read without removal and acknowledged after printing (`inbox_peek` / `inbox_ack`), so a dying hook leaves them pending.
+- **Socket `hook` command**: also tracks `agent_state` (`running` from UserPromptSubmit/PostToolUse, `idle` from an empty Stop).
+- **Watchdog**: re-triggers an idle session after 5 s, and sends an XMPP alert if nothing picked the message up within 90 s.
+
+### Changed
+- `_stuff_to_session` and `_nudge_session` route hook-capable sessions to the inbox path. Old `hook` sessions keep the screen path.
+- `examples/hooks/settings.json` gains the three hooks. `setup` manages `UserPromptSubmit` and `PostToolUse` for removal.
+- The bridge DB and its WAL/SHM files are chmod 0600 at start; they hold message bodies.
+
+### Not changed yet
+- `session-start-register.sh` still registers `hook`. Switch to `hook+inbox` only after the hooks are in `~/.claude/settings.json`.
+
 ## [0.10.0] - 2026-10-21
 
 Make bridge-delivered messages verifiable: who sent them, and through which channel.

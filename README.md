@@ -426,6 +426,21 @@ See [`examples/hooks/`](examples/hooks/) for Claude Code hook configurations tha
 - Forward notifications via XMPP
 - Ask for permission approval via XMPP
 - Send task completion notices
+- Deliver bridge messages through hooks instead of typing them into the terminal (see below)
+
+### Message delivery through hooks (v0.11.0)
+
+Typing messages into a screen window was unreliable. Screen drops long `-X` commands and still reports success, Claude Code swallows the Enter that ends a paste, injected text can land in a half-typed prompt, and the agent cannot tell it from the user's typing. Sessions registered with `plugin_version` containing `inbox` (`hook+inbox`, set by `session-start-register.sh`) are served through the bridge inbox instead:
+
+| agent state | delivered by | what is typed into the terminal |
+| --- | --- | --- |
+| running a turn | `PostToolUse` hook (`additionalContext`, between two tool calls) | nothing |
+| finishing a turn | `Stop` hook (`decision: block` with the messages as reason) | nothing |
+| idle, waiting for the user | `UserPromptSubmit` hook after a short trigger line (`hook_trigger` message) | only the trigger line, which carries no content |
+
+All three hooks run `claude-xmpp-client hook <Event>`. It takes about 70 ms, never fails the agent (any error means exit 0 with no output) and acknowledges messages only after printing them. The agent state (`running` / `idle`) comes from the same hooks. The trigger is never typed into a running session, and so never into a permission prompt. If no hook picks a message up within 90 s, the bridge sends an XMPP alert. Sessions that registered as plain `hook` (started before the hooks were installed; Claude Code loads hooks at start) keep the screen path.
+
+Activation order matters: install the three hooks in `~/.claude/settings.json` **before** switching `session-start-register.sh` to `hook+inbox`. Otherwise new sessions get messages queued that nothing reads.
 
 ### Hook Input JSON Schemas
 

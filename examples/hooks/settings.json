@@ -72,6 +72,38 @@
             "async": true
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-xmpp-client hook Stop",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-xmpp-client hook UserPromptSubmit",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-xmpp-client hook PostToolUse",
+            "timeout": 5
+          }
+        ]
       }
     ]
   }

@@ -93,6 +93,40 @@ def bridge_main() -> None:
 # --- client ---
 
 
+def run_hook(event: str, socket_path: Path) -> int:
+    """Claude Code hook: print pending bridge messages in the hook's format.
+
+    Must never break the agent: any failure (bridge down, bad input, timeout)
+    ends silently with exit 0 and no output. Messages are acknowledged only
+    after they were written to stdout, so a crash leaves them pending.
+    """
+    from .client import send_to_bridge
+
+    try:
+        data = json.loads(sys.stdin.read() or "{}")
+        session_id = str(data.get("session_id", ""))
+        if not session_id:
+            return 0
+        resp = send_to_bridge({"cmd": "hook", "session_id": session_id, "event": event}, socket_path, socket_timeout=2)
+        if not resp or not resp.get("ok") or not resp.get("context"):
+            return 0
+        context = str(resp["context"])
+        if event == "Stop":
+            out: dict[str, object] = {"decision": "block", "reason": context}
+        else:
+            out = {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}}
+        sys.stdout.write(json.dumps(out, ensure_ascii=False))
+        sys.stdout.flush()
+        send_to_bridge(
+            {"cmd": "hook", "session_id": session_id, "event": event, "ack": resp.get("ids") or []},
+            socket_path,
+            socket_timeout=2,
+        )
+    except Exception:  # noqa: BLE001 - a hook must never break the agent
+        return 0
+    return 0
+
+
 def client_main() -> None:
     """Entry point for claude-xmpp-client."""
     parser = argparse.ArgumentParser(description="Client for claude-xmpp-bridge daemon")
@@ -131,6 +165,13 @@ def client_main() -> None:
     # query
     p_query = sub.add_parser("query", help="Query registered project for a session")
     p_query.add_argument("session_id", help="Session ID")
+
+    # hook (Claude Code hook entry point)
+    p_hook = sub.add_parser(
+        "hook",
+        help="Claude Code hook: deliver pending bridge messages (reads hook JSON on stdin)",
+    )
+    p_hook.add_argument("event", choices=["UserPromptSubmit", "PostToolUse", "Stop"])
 
     # verify
     p_verify = sub.add_parser(
@@ -329,6 +370,9 @@ def client_main() -> None:
             print(result["project"])
         else:
             sys.exit(1)
+
+    elif args.command == "hook":
+        sys.exit(run_hook(args.event, socket_path))
 
     elif args.command == "verify":
         result = send_to_bridge({"cmd": "verify", "message_id": args.message_id}, socket_path)

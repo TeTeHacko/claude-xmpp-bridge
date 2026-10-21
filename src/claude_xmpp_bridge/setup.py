@@ -65,6 +65,8 @@ MANAGED_HOOK_EVENTS: list[str] = [
     "TaskCompleted",
     "Stop",
     "PermissionRequest",
+    "UserPromptSubmit",
+    "PostToolUse",
 ]
 
 # Components

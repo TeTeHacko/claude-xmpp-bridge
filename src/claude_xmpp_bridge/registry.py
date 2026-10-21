@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import sqlite3
@@ -114,6 +115,13 @@ class SessionRegistry:
         self.last_active: str | None = None
         self._db = sqlite3.connect(str(db_path))
         self._db.execute("PRAGMA journal_mode=WAL")
+        # The DB holds message bodies (inbox, ledger) - keep it owner-only,
+        # including the WAL/SHM side files sqlite creates with the umask.
+        for suffix in ("", "-wal", "-shm"):
+            side = Path(f"{db_path}{suffix}")
+            if side.exists():
+                with contextlib.suppress(OSError):
+                    side.chmod(0o600)
         self._db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS sessions ("
@@ -486,6 +494,44 @@ class SessionRegistry:
         if not info:
             return None
         return info.get("last_agent_sender")
+
+    def inbox_peek(self, session_id: str) -> list[tuple[int, InboxMessage]]:
+        """Return pending messages with their row ids, without removing them.
+
+        Used by the Claude Code hook path: the hook prints the messages and
+        only then acknowledges them (:meth:`inbox_ack`), so a hook that dies
+        half-way leaves the messages pending instead of losing them.
+        """
+        rows = self._db.execute(
+            "SELECT id, message, from_session, source_type, message_type, created_at, from_label"
+            " FROM inbox WHERE to_session = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        return [
+            (
+                int(r[0]),
+                InboxMessage(
+                    message=r[1],
+                    from_session=r[2],
+                    source_type=r[3],
+                    message_type=r[4],
+                    from_label=r[6],
+                    created_at=float(r[5]),
+                ),
+            )
+            for r in rows
+        ]
+
+    def inbox_ack(self, session_id: str, ids: list[int]) -> int:
+        """Delete acknowledged inbox rows of *session_id*; returns rows deleted."""
+        if not ids:
+            return 0
+        with self._db:
+            cur = self._db.execute(
+                f"DELETE FROM inbox WHERE to_session = ? AND id IN ({','.join('?' * len(ids))})",  # noqa: S608
+                (session_id, *ids),
+            )
+        return int(cur.rowcount)
 
     def inbox_count(self, session_id: str) -> int:
         """Return the number of pending messages for *session_id*."""

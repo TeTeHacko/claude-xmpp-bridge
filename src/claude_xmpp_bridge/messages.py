@@ -30,6 +30,11 @@ class Messages:
     # ``{id}`` is replaced by the message id the bridge records (origin
     # "human"), so the session can run ``claude-xmpp-client verify <id>``.
     xmpp_inbound_prefix: str = "[via XMPP id={id}] "
+    # Typed into an idle Claude Code session that has the bridge hooks; the
+    # UserPromptSubmit hook then adds the actual messages as hook context.
+    # Keep it short and content-free: anyone could type it, and it carries
+    # nothing - the messages come only from the bridge inbox.
+    hook_trigger: str = "[bridge] new message - shown below by the bridge hook"
     delivery_failed: str = "Delivery to [{project}] failed"
     no_backend: str = "Session [{project}] has no multiplexer — cannot deliver message"
     session_not_found: str = "Session #{index} not found. Type /list."

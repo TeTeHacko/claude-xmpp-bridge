@@ -56,6 +56,10 @@ Disable: `rm ~/.config/xmpp-notify/<file>`
 | `task-completed.sh` | TaskCompleted | async | Sends task completion notice (switch: `notify-enabled`) |
 | `stop.sh` | Stop | async | Sends last assistant message (switch: `notify-enabled`) |
 
+## Bridge message hooks (UserPromptSubmit, PostToolUse, Stop)
+
+`settings.json` adds three hooks that run `claude-xmpp-client hook <Event>` and hand pending bridge messages to the model as hook context, so nothing has to be typed into the terminal. They only take effect for sessions that register with `plugin_version` `hook+inbox` (edit `--arg pv` in `session-start-register.sh`), and only after Claude Code is restarted, because hooks load at start. Install the hooks first, then switch `pv`. The full description is in the main README under "Message delivery through hooks".
+
 ## Hook Input JSON Schemas
 
 Each hook receives JSON on stdin. These are the fields available for each event:
