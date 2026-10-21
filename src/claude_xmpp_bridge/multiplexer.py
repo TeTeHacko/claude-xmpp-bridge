@@ -24,6 +24,30 @@ _CMD_TIMEOUT = 5
 # to process the pasted text before the Enter arrives.
 _INTER_CMD_DELAY = 0.05
 
+# GNU Screen silently drops a ``-X`` command whose message exceeds its internal
+# buffer: ``screen -X at N# stuff <text>`` exits 0, nothing reaches the window,
+# only the following CR arrives. Measured 2026-10-21 on screen 5.0.2: 746 bytes
+# of text passed, 747 were dropped (bytes, not characters - UTF-8 counts double);
+# through the bridge a 740-byte message was already lost (the limit covers the
+# whole command, including the target and window arguments). Every relay message
+# longer than ~550 characters of payload vanished while the log said "Stuffed".
+# Text is therefore sent in chunks well below that; the limit applies to the
+# *escaped* text, and escaping can double it, so raw chunks stay <= 256 bytes.
+_SCREEN_CHUNK_BYTES = 256
+
+# Bracketed-paste markers around the text (screen only). Claude Code treats
+# input arriving in quick succession as one paste, and a CR that lands inside
+# that paste does not submit: it becomes a newline or is dropped, and the text
+# waits in the prompt until a human presses Enter (seen 2026-10-21 in real
+# windows, even for a single ~650-byte stuff). Timing does not fix it - measured
+# on a throwaway Claude Code session with an attached display: 3 chunks 50 ms
+# apart never submitted, 0.3 s gaps before the CR submitted 1 of 3 messages.
+# With the text wrapped in ESC[200~ ... ESC[201~ the app knows exactly where
+# the paste ends, and the CR after it submitted 3 of 3. Requires a target that
+# enables bracketed paste (Claude Code, OpenCode and bash readline all do).
+_PASTE_START = "\x1b[200~"
+_PASTE_END = "\x1b[201~"
+
 # CR/Enter delivery can fail transiently even after text injection already
 # succeeded. Retry the keypress a few times so readline is more likely to submit
 # the prompt and the message does not remain half-typed in the target session.
@@ -44,6 +68,28 @@ def _screen_stuff_escape(text: str) -> str:
     ``\\\\`` (must be first) and ``$`` → ``\\$``.
     """
     return text.replace("\\", "\\\\").replace("$", "\\$")
+
+
+def _split_utf8(text: str, max_bytes: int) -> list[str]:
+    """Split *text* into pieces of at most *max_bytes* UTF-8 bytes each.
+
+    Splits only between characters, never inside a multi-byte sequence, so
+    every piece is valid UTF-8 on its own. Escaping is applied per piece
+    afterwards, which also keeps an escape pair (``\\\\``, ``\\$``) whole.
+    """
+    pieces: list[str] = []
+    current: list[str] = []
+    size = 0
+    for ch in text:
+        n = len(ch.encode("utf-8"))
+        if current and size + n > max_bytes:
+            pieces.append("".join(current))
+            current, size = [], 0
+        current.append(ch)
+        size += n
+    if current:
+        pieces.append("".join(current))
+    return pieces
 
 
 def _get_safe_env() -> dict[str, str]:
@@ -118,25 +164,32 @@ class ScreenMultiplexer:
         screen's key-event pipeline (not the raw PTY write path), readline
         correctly recognises the \\r as an Enter keypress.
 
-        A short sleep between text and CR gives readline time to process the
-        pasted text before the Enter arrives.
+        The text is wrapped in bracketed-paste markers and sent in chunks of at
+        most ``_SCREEN_CHUNK_BYTES`` (screen silently drops longer ``-X``
+        commands), and the CR goes out only after the paste-end marker, so the
+        app treats it as Enter and not as part of the paste. See the comments
+        at ``_SCREEN_CHUNK_BYTES`` and ``_PASTE_START`` for the measurements.
         """
         if not _TARGET_RE.match(target):
             log.error("Rejected invalid screen target: %r", target)
             return False
-        text = _screen_stuff_escape(sanitize_text(text))
-        if not await _run_cmd(
-            "screen",
-            "-S",
-            target,
-            "-X",
-            "at",
-            f"{window}#",
-            "stuff",
-            text,
-            label="Screen stuff",
-        ):
-            return False
+        chunks = _split_utf8(sanitize_text(text), _SCREEN_CHUNK_BYTES)
+        # The markers are added after sanitize_text, which would strip the ESC.
+        for i, piece in enumerate([_PASTE_START, *map(_screen_stuff_escape, chunks), _PASTE_END]):
+            if i:
+                await asyncio.sleep(_INTER_CMD_DELAY)
+            if not await _run_cmd(
+                "screen",
+                "-S",
+                target,
+                "-X",
+                "at",
+                f"{window}#",
+                "stuff",
+                piece,
+                label="Screen stuff",
+            ):
+                return False
 
         await asyncio.sleep(_INTER_CMD_DELAY)
         if not await _run_cmd_with_retries(
@@ -153,7 +206,7 @@ class ScreenMultiplexer:
         ):
             return False
 
-        log.info("Stuffed to screen %s window %s", target, window)
+        log.info("Stuffed to screen %s window %s (%d chunk(s))", target, window, len(chunks))
         return True
 
     async def send_nudge(self, target: str, window: str) -> bool:

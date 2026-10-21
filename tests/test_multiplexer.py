@@ -6,9 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from claude_xmpp_bridge.multiplexer import (
     _KEYPRESS_RETRIES,
+    _PASTE_END,
+    _PASTE_START,
+    _SCREEN_CHUNK_BYTES,
     ScreenMultiplexer,
     TmuxMultiplexer,
     _screen_stuff_escape,
+    _split_utf8,
     get_multiplexer,
     sanitize_text,
 )
@@ -142,7 +146,7 @@ class TestScreenMultiplexer:
     """Tests for ScreenMultiplexer.send_text."""
 
     async def test_success(self):
-        """Two calls: at N# stuff text, then at N# stuff \\r -> returns True."""
+        """Paste start, text, paste end, then CR - all via at N# stuff."""
         mux = ScreenMultiplexer()
         proc_ok = _make_process_mock(0)
 
@@ -151,17 +155,19 @@ class TestScreenMultiplexer:
             result = await mux.send_text("session", "3", "hello world")
 
         assert result is True
-        assert mock_exec.call_count == 2
+        assert mock_exec.call_count == 4
+        assert mock_exec.call_args_list[0].args[7] == _PASTE_START
+        assert mock_exec.call_args_list[2].args[7] == _PASTE_END
 
-        # First call: screen -S session -X at 3# stuff "hello world"
-        text_args = mock_exec.call_args_list[0].args
+        # screen -S session -X at 3# stuff "hello world"
+        text_args = mock_exec.call_args_list[1].args
         assert text_args[:5] == ("screen", "-S", "session", "-X", "at")
         assert text_args[5] == "3#"
         assert text_args[6] == "stuff"
         assert text_args[7] == "hello world"
 
-        # Second call: screen -S session -X at 3# stuff "\r"
-        cr_args = mock_exec.call_args_list[1].args
+        # Last call: screen -S session -X at 3# stuff "\r"
+        cr_args = mock_exec.call_args_list[3].args
         assert cr_args[:5] == ("screen", "-S", "session", "-X", "at")
         assert cr_args[5] == "3#"
         assert cr_args[6] == "stuff"
@@ -201,11 +207,11 @@ class TestScreenMultiplexer:
         proc_fail = _make_process_mock(1)
 
         with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
-            mock_exec.side_effect = [proc_ok, *([proc_fail] * _KEYPRESS_RETRIES)]
+            mock_exec.side_effect = [proc_ok] * 3 + [proc_fail] * _KEYPRESS_RETRIES
             result = await mux.send_text("session", "0", "text")
 
         assert result is False
-        assert mock_exec.call_count == 1 + _KEYPRESS_RETRIES
+        assert mock_exec.call_count == 3 + _KEYPRESS_RETRIES
 
     async def test_cr_retry_eventually_succeeds(self):
         """If the first CR send fails transiently, the retry should recover."""
@@ -214,11 +220,11 @@ class TestScreenMultiplexer:
         proc_fail = _make_process_mock(1)
 
         with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
-            mock_exec.side_effect = [proc_ok, proc_fail, proc_ok]
+            mock_exec.side_effect = [proc_ok, proc_ok, proc_ok, proc_fail, proc_ok]
             result = await mux.send_text("session", "0", "text")
 
         assert result is True
-        assert mock_exec.call_count == 3
+        assert mock_exec.call_count == 5
 
     async def test_timeout(self):
         """Subprocess wait times out -> returns False, kill() is called."""
@@ -241,8 +247,8 @@ class TestScreenMultiplexer:
             mock_exec.return_value = proc_ok
             await mux.send_text("session", "0", "mytext")
 
-        text_args = mock_exec.call_args_list[0].args
-        cr_args = mock_exec.call_args_list[1].args
+        text_args = mock_exec.call_args_list[1].args
+        cr_args = mock_exec.call_args_list[-1].args
         # Text call must NOT contain \r
         assert "\r" not in text_args[-1]
         assert text_args[-1] == "mytext"
@@ -258,7 +264,7 @@ class TestScreenMultiplexer:
             mock_exec.return_value = proc_ok
             await mux.send_text("s", "0", "clean\x00text")
 
-        text_args = mock_exec.call_args_list[0].args
+        text_args = mock_exec.call_args_list[1].args
         assert "\x00" not in text_args[-1]
         assert "cleantext" in text_args[-1]
 
@@ -279,9 +285,91 @@ class TestScreenMultiplexer:
             mock_exec.return_value = proc_ok
             await mux.send_text("session", "0", "clean\x7ftext")
 
-        text_args = mock_exec.call_args_list[0].args
+        text_args = mock_exec.call_args_list[1].args
         assert "\x7f" not in text_args[-1]
         assert "cleantext" in text_args[-1]
+
+
+class TestSplitUtf8:
+    """_split_utf8 - byte-bounded split that never cuts a UTF-8 sequence."""
+
+    def test_short_text_single_piece(self):
+        assert _split_utf8("hello", 256) == ["hello"]
+
+    def test_empty_text(self):
+        assert _split_utf8("", 256) == []
+
+    def test_ascii_split_at_byte_limit(self):
+        assert _split_utf8("a" * 10, 4) == ["aaaa", "aaaa", "aa"]
+
+    def test_multibyte_never_cut(self):
+        # "ž" is 2 bytes: a 5-byte limit must give 2 chars (4 B) per piece
+        pieces = _split_utf8("ž" * 5, 5)
+        assert pieces == ["žž", "žž", "ž"]
+        assert all(len(p.encode()) <= 5 for p in pieces)
+
+    def test_roundtrip(self):
+        text = "příliš žluťoučký kůň ≤ ≥ – „x“ $HOME \\n " * 40
+        assert "".join(_split_utf8(text, _SCREEN_CHUNK_BYTES)) == text
+
+
+class TestScreenChunking:
+    """Long text goes out in several stuff calls inside one bracketed paste."""
+
+    async def test_sanitize_does_not_strip_markers(self):
+        mux = ScreenMultiplexer()
+        proc_ok = _make_process_mock(0)
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = proc_ok
+            await mux.send_text("session", "0", "a\x1b[201~b")
+        args = [c.args[7] for c in mock_exec.call_args_list]
+        # an ESC inside the message is stripped, so it cannot end the paste early
+        assert args == [_PASTE_START, "a[201~b", _PASTE_END, "\r"]
+
+    async def test_long_text_is_chunked_and_cr_last(self):
+        mux = ScreenMultiplexer()
+        proc_ok = _make_process_mock(0)
+        text = "ž" * 1000  # 2000 bytes
+
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = proc_ok
+            result = await mux.send_text("session", "6", text)
+
+        assert result is True
+        calls = [c.args for c in mock_exec.call_args_list]
+        assert calls[0][7] == _PASTE_START and calls[-2][7] == _PASTE_END
+        text_calls, cr_call = calls[1:-2], calls[-1]
+        assert len(text_calls) == -(-2000 // _SCREEN_CHUNK_BYTES)
+        assert all(c[5] == "6#" and c[6] == "stuff" for c in calls)
+        assert all(len(c[7].encode()) <= _SCREEN_CHUNK_BYTES for c in text_calls)
+        assert "".join(c[7] for c in text_calls) == text
+        assert cr_call[7] == "\r"
+
+    async def test_escaped_chunks_stay_below_screen_limit(self):
+        """Worst case: every char escaped (doubled) must still fit under 746 B."""
+        mux = ScreenMultiplexer()
+        proc_ok = _make_process_mock(0)
+
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = proc_ok
+            await mux.send_text("session", "0", "$" * 3000)
+
+        text_calls = [c.args for c in mock_exec.call_args_list][1:-2]
+        assert all(len(c[7].encode()) <= 2 * _SCREEN_CHUNK_BYTES < 700 for c in text_calls)
+        assert "".join(c[7] for c in text_calls) == "\\$" * 3000
+
+    async def test_failed_chunk_stops_and_no_cr(self):
+        mux = ScreenMultiplexer()
+        proc_ok = _make_process_mock(0)
+        proc_fail = _make_process_mock(1)
+
+        with patch(_EXEC_PATCH, new_callable=AsyncMock) as mock_exec:
+            mock_exec.side_effect = [proc_ok, proc_ok, proc_fail]
+            result = await mux.send_text("session", "0", "x" * 1000)
+
+        # paste start + first chunk ok, second chunk fails -> no paste end, no CR
+        assert result is False
+        assert mock_exec.call_count == 3
 
 
 # ---------------------------------------------------------------------------

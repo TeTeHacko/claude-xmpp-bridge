@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.21] - 2026-10-21
+
+Fix agent-to-agent messages that silently vanished or were never submitted in GNU Screen sessions.
+
+### Fixed
+- **Long messages were dropped without any error.** GNU Screen (5.0.2) discards a `screen -X` command longer than its internal buffer but still exits 0: a `stuff` with more than 746 bytes of text delivered nothing, only the following CR arrived. The log still said `Stuffed to screen`. With the ~200-byte relay envelope, every message over roughly 550 bytes of payload was lost. `ScreenMultiplexer.send_text` now sends the text in UTF-8-safe chunks of at most 256 bytes (escaped per chunk, so at most 512 bytes per command).
+- **Messages that arrived but stayed unsent in the prompt.** Claude Code treats input arriving in quick succession as one paste, and a CR inside that paste does not submit (it becomes a newline or is dropped), so a human had to press Enter. The text is now wrapped in bracketed-paste markers (`ESC[200~` … `ESC[201~`) and the CR follows the end marker. Measured on a throwaway Claude Code session: 3 of 3 messages submitted, compared with 0 of 3 for chunks 50 ms apart and 1 of 3 for a 0.3 s pause before the CR. The target application must support bracketed paste (Claude Code, OpenCode and bash readline do).
+
 ## [0.9.20] - 2026-10-02
 
 Make human XMPP input recognisable in the terminal, and stop cutting answers at 500 characters.
