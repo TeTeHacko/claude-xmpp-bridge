@@ -117,6 +117,7 @@ class XMPPBridge:
         # Background read-backs of screen deliveries (see _verify_delivery); kept
         # referenced so asyncio does not garbage-collect running tasks.
         self._verify_tasks: set[asyncio.Task[None]] = set()
+        self._hook_alerted: dict[str, float] = {}
 
     # --- XMPP message handling ---
 
@@ -428,6 +429,10 @@ class XMPPBridge:
     # an idle session, and before alerting that nothing picked it up.
     _HOOK_RETRIGGER_AFTER = 5.0
     _HOOK_ALERT_AFTER = 90.0
+    _HOOK_ALERT_AFTER_RUNNING = 900.0
+    _HOOK_ALERT_DEDUP = 900.0
+    _HOOK_POLL = 15.0
+    _monotonic = staticmethod(time.monotonic)
     _HOOK_EVENTS = ("UserPromptSubmit", "PostToolUse", "Stop")
 
     @staticmethod
@@ -491,21 +496,43 @@ class XMPPBridge:
         return ok
 
     async def _hook_watchdog(self, session_id: str) -> None:
+        """Re-trigger an idle session once; alert only when delivery is really stuck.
+
+        A running agent picks messages up at its next PostToolUse/Stop - which
+        can be many minutes away during one long tool call (seen 2026-10-21:
+        two false alerts while session 6 sat in a 3-minute wait loop). So the
+        alert limit depends on the state: 90 s when idle (the trigger did not
+        work), 15 min when running. One alert per session per 15 min, however
+        many messages are waiting.
+        """
         await asyncio.sleep(self._HOOK_RETRIGGER_AFTER)
         info = self.registry.get(session_id)
         if info and self.registry.inbox_count(session_id):
             await self._hook_trigger_if_idle(session_id, info)
-        await asyncio.sleep(self._HOOK_ALERT_AFTER - self._HOOK_RETRIGGER_AFTER)
-        info = self.registry.get(session_id)
-        pending = self.registry.inbox_count(session_id) if info else 0
-        if info and pending:
-            self.audit.log("HOOK_UNDELIVERED", session_id=session_id, pending=pending)
+        start = self._monotonic()
+        while True:
+            await asyncio.sleep(self._HOOK_POLL)
+            info = self.registry.get(session_id)
+            pending = self.registry.inbox_count(session_id) if info else 0
+            if not info or not pending:
+                return
+            running = (info.get("agent_state") or "") == "running"
+            limit = self._HOOK_ALERT_AFTER_RUNNING if running else self._HOOK_ALERT_AFTER
+            waited = self._monotonic() - start + self._HOOK_RETRIGGER_AFTER
+            if waited < limit:
+                continue
+            now = self._monotonic()
+            if now - self._hook_alerted.get(session_id, float("-inf")) < self._HOOK_ALERT_DEDUP:
+                return
+            self._hook_alerted[session_id] = now
+            self.audit.log("HOOK_UNDELIVERED", session_id=session_id, pending=pending, waited=int(waited))
             log.warning("%d message(s) for %s not picked up by any hook", pending, session_id)
             self._xmpp_send(
                 f"⚠ bridge: {pending} message(s) for window {info['window']} "
                 f"({short_path(info['project'])}) not picked up by the hooks "
-                f"after {int(self._HOOK_ALERT_AFTER)} s (state {info.get('agent_state')!r})"
+                f"after {int(waited)} s (state {info.get('agent_state')!r})"
             )
+            return
 
     def _handle_hook(self, req: dict[str, object]) -> dict[str, object]:
         """Socket ``hook``: hand pending messages to a Claude Code hook.

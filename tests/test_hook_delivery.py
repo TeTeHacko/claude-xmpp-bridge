@@ -107,19 +107,53 @@ class TestDeliverViaHook:
     async def test_watchdog_alerts_when_nobody_picks_up(self, MockXMPP, tmp_path):
         bridge, conn = _bridge(MockXMPP, tmp_path)
         bridge._HOOK_RETRIGGER_AFTER = 0
-        bridge._HOOK_ALERT_AFTER = 0
-        bridge.registry.update_state("s1", "running")
+        bridge._HOOK_POLL = 0
+        bridge.registry.update_state("s1", "idle")
         bridge.registry.inbox_put("s1", _env())
-        await bridge._hook_watchdog("s1")
+        clock = iter([0.0, 100.0, 100.0, 100.0])
+        bridge._monotonic = lambda: next(clock)
+        mux = MagicMock()
+        mux.send_text = AsyncMock(return_value=True)
+        with patch("claude_xmpp_bridge.bridge.get_multiplexer", return_value=mux):
+            await bridge._hook_watchdog("s1")
         conn.send.assert_called_once()
         assert "not picked up" in conn.send.call_args.args[1]
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_running_session_gets_15_minutes(self, MockXMPP, tmp_path):
+        """A long tool call is not a lost message: no alert at 100 s, alert at 15 min."""
+        bridge, conn = _bridge(MockXMPP, tmp_path)
+        bridge._HOOK_RETRIGGER_AFTER = 0
+        bridge._HOOK_POLL = 0
+        bridge.registry.update_state("s1", "running")
+        bridge.registry.inbox_put("s1", _env())
+        clock = iter([0.0, 100.0, 300.0, 950.0, 950.0])
+        bridge._monotonic = lambda: next(clock)
+        await bridge._hook_watchdog("s1")
+        conn.send.assert_called_once()
+        assert "950 s" in conn.send.call_args.args[1]
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    async def test_one_alert_per_session(self, MockXMPP, tmp_path):
+        bridge, conn = _bridge(MockXMPP, tmp_path)
+        bridge._HOOK_RETRIGGER_AFTER = 0
+        bridge._HOOK_POLL = 0
+        bridge.registry.update_state("s1", "running")
+        bridge.registry.inbox_put("s1", _env())
+        bridge._monotonic = lambda: 10_000.0
+        bridge._hook_alerted["s1"] = 9_900.0  # alerted 100 s ago
+        bridge._HOOK_ALERT_AFTER_RUNNING = 0
+        await bridge._hook_watchdog("s1")
+        conn.send.assert_not_called()
         bridge.registry.close()
 
     @patch("claude_xmpp_bridge.bridge.XMPPConnection")
     async def test_watchdog_quiet_when_delivered(self, MockXMPP, tmp_path):
         bridge, conn = _bridge(MockXMPP, tmp_path)
         bridge._HOOK_RETRIGGER_AFTER = 0
-        bridge._HOOK_ALERT_AFTER = 0
+        bridge._HOOK_POLL = 0
         await bridge._hook_watchdog("s1")
         conn.send.assert_not_called()
         bridge.registry.close()

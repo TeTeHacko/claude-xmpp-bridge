@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-10-21
+
+### Fixed
+- **False "not picked up" alerts.** A running agent takes its messages at the next `PostToolUse`/`Stop`, which can be minutes away during one long tool call. The test with the other sessions produced two XMPP alerts for a session sitting in a 3-minute wait loop, and the messages were delivered right after it. The watchdog now uses the agent state: 90 s when idle (the trigger did not work), 15 min when running. It sends at most one alert per session per 15 min, however many messages are waiting.
+
+### Verified
+- **Live test with the three other screen sessions**, which all had the hooks picked up while running. Round 1 went the old way (typed in, read back) and each session was upgraded to `+inbox` by its own next hook call. Round 2 arrived as hook output in all three: `UserPromptSubmit` after the trigger for the idle session, and `PostToolUse` for the two busy ones, with no trigger typed. All replies came back over `claude-xmpp-client relay` → hook.
+
 ## [0.11.1] - 2026-10-21
 
 Hook delivery switched on.
