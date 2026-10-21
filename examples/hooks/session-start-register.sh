@@ -25,5 +25,5 @@ claude-xmpp-client register "$(echo "$INPUT" | jq -c \
 	--arg win "$MUX_WIN" \
 	--arg backend "$BACKEND" \
 	--arg source "claude-code" \
-	--arg pv "hook" \
+	--arg pv "hook+inbox" \
 	'{session_id: .session_id, sty: $sty, window: $win, project: .cwd, backend: $backend, source: $source, plugin_version: $pv}')"

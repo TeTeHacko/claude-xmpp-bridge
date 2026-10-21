@@ -222,3 +222,21 @@ class TestRunHookCli:
     def test_garbage_stdin_is_silent(self):
         rc, out, calls = self._run("PostToolUse", "not json", [])
         assert rc == 0 and out == "" and calls == []
+
+
+class TestAutoUpgrade:
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_first_hook_call_upgrades_plain_hook_session(self, MockXMPP, tmp_path):
+        bridge, _ = _bridge(MockXMPP, tmp_path, pv="hook")
+        assert not bridge._hook_inbox_capable(bridge.registry.get("s1"))
+        bridge._handle_hook({"session_id": "s1", "event": "PostToolUse"})
+        assert bridge.registry.get("s1")["plugin_version"] == "hook+inbox"
+        assert bridge._hook_inbox_capable(bridge.registry.get("s1"))
+        bridge.registry.close()
+
+    @patch("claude_xmpp_bridge.bridge.XMPPConnection")
+    def test_opencode_not_upgraded(self, MockXMPP, tmp_path):
+        bridge, _ = _bridge(MockXMPP, tmp_path, pv="0.9.19", source="opencode")
+        bridge._handle_hook({"session_id": "s1", "event": "PostToolUse"})
+        assert bridge.registry.get("s1")["plugin_version"] == "0.9.19"
+        bridge.registry.close()

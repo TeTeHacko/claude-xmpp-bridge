@@ -438,7 +438,7 @@ Typing messages into a screen window was unreliable. Screen drops long `-X` comm
 | finishing a turn | `Stop` hook (`decision: block` with the messages as reason) | nothing |
 | idle, waiting for the user | `UserPromptSubmit` hook after a short trigger line (`hook_trigger` message) | only the trigger line, which carries no content |
 
-All three hooks run `claude-xmpp-client hook <Event>`. It takes about 70 ms, never fails the agent (any error means exit 0 with no output) and acknowledges messages only after printing them. The agent state (`running` / `idle`) comes from the same hooks. The trigger is never typed into a running session, and so never into a permission prompt. If no hook picks a message up within 90 s, the bridge sends an XMPP alert. Sessions that registered as plain `hook` (started before the hooks were installed; Claude Code loads hooks at start) keep the screen path.
+All three hooks run `claude-xmpp-client hook <Event>`. It takes about 70 ms, never fails the agent (any error means exit 0 with no output) and acknowledges messages only after printing them. The agent state (`running` / `idle`) comes from the same hooks. The trigger is never typed into a running session, and so never into a permission prompt. If no hook picks a message up within 90 s, the bridge sends an XMPP alert. Sessions registered as plain `hook` keep the screen path until their first hook call, which upgrades them to `+inbox`. Claude Code picks up new hooks in running sessions too.
 
 Activation order matters: install the three hooks in `~/.claude/settings.json` **before** switching `session-start-register.sh` to `hook+inbox`. Otherwise new sessions get messages queued that nothing reads.
 

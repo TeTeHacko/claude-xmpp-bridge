@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-10-21
+
+Hook delivery switched on.
+
+### Changed
+- **`session-start-register.sh` now registers `hook+inbox`.** The hooks are installed in `~/.claude/settings.json`.
+- **A session that calls the `hook` socket command is upgraded to `+inbox` on that first call.** Calling it proves the hooks are there. Claude Code 2.1.296 picks up new hooks in *running* sessions, which was seen right after the settings edit (contrary to the assumption in 0.11.0), so sessions registered as plain `hook` no longer need a restart. OpenCode sessions are never upgraded.
+
+### Fixed
+- Messages that sat unread in the inbox of Claude Code sessions (relays sent with a sender id were always queued plus a bare CR, which Claude Code ignores) are now delivered by the hooks. The first `PostToolUse` after activation delivered one from 20:42.
+
 ## [0.11.0] - 2026-10-21
 
 Deliver messages to Claude Code sessions through hooks instead of typing them into the terminal.

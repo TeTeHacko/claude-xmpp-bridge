@@ -375,6 +375,15 @@ class SessionRegistry:
             self._save_last_active()
             self._db.commit()
 
+    def set_plugin_version(self, session_id: str, plugin_version: str) -> bool:
+        """Change the recorded plugin version of a registered session."""
+        if session_id not in self.sessions:
+            return False
+        self.sessions[session_id]["plugin_version"] = plugin_version
+        self._db.execute("UPDATE sessions SET plugin_version = ? WHERE session_id = ?", (plugin_version, session_id))
+        self._db.commit()
+        return True
+
     def update_state(self, session_id: str, state: str, mode: str | None = None) -> bool:
         """Update the agent_state (and optionally agent_mode) for a registered session.
 

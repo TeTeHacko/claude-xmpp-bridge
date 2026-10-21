@@ -527,6 +527,15 @@ class XMPPBridge:
         event = str(req.get("event", ""))
         if event not in self._HOOK_EVENTS:
             return {"ok": False, "error": f"unknown hook event: {event}"}
+        # A session that calls this has the hooks - proof, not a guess. Claude
+        # Code 2.1.296 picks up new hooks in *running* sessions (seen
+        # 2026-10-21 right after the settings edit), so sessions registered as
+        # plain "hook" before the edit are upgraded on their first hook call
+        # instead of waiting for a restart.
+        if info.get("source") in (None, "claude-code") and not self._hook_inbox_capable(info):
+            pv = info.get("plugin_version") or "hook"
+            self.registry.set_plugin_version(session_id, f"{pv}+inbox")
+            self.audit.log("HOOK_CAPABLE", session_id=session_id, plugin_version=f"{pv}+inbox", hook_event=event)
         pending = self.registry.inbox_peek(session_id)
         if event == "Stop" and not pending:
             self.registry.update_state(session_id, "idle")
