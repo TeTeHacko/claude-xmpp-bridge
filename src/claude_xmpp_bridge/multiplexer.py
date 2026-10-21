@@ -6,6 +6,9 @@ import asyncio
 import logging
 import os
 import re
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Protocol
 
 log = logging.getLogger(__name__)
@@ -92,6 +95,18 @@ def _split_utf8(text: str, max_bytes: int) -> list[str]:
     return pieces
 
 
+_WS_RE = re.compile(r"\s+")
+
+# How long to wait for ``screen -X hardcopy`` to write its file. The command
+# returns before the file exists (screen writes it asynchronously).
+_HARDCOPY_WAIT = 3.0
+
+
+def collapse_ws(text: str) -> str:
+    """Remove all whitespace - terminal line wrapping inserts newlines and indents."""
+    return _WS_RE.sub("", text)
+
+
 def _get_safe_env() -> dict[str, str]:
     """Return a minimal environment for safely executing subprocesses."""
     env = {}
@@ -175,7 +190,17 @@ class ScreenMultiplexer:
             return False
         chunks = _split_utf8(sanitize_text(text), _SCREEN_CHUNK_BYTES)
         # The markers are added after sanitize_text, which would strip the ESC.
-        for i, piece in enumerate([_PASTE_START, *map(_screen_stuff_escape, chunks), _PASTE_END]):
+        # They travel inside the first/last chunk, not as stuff commands of
+        # their own: on 2026-10-21 a real session (busy, tth's terminal
+        # attached, load ~3) received the start marker as a lone ESC followed
+        # by literal "[200~" - the paste still ended and submitted, but a split
+        # end marker would leave the CR inside the paste. One write per marker
+        # plus text gives that split fewer chances (not reproduced on a
+        # throwaway session, so this is a mitigation, not a proven fix).
+        pieces = [_screen_stuff_escape(c) for c in chunks] or [""]
+        pieces[0] = _PASTE_START + pieces[0]
+        pieces[-1] = pieces[-1] + _PASTE_END
+        for i, piece in enumerate(pieces):
             if i:
                 await asyncio.sleep(_INTER_CMD_DELAY)
             if not await _run_cmd(
@@ -235,6 +260,45 @@ class ScreenMultiplexer:
 
         log.info("Nudged screen %s window %s", target, window)
         return True
+
+    async def window_contains(self, target: str, window: str, needle: str) -> bool | None:
+        """Return whether *needle* is visible in the window (scrollback included).
+
+        ``send_text`` returning True only means screen accepted the commands -
+        on 2026-10-21 that was True for every message screen silently dropped.
+        This reads the window back with ``hardcopy -h`` and compares with all
+        whitespace removed (the app wraps lines). Returns None when the
+        window could not be read, so callers can tell "missing" from "unknown".
+        """
+        if not _TARGET_RE.match(target) or not re.fullmatch(r"[0-9]{1,4}", window):
+            return None
+        tmpdir = Path(tempfile.mkdtemp(prefix="bridge-hardcopy-"))  # 0700
+        path = tmpdir / "w.txt"
+        try:
+            if not await _run_cmd(
+                "screen",
+                "-S",
+                target,
+                "-p",
+                window,
+                "-X",
+                "hardcopy",
+                "-h",
+                str(path),
+                label="Screen hardcopy",
+            ):
+                return None
+            waited = 0.0
+            while not path.exists() and waited < _HARDCOPY_WAIT:
+                await asyncio.sleep(0.1)
+                waited += 0.1
+            if not path.exists():
+                return None
+            await asyncio.sleep(0.2)  # let screen finish writing
+            content = path.read_text(encoding="utf-8", errors="replace")
+            return collapse_ws(needle) in collapse_ws(content)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class TmuxMultiplexer:

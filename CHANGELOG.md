@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.22] - 2026-10-21
+
+Detect lost terminal deliveries instead of logging them as sent.
+
+### Added
+- **Delivery read-back for screen sessions.** `send_text` returning True only means screen accepted the command; on 2026-10-21 that was true for every message screen silently dropped. Two seconds after each delivery the bridge now reads the window back (`screen -X hardcopy -h` into a private temp directory, deleted afterwards) and looks for the message's `message_id`, or the last 40 non-whitespace characters, comparing with all whitespace removed because the app wraps lines. If it is missing, the bridge logs a warning, writes a `TERMINAL_SEND_UNVERIFIED` audit event and sends an XMPP alert. Successful checks write `TERMINAL_SEND_VERIFIED`. It only warns and never resends, because a duplicate in an agent's prompt is worse than a visible alarm. An unreadable window is reported as unknown, not as missing.
+
+### Changed
+- **Paste markers travel inside the first and last chunk** instead of as separate `stuff` commands. A real session (busy, with a human terminal attached, load around 3) once received the start marker as a lone ESC followed by literal `[200~`. The message still submitted, but a split end marker would have left the CR inside the paste. This could not be reproduced on a throwaway session, so it is a mitigation, not a proven fix; the read-back above is what would catch a repeat.
+
 ## [0.9.21] - 2026-10-21
 
 Fix agent-to-agent messages that silently vanished or were never submitted in GNU Screen sessions.

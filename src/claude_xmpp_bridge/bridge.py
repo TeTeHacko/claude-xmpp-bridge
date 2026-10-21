@@ -9,6 +9,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import signal
 import time
 import uuid
@@ -23,7 +24,7 @@ from .email_notify import send_email
 from .locks import project_matches, read_legacy_lock_hints, short_path
 from .mcp_server import BridgeMCPServer
 from .messages import Messages, format_generated_agent_message, load_messages
-from .multiplexer import get_multiplexer
+from .multiplexer import collapse_ws, get_multiplexer
 from .rate_limit import SOCKET_MAX_PER_MINUTE, RateLimiter
 from .registry import SessionInfo, SessionRegistry
 from .socket_server import SocketServer
@@ -83,6 +84,9 @@ class XMPPBridge:
         self._icons: dict[str | None, str] = {**DEFAULT_SOURCE_ICONS, **config.source_icons}
         # Rate limiter for socket requests (keyed by session_id or peer address).
         self._socket_rate_limiter = RateLimiter(SOCKET_MAX_PER_MINUTE)
+        # Background read-backs of screen deliveries (see _verify_delivery); kept
+        # referenced so asyncio does not garbage-collect running tasks.
+        self._verify_tasks: set[asyncio.Task[None]] = set()
 
     # --- XMPP message handling ---
 
@@ -340,6 +344,10 @@ class XMPPBridge:
                 text=text,
                 text_len=len(text),
             )
+            if hasattr(mux, "window_contains"):
+                task = asyncio.create_task(self._verify_delivery(mux, session_id, info, text))
+                self._verify_tasks.add(task)
+                task.add_done_callback(self._verify_tasks.discard)
         else:
             self.audit.log(
                 "TERMINAL_SEND_FAILED",
@@ -350,6 +358,63 @@ class XMPPBridge:
                 text_len=len(text),
             )
         return ok
+
+    # Read-back delay: long messages go out in chunks with 50 ms gaps, then the
+    # app has to render them.
+    _VERIFY_DELAY = 2.0
+
+    @staticmethod
+    def _delivery_needle(text: str) -> str:
+        """Pick a distinctive piece of *text* to look for in the window.
+
+        The relay envelope carries a unique ``message_id`` - use that. Otherwise
+        the last 40 non-whitespace characters (the end proves the whole text
+        arrived, not just the start).
+        """
+        m = re.search(r'"message_id":\s*"([0-9a-f]{6,})"', text)
+        if m:
+            return m.group(1)
+        return collapse_ws(text)[-40:]
+
+    async def _verify_delivery(self, mux: object, session_id: str, info: SessionInfo, text: str) -> None:
+        """Warn (log, audit, XMPP) when a delivered message is not in the window.
+
+        Exists because send_text's True only means "screen accepted the
+        command": on 2026-10-21 every relay message over ~550 bytes vanished
+        while the log said "Stuffed". Warning only - delivery is not retried,
+        a duplicate in an agent's prompt is worse than a visible alarm.
+        """
+        needle = self._delivery_needle(text)
+        if not needle:
+            return
+        await asyncio.sleep(self._VERIFY_DELAY)
+        try:
+            found = await mux.window_contains(info["sty"], info["window"], needle)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - a read-back must never break the bridge
+            log.exception("Delivery read-back failed for %s", session_id)
+            return
+        if found is None:
+            log.info("Delivery read-back unavailable for %s (window %s)", session_id, info["window"])
+            return
+        self.audit.log(
+            "TERMINAL_SEND_VERIFIED" if found else "TERMINAL_SEND_UNVERIFIED",
+            session_id=session_id,
+            project=info["project"],
+            window=info["window"],
+            needle=needle,
+            text_len=len(text),
+        )
+        if not found:
+            log.warning(
+                "Delivered text not found in screen %s window %s (needle %r) - probably lost",
+                info["sty"],
+                info["window"],
+                needle,
+            )
+            self._xmpp_send(
+                f"⚠ bridge: message {needle} to window {info['window']} ({short_path(info['project'])}) "
+                f"not found in the window after delivery - probably lost ({len(text)} chars)"
+            )
 
     async def _nudge_session(
         self,
